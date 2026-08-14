@@ -1,5 +1,11 @@
 # Docs vs Code — prose audit
 
+> **COVERAGE: 81 of 81 live docs under `docs/` opened and read against the source**
+> (plus `CLAUDE.md`). `docs/archive/` is excluded by design. Part 1 + Part 2 (below)
+> read 49 of them; **Part 3 (2026-08-14, second pass) read the remaining 32** and is
+> where the coverage fraction is derived mechanically. Neither pass can be trusted to
+> have read a doc it does not cite by path.
+>
 > **Last verified: 2026-08-14** against `docs/context-packs/HOOKKA-GOTCHAS.md`,
 > `docs/BUG-CLASSES.md`, `docs/DEV-OPERATING-FRAMEWORK.md`, `docs/PLAYBOOKS.md`,
 > `docs/CODEBASE-MAP.md`, `CLAUDE.md`, `docs/API.md`, `docs/BUG-HISTORY.md` (all 576 entries)
@@ -24,7 +30,9 @@ only**), `check-docs-freshness.mjs` (stamps, duplicate bug ids), `gen-api-docs.m
 (API.md is generated). This audit is the layer none of them reach: **prose that asserts
 behaviour**.
 
-**Scope.** The 80 live docs under `docs/` (excluding `docs/archive/`) plus `CLAUDE.md`.
+**Scope.** The 81 live docs under `docs/` (excluding `docs/archive/`) plus `CLAUDE.md`.
+Parts 1 and 2 cover **49** of them; **Part 3 covers the other 32** — see the coverage
+fraction at the top.
 `docs/BUG-HISTORY.md` is an **append-only ledger** — a dated entry describing what was true
 then is correct history, not a stale claim; only header/body status contradictions were
 looked for there.
@@ -266,3 +274,220 @@ Severity is "what a reader who believed it would do".
   `notifySupplierPoSubmitted`, and sends no mail — so revoking the key cannot force a retry and
   no `[email stub]` string exists anywhere. **Fix the runbook to describe the stub, or wire the
   real send?** The second is a product decision.
+
+---
+
+# Part 3 — the SECOND pass: the 32 docs Part 1 and Part 2 never opened
+
+> **Added 2026-08-14** (branch `docs/docs-audit-pass-2`). Same standard of proof:
+> every row below was verified by opening the source file and reading the logic.
+> **No claim about live production state appears here** — this session had no DB
+> credentials, so anything needing live data is marked UNMEASURED.
+
+## Coverage, as a fraction
+
+**81 of 81 live docs under `docs/` have now been opened and read against the source**
+(plus `CLAUDE.md`). `docs/archive/` is out of scope by design.
+
+The first pass cited **49** of them by path. This pass opened the remaining **32**
+(31 docs + this file). The split was derived mechanically, not estimated:
+
+```
+git ls-files docs | grep '\.md$' | grep -v '^docs/archive/'   → 81
+    ...of which cited by path in this file before this pass   → 49
+    ...opened for the first time by this pass                 → 32
+```
+
+Four of the 32 had been touched by Part 2 *by basename only* and for one narrow
+claim each — `modules/{employees,reports,rnd,sales}.md` (D43's `worker.ts` mount
+lines), `design/{README,CHANGELOG-zh}.md` (D63) and `ONBOARDING-PATH.md` (D45/D50).
+**Their prose had still never been read**, and three of them carried a *fresh*
+`Last verified: 2026-08-14` stamp over anchors that were wrong the same day. That
+is the worst state a doc can be in, and it is what motivated the gate below.
+
+## The headline: the drift class is now GATED, not just re-derived
+
+Part 2's **J8** asked whether to re-derive the module guides' `file:line` anchors on
+a schedule or to stop hand-carrying them. It deferred the bulk fix because *"it will
+re-rot within days unless the structure changes."*
+
+Measured this pass: **47 of the anchors in the 15 module guides' "Key functions"
+tables had drifted off the symbol they name** — up to **193 lines** (`ReportsPage`),
+and in `docs/modules/reports.md`, `employees.md`, `sales.md` and `service-repair.md`
+the drift had happened *since* Part 2 restamped them, on the same day, because
+`#319`, `#323` and `#327` landed in between.
+
+This is not a doc problem that can be fixed by fixing docs. Every guide opens with
+**"Never grep the whole repo — use the file:line below."** `grep` is banned here
+because it times out on 2,122 files, so a reader who obeys the guide has no cheap
+way to notice the offset is wrong: **the doc has removed the reader's fallback.**
+
+So the third answer to J8: **keep the anchors, and let CI hold them to the source.**
+
+- All **47** drifted anchors re-derived from source and corrected (table rows *and*
+  the prose that repeats the same offsets — 78 replacements in 11 guides).
+- New **`tests/docs-module-guide-anchors.test.mjs`** — three gates over every
+  anchored row of all 15 guides: the file exists, the offset is inside the file, and
+  the offset lands within 8 lines of the symbol it names (identifier, or the route
+  registration for an HTTP-handler row).
+- Proved RED by restoring one anchor (`sales.md` → `sales-orders.ts:1503`) with
+  bytes-changed-on-disk asserted first, EOL-agnostic. **Note for the next author:**
+  the first RED attempt silently passed because the replacement hit a *prose*
+  mention rather than the table row the gate reads. A `\n`-anchored or
+  wrong-target edit is a false all-clear — target the table row.
+- `scripts/check-codebase-map.mjs` covers `CODEBASE-MAP.md` only;
+  `tests/docs-required-reading-truth.test.mjs` (added by Part 1, D16) covers the five
+  required-reading docs. The 15 module guides had **no gate at all** until now.
+
+**Dated history was deliberately not rewritten.** The `> Corrected 2026-08-13:` lines
+record what was true then; the bulk pass touched five of them and they were restored
+verbatim.
+
+---
+
+## 3a — Contradictions found and FIXED
+
+| # | Doc | The claim | What the code actually does | Sev | Fix |
+|---|---|---|---|---|---|
+| **D65** | `docs/AUDIT-DETAIL-PAGES.md` header (×1, load-bearing) | *"Nothing in it had been fixed as of this verification — 'Nothing was changed' is still accurate, and **D1–D13 are all open**"* | **This document's own STATUS section says the opposite**, and has since 2026-08-13: D1, D4, D5, D9, D12 SHIPPED, and its own D3 row is ✅. Re-measured: `service-cases/detail.tsx:311` fetches `?fields=case-pipeline&scope=`; `cached-fetch.ts:467` exports `isUnknownOutcome`; `procurement/detail.tsx:166` and `suppliers/detail.tsx:238` both gate on an edit flag and pass `?buckets=`. **A doc contradicting itself, with the false half in the header a reader sees first.** | **HIGH** | ✅ header rewritten to the measured split (6 shipped / 8 open) and pointed at STATUS |
+| **D66** | same doc, header ×2 | `void ttlSec` is at `cached-fetch.ts:478`; `openPOs[po.id] ?? true` at `document-chain-map.tsx:416` | `:589` (and again `:706`); `:431` (and `:512`). `:478` is now inside an unrelated comment block. This is the doc's single load-bearing mechanism proof ("the cache never suppresses the refetch"), 111 lines off. | med | ✅ |
+| **D67** | `docs/DASHBOARD-DATA-AUDIT.md` (PCB row) | *"`payslips.ts:230` — `pcb: pcbOn ? 0 : 0` … the per-worker `pcbEnabled` toggle does nothing … any worker above the PCB threshold has an **overstated net pay printed on a payslip**"* | **Fixed and shipped.** The literal exists nowhere but in comments recording its removal. `src/lib/pcb.ts:352` exports `resolvePcb()`; `payslips.ts:312` calls it; `pcbSen` (`:146`) and dual-keyed `pcbStatus` (`:147-151`) are persisted; migration `0229_pcb_tax_profile.sql`. The comment at `payslips.ts:309-311` names BUG-2026-08-13-121. **The owner is told his payslips overstate every taxable worker's net pay. They do not.** | **HIGH** | ✅ row + Part-6 owner question closed |
+| **D68** | same doc (leave row) | *"Two hardcoded literals with **no entitlement column anywhere** (grepped `src/api` and both migration trees: zero hits). The office says 8 days, the phone says 14 … 'Remaining' never resets on 1 Jan"* | **Three present-tense claims, all false.** Both literals are gone (`employees.tsx:10198`, `worker.ts:2526` carry the removal comments). Office (`leaves.ts:153-156`) and phone (`worker.ts:2576-2577`) read `entitlementDays` from ONE module, `src/lib/leave-entitlement.ts`, whose `resolveEntitlementDays` (`:266`) reads a real per-worker column with a shared fallback; the balance carries a `leaveYear` (`:296-335`). | **HIGH** | ✅ row + Part-6 owner question closed; the true remaining gap (accrual / carry-forward) left pointing at `ERP-FEATURE-GAP.md` |
+| **D69** | same doc (forgotten-punch row + Part 4 item 1) | *"The `× 0.85` fabrication has THREE sites … `worker.ts:939` and `:1178` … **Not edited here on purpose** … Whoever merges must confirm they are covered"* | All three closed. `autoCloseForgottenPunch` (now `worker.ts:961-1000`) writes `productionTimeMinutes = NULL, efficiencyPct = NULL` (`clearMetrics`, `:982-984`) under a comment naming BUG-2026-08-13-103. `grep "0\.85"` over `worker.ts` + `attendance.ts` returns **comments only** (`worker.ts:1217`, `:1534`; `attendance.ts:17,24,26,192`). **The doc also contradicted its own S1 block**, which already recorded the fix in #323. | **HIGH** | ✅ row + the standing merge instruction discharged; the still-true half (synthetic clock-out invisible because the table renders no notes column) kept |
+| **D70** | same doc, Part 4 item 4 | *"`POST /api/supplier-materials` persists `leadTimeDays: … \|\| 7` and `moq: … \|\| 1` (`:206,208`) … a user who types 0 gets **1** written"* | `supplier-materials.ts:216` is `\|\| 0` and `:218` is `\|\| 0`. Both fall back to 0 — which this same document defines as UNSTATED. The two writers no longer disagree. | **HIGH** | ✅ closed as code; the **data** question (rows the old writer already wrote) kept and marked **UNMEASURED** |
+| **D71** | `docs/AUDIT-INTERACTION-COST.md` §5 (×3 + table) | *"**Ten** sites still declare `columns` as a bare array literal inside the component body"* + a ten-row table + *"Not fixed here. **Ten files**"* | **Twelve.** Enumerated every `const …: Column<…>[] = [` in `src/pages` + `src/components` and classified each as module-scope / `useMemo`-wrapped / bare-in-component. Missing: **`employees.tsx:4877`** (fed to `<DataGrid columns={columns}>` at `:5260`) and **`employees.tsx:5610`** (`columns={itemColumns}` at `:5985`). A reader runs "the ten-file sweep", ships it, and closes the class with two Employees grids still re-sorting on every toast. | **HIGH** | ✅ count + table + the "Cleared" note (inventory's three really are module-scope at column 0; `employees.tsx:3939` really is `useMemo`-wrapped) |
+| **D72** | `docs/STORAGE-SETUP.md` "What this delivers" | *"**Today**, attachments … have **no durable home** — they're either inlined in DB blobs or live on someone's desktop"*, framing `/api/files` as an unactivated scaffold | `/api/files` is live, shipped, load-bearing product: **20 modules** under `src/pages` + `src/components` consume it (announcement media, product/customer documents via `resource-documents.tsx` `:89/:137/:163/:246-278`, QC photos, scanned supplier POs, the `/m` screens). **The doc also contradicts itself at Step 4**, which says `SUPABASE_PROJECT_REF` is *"already set on the Cloudflare Pages dashboard for prod"*. Its Step-5 "rollback: unset either secret, the route returns 503 cleanly" is therefore an **outage of every attachment surface**, presented as a toggle. | **HIGH** | ✅ rewritten; the rollback re-labelled |
+| **D73** | `docs/AGENTS-BLUEPRINT.md` capability table | *"**66 个只读工具**"* | **69**, counted over the `TOOLS` array (`assistant-tools.ts:6692`) — and **six are not read-only**: `agentControlTool` (`:6368` → `setAgentControl` `:6418`, global kill switch `:6431`, run_now), `teachAgentTool` (`:6495`, persists standing rules), `setCapacityTool` (`:6583`, pins department capacity), plus `generateCsv/Excel/PdfTool`. | med | ✅ |
+| **D74** | same doc, permissions row | *"权限/审计 ✅ 已有 … **写动作全部走审批**"* — the doc's own 铁规 #1 | Contradicted by D73's tools, which **write directly from chat with no proposal and no approval**, and by `assistant-tools.ts:6400-6403`, which records the owner opening pause/resume/auto_on/auto_off/run_now **and teaching** to all staff (2026-07-28); only the global kill switch stays SUPER_ADMIN. A **security-posture claim, stated as absolute, with a documented carve-out.** | **HIGH** | ✅ narrowed to "business data writes", with the exception named as owner-authorised, not a defect |
+| **D75** | same doc, §11 self-scheduling | *"GH Actions **每 30 分钟** 发一个哑心跳 (`agent-heartbeat.yml`)"* | Both halves wrong. `agent-heartbeat.yml:32` is `7,27,47 * * * *` (three beats/hour), and since 2026-07-17 that workflow is **only a fallback** — its own header (`:26-31`) records that the reliable driver is a separate Cloudflare Cron Worker, `agent-heartbeat-worker/` (`wrangler.toml:51` = `*/30` + `*/5`), because GitHub cron drifted **2–3.5 hours**. Someone debugging "the agent didn't run" checks Actions and never learns the CF Worker exists. | med | ✅ |
+| **D76** | same doc, §14 Console | *"11 张卡（**4 现役 + 7 蓝图**）"* | 11 still holds, but the split is **6 live + 5 planned**: `AGENT_FAMILIES` (`agent-console.ts:28-36`) = PRODUCTION, DELIVERY, CS, EMPLOYEE, SERVICE, PROCUREMENT. `src/api/lib/employee-agent.ts` and `service-agent.ts` both exist — two of the doc's roadmap items shipped. | low | ✅ (dated as "today 6+5; was 4+7 on 2026-07-12") |
+| **D77** | `docs/SHEETS-SYNC.md` "What is NOT hooked" | lists `POST /api/production-orders/:poId/regen-job-cards` and `POST /api/sales-orders/regen-job-cards` | **Both DELETED 2026-05-09.** `grep -rn "regen-job-cards" src/` returns only the two removal comments at `production-orders.ts:1859-1860` — zero registrations, zero callers. Regeneration now goes through `createProductionOrdersForOrder({ appendOnly: true })`, which is **also** un-hooked, so the warning is right about a *different* entry point. | med | ✅ |
+| **D78** | `docs/SHEETS-SYNC.md` env section | *"**All three** optional during rollout — when **any** is missing the helpers no-op silently and the routes return 503"* | They do not gate as one unit. `GOOGLE_SHEETS_SA_KEY` + `SHEETS_SPREADSHEET_ID` gate the ERP→Sheets helpers (`sheets-sync.ts:106-120`, `:219-223`); `SHEETS_SYNC_SECRET` gates **only** the Sheets→ERP webhook (`routes/sheets-sync.ts:70-83`). Set the first two and not the third and ERP→Sheets goes live while Sheets→ERP 503s — a half-configured state the doc says is impossible. | low | ✅ |
+| **D79** | `docs/SHEETS-SYNC.md` HMAC section | the drift check lives in `buildWebhookHmacPayload` / `verifyWebhookSignature` in `src/api/lib/sheets-sync.ts` | Neither lib function sees the timestamp. `WEBHOOK_TIMESTAMP_WINDOW_MS = 5 * 60 * 1000` is at `src/api/routes/sheets-sync.ts:55`, applied at `:106-116`, and it fires **before** signature verification at `:146`. Someone debugging a 401 in the lib file will not find it. | low | ✅ |
+| **D80** | `docs/PRE-DEPLOY-CHECKLIST.md` | *"The PR template MUST include … 'Schema diff verified against production' + 'Critical paths verified end to end'. The reviewer MUST refuse to merge until **both checkboxes** are filled."* | `.github/PULL_REQUEST_TEMPLATE.md` contains **neither string**. It has `## Impact check`, `## Production-state claims` and `## Testing`. The reviewer is told to enforce checkboxes that do not exist, so the rule silently enforces nothing. | med | ✅ restated as "does not today — paste by hand, or add the fields" |
+| **D81** | `docs/modules/employees.md` core flow 3 | *"`payroll.ts POST /` **:137** is the run-header guard (blocks double-generate)"* | `POST /api/payroll` is **DISABLED**: after the `payroll:create` check it returns **501** unconditionally (`payroll.ts:125-139`), because it *"invented overtime hours with a random number generator instead of reading attendance"*; its own header calls it "a legacy duplicate". It guards nothing. Payroll generates only via `POST /api/payslips`. The file is **205 lines**, not the 308 the same doc claims. | **HIGH** | ✅ |
+| **D82** | `docs/MFRS-GAP-ANALYSIS.md` §MFRS 119 | *"payslips compute the full statutory split incl. employer EPF/SOCSO/EIS + PCB (`payroll.ts:41-47`)"* | The **conclusion is right, the citation points at a dead file**: `payroll.ts:41-47` is a `PayrollRow` **type declaration** in the 501-disabled route. The real computation is `calcStatutory` (`payslips.ts:295`) + `resolvePcb` (`src/lib/pcb.ts:352`). The doc's own header disclaims *line* drift, not a wrong *file*. | med | ✅ |
+| **D83** | `docs/ISO-9001-BUILD-PLAN.md`, `docs/ISO-9001-GAP-ANALYSIS.md`, `docs/MFRS-GAP-ANALYSIS.md` | *"`migrations-postgres/` (**244** files)"* — three times | **252** files as at 2026-08-14; newest is `0230_mrp_on_order_and_moq.sql`, and `0229` is still shared by two files. **D42 corrected this exact figure in three docs and missed these three** — including `ISO-9001-GAP-ANALYSIS.md`, which Part 2 *had* opened (D60). This is `BUG-CLASSES`'s own recurring shape: the fix repaired only the instances in front of the author. | med | ✅ all three |
+| **D84** | `docs/context-packs/frontend.md` rollout list | `src/pages/production/tracker.tsx` listed as a page still needing responsive work | **Deleted.** `/production/tracker` is a `<Navigate to="/planning?tab=tracker">` redirect (`dashboard-routes.tsx:264`), and `global-search.tsx:120` records it as "a bare redirect since the tracker". **This doc's own header records fixing the identical trap twice** on 2026-08-13 (`pricing.tsx`, `in-transit.tsx`); the third instance survived the sweep. | med | ✅ (+ `dept.tsx` / `overview.tsx`, which exist and were missing) |
+| **D85** | `docs/play-store-publishing.md` step 4 | *"copy the SHA-256 … Paste it into **BOTH** entries of `assetlinks.json` (each app uses its own app's fingerprint)"* | Self-contradictory in one sentence. `assetlinks.json` holds two independent objects whose `_comment` fields each say *"paste **this app's** … SHA-256 here"*. Following the first half leaves the Worker TWA unverified and it opens with the browser bar — the exact failure the step exists to prevent. | low | ✅ |
+| **D86** | `docs/modules/reports.md` (×2, disagreeing with itself) | mount lines: header says `/api/dashboard/overview` `:1304`, body says `worker.ts:1303`; `/api/forecasts` `worker.ts:1345` | `worker.ts:1304` and `worker.ts:1346`. The doc gave two different numbers for one mount, and the forecasts mount is the **same ±1 drift D43 swept for** — it reached 12 guides and missed this line. | low | ✅ |
+| **D87** | 8 module guides, present-tense file sizes | `sales-orders.ts` 5626 · `_helpers.ts` 1452 · `consignment-orders.ts` 2815 · `products/index.tsx` 5,307 · `employees.tsx` 11,746 · `payroll.ts` 308 · `payslips.ts` 1353 · `workers.ts` 1126 · `worker.ts` 4130 · `attendance.ts` 381 · `leaves.ts` 243 · `department-performance.ts` 807 · `working-hour-entries.ts` 1640 · `scan.tsx` 3203 · `customers.ts` 795 · `auth.ts` 1201 · `auth-totp.ts` 546 · `purchase-orders.ts` 1177 · `reports.ts` 1016 · `forecasts.ts` 131 · `dashboard-overview.ts` 2249 · `compliance-report.ts` 1402 · `operations-report.ts` 1223 · `rd/detail.tsx` 3143 · `service-cases/detail.tsx` 3,506 | `wc -l` 2026-08-14: 5704 · 1462 · 2986 · 5,316 · 11,897 · **205** · 1625 · 1266 · 4220 · 553 · 354 · 848 · 1643 · 3218 · 803 · 1235 · 612 · 1190 · 973 · 155 · 2316 · 1519 · 1248 · 3176 · 3,600. | low | ✅ all 25 re-measured |
+| **D88** | *(gap, not a single doc)* | the module guides' `file:line` anchors had no mechanical gate | 47 drifted anchors across all 15 guides, up to 193 lines, several introduced **the same day** the guide was restamped. | **HIGH** | ✅ all 47 corrected + new `tests/docs-module-guide-anchors.test.mjs` (proved RED) |
+
+---
+
+## 3b — Checked and CONFIRMED STILL TRUE
+
+Recorded so the next reader does not re-derive them.
+
+- **`docs/ENGINEERING-ONBOARDING-SOP.md` — SOUND.** Every cited path exists; the
+  2026-08-13 correction about `docs/archive/MODULES.md` is right; its scope caveat
+  quotes `DEV-OPERATING-FRAMEWORK.md:146-147` verbatim.
+- **`docs/context-packs/{architecture,backend,core-flow,security}.md` — SOUND.**
+  Every "read first" file exists; **139** `app.route` mounts in `worker.ts` (exact);
+  `requireSuperAdmin` appears **9** times in `users.ts` (exact); all four named
+  security tests exist.
+- **`docs/design/README.md` — SOUND.** `useMediaQuery("(min-width: 720px)")` is at
+  `src/pages/m/MobileLayout.tsx:87`, exactly as cited; both `standalone/*.html` exist;
+  every listed design file is present.
+- **`docs/ENTERPRISE-ERP-ARCHITECTURE.md` — its UNVERIFIED banner holds.** **136**
+  route files (exact); `src/api/queues/` contains exactly `po-emission-consumer.ts`,
+  so "the only async lane" is right; no Redis / Kafka / OpenSearch / BFF anywhere.
+- **`docs/play-store-publishing.md` is otherwise unusually accurate** — both
+  `sha256_cert_fingerprints` are still the literal placeholder (so "Step 4 has never
+  been done" holds), package names and `start_url`s exact, `docs/play-assets/` holds
+  exactly the three named files, and `ios-build.yml` is `workflow_dispatch`-only,
+  unsigned, and calls the repo public in its own header.
+- **`docs/CANARY-DEPLOY.md` and `docs/PRE-DEPLOY-CHECKLIST.md`** — the canary branch
+  slug/URL shape, blocking-vs-non-blocking job order, absent D1 binding, both bound
+  Hyperdrives, and the three `isPreviewHostname` rules all verified. The note that
+  `check-schema-applied.mjs` parses only `CREATE TABLE`, runs post-deploy and
+  soft-skips without `DATABASE_URL` is **exactly right** (and is Part 2's D21).
+- **`docs/SHEETS-SYNC.md`'s mechanics** — all five `file.ts:NNN` refs in its header
+  are exact; 8 dept tabs on both sides; 13 columns A–M; editable columns I/J/K; the
+  canonical HMAC string; all three troubleshooting error strings verbatim.
+- **`docs/ONBOARDING-PATH.md`** — all 15 module guides named in its mental-model list
+  exist, and its `[[API]]`-replaces-`SYMBOLS` correction holds.
+- **`docs/AGENTS-BLUEPRINT.md`'s strongest claim (its header) holds in full** —
+  `promiseDelivery`, `procurementReadiness`, `materialAvailability`,
+  `transitDriftLearning`, `computeChainWithAssignments` and
+  `autoCreateDosForApprovedLoadPlans` all exist at the cited paths, both endpoints
+  carry the permissions it names, and the scheduler bounds (≤6 runs/day, ≥1h gap)
+  are exact.
+- **`docs/modules/{inventory,delivery,production,planning,dashboard,accounting,quality-warehouse}.md`**
+  — the Part-2 anchors that were re-derived then are still correct now, except the
+  five caught by the new gate (D88).
+
+---
+
+## 3c — COLLECTED: judgement calls, NOT decided here
+
+Per the owner's standing rule, a judgement call gets asked, not decided.
+
+- **J10 — `deploy.yml`'s PR bot comment still tells reviewers the canary shares
+  production's database.** `.github/workflows/deploy.yml:294` posts *"This branch is
+  wired to the same Hyperdrive (→ Supabase Postgres) and KV bindings as production"*,
+  and `:260` says *"Hyperdrive, KV, R2 bindings — all live in preview env"* (R2 was
+  retired 2026-04-27, `wrangler.toml:33-40`). `docs/CANARY-DEPLOY.md` exists
+  specifically to kill that belief — but reviewers read the bot comment, not the doc.
+  **This is a workflow string, not a doc**, so it was recorded rather than edited:
+  changing what the deploy pipeline tells every reviewer is the owner's call. Fix the
+  string, or have the doc explicitly disown that line?
+- **J11 — the `docs/DASHBOARD-DATA-AUDIT.md` summary counts disagree with its own
+  tables.** It says *"21 fabricated figures, 24 mislabelled ones, 15 places where a
+  clean number means 'cannot see'"*; its tables hold 22 / 36 / 19 rows. A reader
+  working the summary as a checklist stops twelve rows short of Part 2b. Re-count and
+  restate, or drop the summary numbers and point at the tables? (Not fixed here: the
+  four rows this pass corrected change the counts again, and the right total depends
+  on whether a closed row still counts.)
+- **J12 — roughly 45 of `DASHBOARD-DATA-AUDIT.md`'s 77 table rows remain unverified.**
+  This pass opened every row it reports on, plus the ones listed sound. **Four of the
+  rows checked turned out to be closed by a shipped fix**, so the unchecked remainder
+  should be treated as suspect rather than trusted. Schedule a row-by-row pass, or
+  restamp the file with an explicit "rows N..M unverified" scope line?
+- **J13 — `AUDIT-INTERACTION-COST.md`'s LOCAL build artefacts.** It cites
+  `pdf-D0Z4EJlb.js` and `detail-VI76U_z1.js` by chunk hash. Those names do not survive
+  a rebuild, so the figures are unreproducible by construction. Re-state as
+  "the PDF chunk" without the hash, or accept them as one-build snapshots?
+- **J14 — `ENTERPRISE-ERP-ARCHITECTURE.md` §6 lists as "long-term (2-6 months)" two
+  things that substantially exist:** §6.2 hard multi-tenant boundaries (`tenant.ts`,
+  `withOrgScope:146`, `getOrgId` on every `/api/files` query) and §6.3 posting engine
+  + immutable accounting journal (`journal-hash.ts`, append-only ledger, hash chain).
+  §6.4 MDM is genuinely still a gap — the shipped `mdm.ts` is **detection-only**, not
+  golden records. Annotate the two as partially shipped, or leave §6 as a pure
+  aspiration list? Its UNVERIFIED banner arguably already covers this.
+- **J15 — `gen-api-docs.mjs --check` reports a FALSE "stale" in a fresh worktree.**
+  `CLAUDE.md` tells every session to trust `--check` before reading `docs/API.md`. In
+  a newly-created worktree it printed *"docs/API.md is stale"* while `git diff`
+  showed **zero** tracked change — the generator writes LF, the repo stores CRLF, and
+  the comparison is byte-wise. Regenerating produced no diff at all. Normalise EOLs
+  inside the check, or document the false positive? (Left alone: it is a script
+  change, and a wrong "fix" here silences a real staleness signal.)
+
+---
+
+## 3d — What this pass did NOT verify, and why
+
+Stated plainly, because a gap someone knows about is cheaper than one they discover.
+
+- **Every production figure in every audit doc is UNMEASURED from this branch.**
+  No DB credentials existed in this session. The row counts, byte sizes, timings and
+  percentages in `AUDIT-DETAIL-PAGES.md`, `AUDIT-INTERACTION-COST.md` and
+  `DASHBOARD-DATA-AUDIT.md` are dated historical measurements, correctly labelled as
+  such by their own provenance tables. Nothing here confirms or refutes them.
+- **`docs/WORK-TRACKER.md` (4,008 lines) was scanned, not read line by line.** It is
+  a running work log — dated entries describing what was true when written, the same
+  append-only shape as `BUG-HISTORY.md`. Its `file:line` refs were checked
+  mechanically (13 stale paths, all inside dated historical entries; `tests/db-schema.js`
+  is the recurring one — the real file is `tests/db-schema.json`). **Not rewritten**:
+  correcting history is a different act from correcting a claim.
+- **`AUDIT-INTERACTION-COST.md` §6's full print-feedback inventory** (13 "no feedback"
+  + 4 "has feedback" refs) was spot-checked only.
+- **The med/low `file:line` drift inside the three audit docs' finding rows** was
+  measured but not individually re-derived and applied — roughly 30 refs across
+  `employees.tsx`, `data-grid.tsx`, `cached-fetch.ts` and `accounting.ts`, each
+  ~15-150 lines stale while the finding itself still holds. The durable fix for that
+  class is the gate in D88, which currently covers the module guides only; extending
+  it to the audit docs' tables is the obvious next step and is **not done here**.
+
+---

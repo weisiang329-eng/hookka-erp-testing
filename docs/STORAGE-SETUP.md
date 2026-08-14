@@ -14,10 +14,20 @@ the admin sets `SUPABASE_PROJECT_REF` + `SUPABASE_SERVICE_KEY`.
 
 ## What this delivers
 
-A first-class file storage path for the ERP. Today, attachments
-(invoice PDFs, BOM technical drawings, SO supporting docs) have no
-durable home — they're either inlined in DB blobs or live on someone's
-desktop. With Supabase Storage wired:
+**⚠️ Corrected 2026-08-14 — this section described a scaffold; `/api/files` is
+live, shipped product.** It is consumed by **20 modules** under `src/pages` +
+`src/components` — announcement media (`announcements.tsx`), product and customer
+documents (`resource-documents.tsx`: list `:89`, upload `:137`, delete `:163`,
+download `:246-278`), QC photos (`quality.tsx`), scanned supplier POs
+(`scan-po-modal.tsx`, `scan-supplier-modal.tsx`), the `/m` screens, and more. The
+old text said attachments *"have no durable home — they're either inlined in DB
+blobs or live on someone's desktop"*, which also contradicted **this same document
+at Step 4**, where it states `SUPABASE_PROJECT_REF` is *"already set on the
+Cloudflare Pages dashboard for prod"*. Unsetting either credential is therefore an
+**outage of every attachment surface**, not a clean rollback.
+
+What the storage path gives the ERP (all of it 503s whenever the two credentials
+are unset):
 
 * `POST /api/files` accepts multipart uploads tied to a
   `(resourceType, resourceId)` pair.

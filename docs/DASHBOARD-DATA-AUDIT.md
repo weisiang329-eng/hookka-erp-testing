@@ -207,9 +207,9 @@ Lead items first: these are what the owner is looking at every day.
 | Screen | Label | Source (file:line) | Wrong output |
 |---|---|---|---|
 | `/employees` › Labor Cost | green **"Reconciled · 0 difference"** badge — on screen **and on the printed report** | `employees.tsx:9409-9423`, rendered `:9696`, printed `:9461` | `loadedOverhead = TP − U − P − W − S`, then `reconciledSum = P+W+S+loadedOverhead+U` ≡ `TP`. `reconcileDiff` is **algebraically 0 forever**. Overhead is a closing plug. **No input can turn it red.** Exact twin of the Stock-Summary ✓ (C15 row 26) — and the code comment beside it admits *"equals totalPayrollCostSen by construction"* while the badge tells the owner his payroll reconciles. |
-| `/employees` › Payroll, and **every payslip** | **PCB** line, `RM 0.00`, inside a tile captioned *"EPF (employee + employer), SOCSO, EIS **and PCB**"* | `payslips.ts:230` — `pcb: pcbOn ? 0 : 0` | Hardcoded to zero on **both** branches; the per-worker `pcbEnabled` toggle does nothing. PCB feeds `totalDeductions → netPay` (`payslips.ts:694`), so any worker above the PCB threshold has an **overstated net pay printed on a payslip**. |
-| Worker phone (LIVE) + `/employees` › Leave (hidden) | **Annual leave entitlement** and "Remaining" | `employees.tsx:10087` `{ ANNUAL: 8, MEDICAL: 14 }` vs `worker.ts:2481` `annualEntitlement = 14` | Two hardcoded literals with **no entitlement column anywhere** (grepped `src/api` and both migration trees: zero hits). The office says **8 days**, the worker's phone says **14** — same worker, two answers. The office side has no year filter (`leaves.ts:52-68` returns every row ever), so "Remaining" never resets on 1 Jan and eventually goes negative. Mitigation: the office tab is commented out of `TABS` (`employees.tsx:11111`); **the phone tile is live**. |
-| `/employees` › Attendance | **Clock Out** time for a forgotten punch | `worker.ts:936-957` `autoCloseForgottenPunch` | Writes a **synthetic** clock-out at shift end, `workingMinutes = workingHoursPerDay × 60`, `productionTimeMinutes = round(× 0.85)` and `efficiencyPct = round(0.85 × std / std × 100)` — **a literal 85%, always**. Flagged only in `notes`, and the table renders no notes column: an invented `18:00` is pixel-identical to a real punch. **This is a second writer of the 0.85 constant, outside `attendance.ts`** — see Part 4. |
+| `/employees` › Payroll, and **every payslip** | **PCB** line, `RM 0.00`, inside a tile captioned *"EPF (employee + employer), SOCSO, EIS **and PCB**"* | ~~`payslips.ts:230` — `pcb: pcbOn ? 0 : 0`~~ | ✅ **FIXED — re-measured 2026-08-14, do NOT re-open.** The literal `pcbOn ? 0 : 0` exists nowhere in the tree except comments recording its removal. `src/lib/pcb.ts:352` exports `resolvePcb()`; `payslips.ts:312` calls it, with `pcbSen` (`:146`) and a dual-keyed `pcbStatus`/`pcb_status` (`:147-151`, migration `0229_pcb_tax_profile.sql`). The comment at `payslips.ts:309-311` names BUG-2026-08-13-121 / C15 row 36. Net pay is no longer overstated by construction. |
+| Worker phone (LIVE) + `/employees` › Leave (hidden) | **Annual leave entitlement** and "Remaining" | ~~`employees.tsx:10087` vs `worker.ts:2481`~~ | ✅ **FIXED — re-measured 2026-08-14, do NOT re-open.** Both literals are gone; `employees.tsx:10198` and `worker.ts:2526` each carry a comment recording their removal. Office (`leaves.ts:153-156`) and phone (`worker.ts:2576-2577`) now read `entitlementDays` from ONE shared module, `src/lib/leave-entitlement.ts`, whose `resolveEntitlementDays` (`:266`) reads a real per-worker column (`annualLeaveEntitlementDays ?? annual_leave_entitlement_days`, likewise medical) with a single shared fallback. The balance carries a `leaveYear` (`:296-335`), so the 1-Jan reset exists. **All three sub-claims — "no entitlement column anywhere", the 8-vs-14 split, and "never resets" — are false today.** |
+| `/employees` › Attendance | **Clock Out** time for a forgotten punch | `worker.ts:961-1000` `autoCloseForgottenPunch` | ✅ **the 0.85 half is FIXED — re-measured 2026-08-14.** The UPDATE now sets `productionTimeMinutes = NULL, efficiencyPct = NULL` (`clearMetrics`, `worker.ts:982-984`) under a comment naming BUG-2026-08-13-103. `grep 0.85` over `worker.ts` + `attendance.ts` returns **comments only** (`worker.ts:1217`, `:1534`; `attendance.ts:17`, `:24`, `:26`, `:192`) — no live arithmetic at any of the three sites Part 4 named. This row also contradicted this file's own S1 block, which already said the `× 0.85` fabrication was fixed in #323. **Still true and still open:** the synthetic clock-out itself (`workingMinutes = workingHoursPerDay × 60`, the owner's stated forgotten-punch rule) is flagged only in `notes` and the table renders no notes column, so an invented `18:00` is pixel-identical to a real punch. |
 | Morning brief §5 (emailed) | *"CNC speed drift: BEDFRAME **actual** 45m/set vs configured 8m (+466%)"* | `production-brief.ts:240` `SUM(COALESCE(jc.actualMinutes, jc.estMinutes,0))` vs `planning-capacity.ts:204-206` constants | Per S1, "actual" IS the BOM standard. So this compares **one config against another config**, is constant per category, and can never move with real cutting speed. It fires whenever \|drift\| > 25%, which it permanently is (`production-brief.ts:666`). The Command Center tile carrying this number was deleted on 2026-08-05 for reading *"BEDFRAME speed +466%"* (`dashboard-b/index.tsx:1202`) — **the email was never touched.** |
 | `/finance-dashboard` › Production Salary | **TOTAL** and **%** for a month whose payroll is not yet posted | `accounting.ts:10415` + `finance-dashboard.tsx:866` | Payslips exist as soon as payroll runs; GL 750-x only after the manual "post labour" (`accounting.ts:9455`). In that window the chart shows real per-department wages while the TOTAL prints `RM 0` / `0.00%` — *"we paid nothing"*, not *"not posted yet"*. |
 | `/finance-dashboard` › Cash Flow | **Money in / out / Net / Operating / Investing / Financing** on a forecast bucket | `accounting.ts:10613-10630` (reduce over a seeded `{operating:0,…}`) | `cashFlow` is never null, so a future month renders `RM 0` on every cash line — while the **P&L card on the same page** correctly renders `-` for the same month. Two cards, one period, one of them asserting zero. |
@@ -303,16 +303,16 @@ from a query that structurally cannot observe the problem.
 
 ## Part 4 — two things found outside this audit's scope, reported not touched
 
-1. **The `× 0.85` fabrication has THREE sites, and two are outside
-   `attendance.ts`.** `src/api/routes/worker.ts:1178` (worker PWA clock-out) and
-   `:939` (`autoCloseForgottenPunch`) both write
-   `productionTimeMinutes = round(minutes × 0.85)` into `attendance_records`,
-   and `:940` derives `efficiencyPct` from it — which on the auto-close path
-   reduces to **a literal 85%, for every forgotten punch, forever**. A fix
-   scoped to `attendance.ts:332` alone leaves the constant alive on the other
-   write path. **Not edited here on purpose:** it is one fix, and two agents
-   editing one constant is how a half-fix ships. Whoever merges must confirm
-   `worker.ts:939` and `:1178` are covered.
+1. ~~**The `× 0.85` fabrication has THREE sites**~~ — ✅ **CLOSED, all three.**
+   Re-measured 2026-08-14: `grep -n "0\.85"` over `src/api/routes/worker.ts` and
+   `src/api/routes/attendance.ts` returns **comments only** (`worker.ts:1217`,
+   `:1534`; `attendance.ts:17`, `:24`, `:26`, `:192`) — no live arithmetic at any
+   site. `autoCloseForgottenPunch` (now `worker.ts:961-1000`) writes
+   `productionTimeMinutes = NULL, efficiencyPct = NULL` (`clearMetrics`,
+   `:982-984`). The merge instruction that followed ("whoever merges must confirm
+   `worker.ts:939` and `:1178` are covered") is **discharged** — leaving it standing
+   sends the next reader hunting a constant that is gone, in the one file whose S1
+   block already said so.
 
 2. **`efficiency-report.ts:289` divides by all `working_hour_entries` with no
    `isProduction` filter**, while its own header claims it mirrors
@@ -330,11 +330,15 @@ from a query that structurally cannot observe the problem.
 
 4. **The MOQ / lead-time fabrication has a WRITE side too, and it is the worse
    half.** `POST /api/supplier-materials` persists
-   `leadTimeDays: Number(body.leadTimeDays) || 7` and `moq: Number(body.moq) || 1`
-   (`src/api/routes/supplier-materials.ts:206,208`). A binding created through that
-   form can never hold 0, and a user who deliberately types 0 gets **1** written. The
-   PUT path (`:337,341`) is honest and passes the value through, so the two writers
-   disagree. This matters because a read-side "—" cannot undo a literal already in
+   ~~`leadTimeDays: … || 7` and `moq: … || 1`~~ — ✅ **FIXED, re-measured
+   2026-08-14:** `src/api/routes/supplier-materials.ts:216` is
+   `leadTimeDays: Number(body.leadTimeDays) || 0` and `:218` is
+   `moq: Number(body.moq) || 0`. Both now fall back to **0**, which this document's
+   own corrected premise (the MOQ/lead-time row above) defines as UNSTATED, so the
+   POST and PUT writers no longer disagree in the way described. **What remains is a
+   DATA question, not a code one:** whether rows written by the old `|| 7` / `|| 1`
+   writer still carry a fabricated 7 / 1. That is **UNMEASURED** — it needs a prod
+   query this branch cannot run. This matters because a read-side "—" cannot undo a literal already in
    the table: BUG-2026-08-13-145 makes the MRP page stop *inventing* 50 and 14, but
    any row this form wrote will keep reading as a stated 7 / 1. **Not edited here on
    purpose** — it needs an owner ruling on what a blank field should mean (refuse
@@ -388,10 +392,15 @@ provable defect that can be fixed unilaterally.
 2. **Is real production time going to be measured at all?** Every efficiency
    figure in the system is standard-vs-clocked until something records a
    duration. Until then no tile can answer "did this card overrun?".
-3. **PCB** — implement the calculation, or remove PCB from the tile caption and
-   the payslip so `netPay` stops being overstated?
-4. **Annual leave entitlement** — 8 or 14? It needs a column, and the year reset
-   needs to exist. Today the office and the phone disagree.
+3. ~~**PCB**~~ — ✅ **answered in code, 2026-08-14.** `resolvePcb`
+   (`src/lib/pcb.ts:352`) is wired into `payslips.ts:312` with a stored
+   `pcbSen`/`pcbStatus` (migration `0229_pcb_tax_profile.sql`). No owner decision
+   outstanding.
+4. ~~**Annual leave entitlement** — 8 or 14?~~ — ✅ **answered in code,
+   2026-08-14.** `src/lib/leave-entitlement.ts` resolves entitlement from a real
+   per-worker column and carries a `leaveYear`; office and phone read the same
+   module. Accrual and carry-forward remain genuinely absent (see
+   `ERP-FEATURE-GAP.md`), but the 8-vs-14 split and the missing reset are closed.
 5. **`freeCashFlow: cf.operating`** (`accounting.ts:10692`) carries the comment
    *"owner: treat as no fixed assets"* — but `investing` is computed in the same
    object and a fixed-assets module exists (`accounting.ts:11174`). Re-confirm

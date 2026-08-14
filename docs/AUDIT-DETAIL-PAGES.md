@@ -1,19 +1,32 @@
 # Audit — detail pages, edit forms and dialogs (the "second click")
 
-> **Last verified: 2026-08-13** against `src/lib/cached-fetch.ts:478`,
-> `src/components/ui/document-chain-map.tsx:416`,
-> `src/pages/service-cases/detail.tsx:260-268`, `src/pages/inventory/adjustments.tsx`,
-> `src/api/routes/inventory.ts`.
+> **Last verified: 2026-08-14** (second prose-audit pass — see
+> [`DOCS-VS-CODE-AUDIT.md`](DOCS-VS-CODE-AUDIT.md) Part 3) against
+> `src/lib/cached-fetch.ts`, `src/components/ui/document-chain-map.tsx`,
+> `src/pages/service-cases/detail.tsx`, `src/pages/procurement/detail.tsx`,
+> `src/pages/suppliers/detail.tsx`, `src/api/routes/inventory.ts`.
 >
-> Same-day audit, and its spot-checks hold: `void ttlSec` is really at
-> `cached-fetch.ts:478` (the cache never suppresses the refetch);
-> `const open = openPOs[po.id] ?? true` is really at `document-chain-map.tsx:416`
-> directly under a comment claiming the opposite; the bare whole-org
-> `useCachedJson(… "/api/delivery-orders")` is really at `service-cases/detail.tsx:268`
-> while the PO fetch four lines below is `scope=`-narrowed. Nothing in it had been
-> fixed as of this verification — "Nothing was changed" is still accurate, and D1–D13
-> are all open. Its own provenance table (CODE / DOCS / ARITHMETIC, no prod timings)
-> is the right way to read it.
+> **⚠️ The 2026-08-13 stamp this replaces said "Nothing in it had been fixed …
+> D1–D13 are all open". That was already false when it was written** — this file's
+> own **STATUS section below** records D1, D4, D5, D9 and D12 as SHIPPED, and its own
+> D3 row is marked ✅. The header and the body of one document ordered opposite
+> conclusions, and the header is what a reader sees first.
+>
+> **Re-measured 2026-08-14 — SHIPPED, do not re-open:** D1
+> (`service-cases/detail.tsx:311` fetches `/api/delivery-orders?fields=case-pipeline&scope=`),
+> D3 (`cached-fetch.ts:467` exports `isUnknownOutcome`), D4
+> (`procurement/detail.tsx:166` = `editing ? "/api/inventory?buckets=rawMaterials" : null`),
+> D5, D9 (`suppliers/detail.tsx:238` gates on `showSKUForm` and requests
+> `?buckets=rawMaterials,wipItems`) and D12. **Still open:** D2, D6, D7, D8, D10,
+> D11, D13 and the `/api/purchase-orders` half of D9 — see STATUS.
+>
+> Anchor corrections: `void ttlSec` is at **`cached-fetch.ts:589`** (and again at
+> `:706`), not `:478` — `:478` is now inside an unrelated comment block.
+> `const open = openPOs[po.id] ?? true` is at **`document-chain-map.tsx:431`** (and
+> `:512`), not `:416`; the claim itself — a comment directly above it saying the
+> opposite — still holds. Its provenance table (CODE / DOCS / ARITHMETIC, no prod
+> timings) is the right way to read it; **every prod figure in it is a dated
+> historical measurement and is UNMEASURED from this branch.**
 
 **Date:** 2026-08-13 · **Branch:** `audit/detail-pages` · **Scope:** everything a user
 reaches by opening ONE record — detail pages, edit forms, create forms and the dialogs

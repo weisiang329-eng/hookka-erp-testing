@@ -29,7 +29,7 @@ legacy path) plus component-level picks on `affectedProducts[].components`, all 
 ## Entry points
 - Pages
   - `/service-cases` → `src/pages/service-cases/index.tsx:248` (`ServiceCasesListPage` — case list)
-  - `/service-cases/:id` → `src/pages/service-cases/detail.tsx:203` (`ServiceCaseDetailPage` — 3,506-line command center)
+  - `/service-cases/:id` → `src/pages/service-cases/detail.tsx:203` (`ServiceCaseDetailPage` — 3,600-line command center)
   - `/service-orders` → `src/pages/service-orders/index.tsx:119` (`ServiceOrdersListPage`; `CreateServiceOrderModal` at `:314`)
   - `/service-orders/:id` → `src/pages/service-orders/detail.tsx:128` (`ServiceOrderDetailPage` — returns, repair scope)
   - `/service-order/*` (SINGULAR) → `src/pages/service-order/index.tsx` + `create/detail/edit.tsx` — re-exports of
@@ -57,11 +57,11 @@ legacy path) plus component-level picks on `affectedProducts[].components`, all 
 1. **Create case** — `app.post("/")` `service-cases.ts:614`. Allocates case no (`nextCaseNo` `:366`), sanitizes RCA
    (`sanitizeRootCauses` `:178`, `synthesizeRootCauses` `:208`) and `affectedProducts`, stores photos JSON.
 2. **Case status transition** — `app.put("/:id/status")` in `service-cases.ts`, gated by `STATUS_TRANSITIONS` (`:60`).
-   Case pipeline is auto-computed display-only in the FE (`CasePipeline` `detail.tsx:902`) from linked SV-order progress.
-3. **Spawn SV order from a case** — `SpawnServiceOrderModal` (`detail.tsx:3005`) POSTs `/api/sales-orders` with
+   Case pipeline is auto-computed display-only in the FE (`CasePipeline` `detail.tsx:965`) from linked SV-order progress.
+3. **Spawn SV order from a case** — `SpawnServiceOrderModal` (`detail.tsx:3096`) POSTs `/api/sales-orders` with
    `isServiceOrder:true` + `caseId`. Backend `sales-orders.ts:1503` reads the flag at `:1751` and `body.caseId` at `:1758`,
    writes the `caseid` column, and **skips auto-pricing** for service orders (guards at `:1836` / `:1853`).
-4. **Replacement-part top-up** — `StockTopUpPanel` (`detail.tsx:2375`) POSTs `/api/stock-adjustments` with reason
+4. **Replacement-part top-up** — `StockTopUpPanel` (`detail.tsx:2448`) POSTs `/api/stock-adjustments` with reason
    `SERVICE_REPLACEMENT` + `caseId`. Stock-only — no production order.
 5. **Repair scope resolution** — component picks canonicalized (`canonicalizeComponentPicks` `repair-scope.ts:524`),
    validated write-side (`validateRepairScopeInput` `:292`), and job-card WIPs filtered by scope
@@ -74,10 +74,10 @@ legacy path) plus component-level picks on `affectedProducts[].components`, all 
 |---|---|---|
 | `ServiceCasesListPage` | `src/pages/service-cases/index.tsx:248` | Case list |
 | `ServiceCaseDetailPage` | `src/pages/service-cases/detail.tsx:203` | Case command center (header/tabs/orchestration) |
-| `CasePipeline` | `src/pages/service-cases/detail.tsx:902` | Auto-computed display-only progress stepper |
-| `RootCausePanel` | `src/pages/service-cases/detail.tsx:989` | Multi root-cause editor (manual Add/Save; verifiedSave ref impl) |
-| `StockTopUpPanel` | `src/pages/service-cases/detail.tsx:2375` | Records `SERVICE_REPLACEMENT` stock adjustments vs the case |
-| `SpawnServiceOrderModal` | `src/pages/service-cases/detail.tsx:3005` | Spawns a SV order (`isServiceOrder`+`caseId`) under the case |
+| `CasePipeline` | `src/pages/service-cases/detail.tsx:965` | Auto-computed display-only progress stepper |
+| `RootCausePanel` | `src/pages/service-cases/detail.tsx:1052` | Multi root-cause editor (manual Add/Save; verifiedSave ref impl) |
+| `StockTopUpPanel` | `src/pages/service-cases/detail.tsx:2448` | Records `SERVICE_REPLACEMENT` stock adjustments vs the case |
+| `SpawnServiceOrderModal` | `src/pages/service-cases/detail.tsx:3096` | Spawns a SV order (`isServiceOrder`+`caseId`) under the case |
 | `ServiceOrdersListPage` | `src/pages/service-orders/index.tsx:119` | Plural SV-order list |
 | `CreateServiceOrderModal` | `src/pages/service-orders/index.tsx:314` | Create a plural SV order |
 | `ServiceOrderDetailPage` | `src/pages/service-orders/detail.tsx:128` | Plural SV-order detail (returns, repair scope) |

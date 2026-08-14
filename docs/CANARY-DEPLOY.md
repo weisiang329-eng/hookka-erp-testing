@@ -1,6 +1,6 @@
 # Canary Deploys on PR — Phase B.5
 
-> **Last verified: 2026-08-13** against `.github/workflows/deploy.yml` (the `Deploy to Cloudflare Pages (canary)` step and its `github-script` comment), `src/api/worker.ts:293-311` (`isPreviewHostname` / `pickDbUrl`), and `wrangler.toml` (`[[hyperdrive]] HYPERDRIVE` + `HYPERDRIVE_STAGING`).
+> **Last verified: 2026-08-13** against `.github/workflows/deploy.yml` (the `Deploy to Cloudflare Pages (canary)` step and its `github-script` comment), `src/api/worker.ts:294-310` (`isPreviewHostname` / `pickDbUrl`), and `wrangler.toml` (`[[hyperdrive]] HYPERDRIVE` + `HYPERDRIVE_STAGING`).
 > Corrected 2026-08-13: the "What canary deploys share with production" section was backwards and listed a binding that no longer exists. Canary URLs are `*.hookka-erp-testing.pages.dev`, which `isPreviewHostname` classifies as PREVIEW, so they hit **staging Supabase, not production**. And there is no D1 binding — it was retired 2026-04-27.
 
 **Status:** Live as of 2026-04-25 (`feat(ci): canary deploy on PR`).
@@ -63,7 +63,7 @@ out of date.
 `pickDbUrl` (`src/api/worker.ts:305`) routes on the request **hostname**,
 not on an env var — Cloudflare Pages ignores `[env.preview.vars]` and locks
 dashboard vars once `wrangler.toml` defines `[vars]`, so hostname is the
-only reliable signal. `isPreviewHostname` (`worker.ts:293`) returns:
+only reliable signal. `isPreviewHostname` (`worker.ts:294`) returns:
 
 * `hookka-erp-testing.pages.dev` exactly → production
 * anything else ending in `.hookka-erp-testing.pages.dev` → **preview**

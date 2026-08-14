@@ -130,8 +130,11 @@ Apply the class recipe above to each page. Pages that use only `PageHeader` + `D
 - `src/pages/accounting/cash-flow.tsx`
 
 **Production & BOM** (8 pages):
-- `src/pages/production/index.tsx`, `folders.tsx`, `folder-detail.tsx`, `tracker.tsx`, `wip-times.tsx`, `scan.tsx`, `fg-scan.tsx`
+- `src/pages/production/index.tsx`, `folders.tsx`, `folder-detail.tsx`, `wip-times.tsx`, `scan.tsx`, `fg-scan.tsx`, `dept.tsx`, `overview.tsx`
 - `src/pages/bom.tsx`, `src/pages/cnc-templates.tsx`
+  (`tracker.tsx` is gone — `/production/tracker` is now a `<Navigate to="/planning?tab=tracker">` redirect,
+  `src/dashboard-routes.tsx:264`. Same shape as `pricing.tsx`/`in-transit.tsx` above; this third one
+  survived the 2026-08-13 sweep of this list.)
 
 **Inventory** (4 pages):
 - `src/pages/inventory/index.tsx`, `adjustments.tsx`, `fabrics.tsx`, `stock-value.tsx`

@@ -15,8 +15,8 @@ Tracks new-model development as **R&D Projects** moving through a staged pipelin
 
 ## Entry points
 - Pages
-  - `/rd` → `src/pages/rd/index.tsx:1304` (`RDPage` — tabbed home: summary/drafts/projects/completed/pipeline/reports + Create Project dialog)
-  - `/rd/:id` → `src/pages/rd/detail.tsx:222` (`RDProjectDetailPage` — single-project dashboard, 3143 lines)
+  - `/rd` → `src/pages/rd/index.tsx:1313` (`RDPage` — tabbed home: summary/drafts/projects/completed/pipeline/reports + Create Project dialog)
+  - `/rd/:id` → `src/pages/rd/detail.tsx:222` (`RDProjectDetailPage` — single-project dashboard, 3176 lines)
   - `/rd/maintenance` → `src/pages/rd/maintenance.tsx:93` (`RDMaintenancePage` — R&D Team Members CRUD grid)
   - Health-scoring helper (non-page) → `src/pages/rd/health.ts:63` (`getProjectHealth`)
 - API routes (mounted in `src/api/worker.ts:1380-1381`)
@@ -42,7 +42,7 @@ Tracks new-model development as **R&D Projects** moving through a staged pipelin
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
 |---|---|---|
-| `RDPage` | `src/pages/rd/index.tsx:1304` | Tabbed home; tab switcher (summary/drafts/projects/completed/pipeline/reports) |
+| `RDPage` | `src/pages/rd/index.tsx:1313` | Tabbed home; tab switcher (summary/drafts/projects/completed/pipeline/reports) |
 | `CreateProjectDialog` | `src/pages/rd/index.tsx:984` | Create-project form |
 | `SummaryView` / `PipelineView` / `ReportsView` | `src/pages/rd/index.tsx:485 / 716 / 776` | KPI summary, pipeline board, reports |
 | `ProjectCard` / `DraftCard` / `StageProgressBar` | `src/pages/rd/index.tsx:313 / 197 / 96` | List cards + stage progress bar |

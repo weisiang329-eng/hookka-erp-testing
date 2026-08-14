@@ -15,7 +15,7 @@ The homepage **Command Center** at `/dashboard`: a KPI rail (Sales · Invoices �
 
 ## Entry points
 - Pages
-  - `/dashboard` → `src/pages/dashboard-b/index.tsx:661` (`DashboardBPage` — the entire Command Center)
+  - `/dashboard` → `src/pages/dashboard-b/index.tsx:689` (`DashboardBPage` — the entire Command Center)
   - `/dashboard-b` → redirects to `/dashboard` (`src/dashboard-routes.tsx:233`)
   - Lazy recharts wrappers → `src/pages/dashboard-b/charts.tsx` (`RevenueChart:60`, `CustomerPieChart:149`)
   - Route + prefetch wiring → `src/dashboard-routes.tsx:20` (lazy import), `:572` (chunk prefetch map)
@@ -42,10 +42,10 @@ The homepage **Command Center** at `/dashboard`: a KPI rail (Sales · Invoices �
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
 |---|---|---|
-| `DashboardBPage` | `src/pages/dashboard-b/index.tsx:661` | Main component: staged fetches, useMemos, all JSX |
-| `KTile` | `src/pages/dashboard-b/index.tsx:396` | The KPI card used by the four Command Center cards |
-| `Spark` / `DeltaChip` | `src/pages/dashboard-b/index.tsx:351 / 378` | Sparkline + delta-% chip |
-| `SectionRowsSkeleton` | `src/pages/dashboard-b/index.tsx:478` | Per-section loading placeholder |
+| `DashboardBPage` | `src/pages/dashboard-b/index.tsx:689` | Main component: staged fetches, useMemos, all JSX |
+| `KTile` | `src/pages/dashboard-b/index.tsx:424` | The KPI card used by the four Command Center cards |
+| `Spark` / `DeltaChip` | `src/pages/dashboard-b/index.tsx:379 / 406` | Sparkline + delta-% chip |
+| `SectionRowsSkeleton` | `src/pages/dashboard-b/index.tsx:506` | Per-section loading placeholder |
 | `Gauge` / `MiniTable` / `SectionTitle` | `src/pages/dashboard-b/index.tsx:607 / 535 / 582` | Presentational helpers |
 | KPI rail JSX | `src/pages/dashboard-b/index.tsx:1117` | Sales · Invoices · Pending Delivery · Outstanding cards |
 | Revenue chart + Plant Load JSX | `src/pages/dashboard-b/index.tsx:1374` | Area chart + backlog-vs-capacity gauge |

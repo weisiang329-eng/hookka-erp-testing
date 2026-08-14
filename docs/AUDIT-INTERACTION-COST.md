@@ -254,8 +254,13 @@ with a fresh identity invalidates `visibleColumns` → `filteredData` →
 `sales/index.tsx:740-743` already carries the scar tissue: *"a fresh `columns`
 array every render made the DataGrid's filteredData/sortedData memos recompute
 over the full ~690-row dataset on EVERY unrelated re-render (poll, selection,
-search-mirror)"*. That fix was applied to sales only. Ten sites still declare
-`columns` as a bare array literal inside the component body:
+search-mirror)"*. That fix was applied to sales only. **Twelve** sites still declare
+`columns` as a bare array literal inside the component body. (This said "Ten"
+and listed ten; re-enumerated 2026-08-14 over every `const …: Column<…>[] = [`
+in `src/pages` + `src/components`, classifying each as module-scope /
+`useMemo`-wrapped / bare-in-component — the two Employees grids below were
+missed, and a sweep of "the ten" would have closed the class with them still
+open:)
 
 | File:line | Grid |
 | --- | --- |
@@ -269,6 +274,8 @@ search-mirror)"*. That fix was applied to sales only. Ten sites still declare
 | `src/pages/consignment/index.tsx:404` | Consignment orders |
 | `src/pages/delivery-returns/index.tsx:72` | Delivery returns |
 | `src/pages/maintenance/sofa-combos.tsx:589` | Sofa combos |
+| `src/pages/employees.tsx:4877` | Department Labor (fed to `<DataGrid columns={columns}>` at `:5260`) |
+| `src/pages/employees.tsx:5610` | Labor Cost items (fed to `<DataGrid columns={itemColumns}>` at `:5985`) |
 
 Consequence: on these pages **selecting a single row** re-runs the entire
 filter + sort pipeline over the whole dataset — because selection lifts to the
@@ -281,12 +288,14 @@ fix, one row click on a 2,539-row grid with unmemoised columns cost a ~99 ms
 re-sort. It is now ~3.6 ms — but the wasted filter pass and the full re-render
 remain.
 
-**Not fixed here.** Ten files, and each needs its own dependency array worked
-out correctly; a wrong dep list produces a stale grid, which is worse than a
-slow one.
+**Not fixed here.** Twelve sites across eleven files, and each needs its own
+dependency array worked out correctly; a wrong dep list produces a stale grid,
+which is worse than a slow one.
 
-**Cleared:** `src/pages/inventory/index.tsx:659/766/976` declares `fgColumns` /
-`wipColumns` / `rmColumns` at **module scope** — stable identity, no problem.
+**Cleared:** `src/pages/inventory/index.tsx:662/769/979` declares `fgColumns` /
+`wipColumns` / `rmColumns` at **module scope** (column 0, outside any component) —
+stable identity, no problem. `employees.tsx:3939` is `useMemo`-wrapped and is
+likewise clear. Both re-checked 2026-08-14.
 
 ---
 

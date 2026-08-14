@@ -7,7 +7,7 @@
 
 > **Last verified: 2026-08-13** against `src/api/routes/` (136 route files — no
 > `ncr`/`nonconformance`/`capa`/`internal-audit`/`management-review`/`calibration`/
-> `risk` route exists), `migrations-postgres/` (244 files — no such table exists),
+> `risk` route exists), `migrations-postgres/` (**252** files as at 2026-08-14 — no such table exists in any of them),
 > `src/pages/quality.tsx`, `src/api/routes/qc-inspections.ts`,
 > `src/api/routes/qc-pending.ts`, `src/api/routes/fg-units.ts`,
 > `src/api/lib/fg-batch-link.ts`, `migrations-postgres/0177_document_lifecycle.sql`.

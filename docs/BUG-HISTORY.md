@@ -34,6 +34,229 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-13-144 — `/planning/mrp` computed every shortage as if nothing were on order: `const onOrder = 0;` `data-integrity` `production-orders` 🟢
+
+**Symptom.** The Material Requirements table reported a **full shortage** for material that
+was already on an open purchase order, marked it red, and printed a suggested PO quantity
+for it. Acting on the page re-orders inbound stock. The screen showed no "On Order" column
+at all, so there was nothing to contradict it.
+
+**Root cause.** `src/api/routes/mrp.ts:701`, verbatim:
+
+```ts
+const onOrder = 0;
+const netRequired = Math.max(0, grossRequired - onHand - onOrder);
+```
+
+A scaffolding literal that outlived its author — C15's third recurring cause. `onOrder`
+was in the type, in the response, in the persisted row and in the INSERT; only the value
+was never computed. The real figure was three feet away: the **Fabric tab of the same
+page** already computes "PO Outstanding" (`src/api/lib/fabric-usage.ts:539-566`) from
+`purchase_order_items` joined to `purchase_orders`.
+
+**Fix.** One query in the existing `Promise.all`, using the **same in-house definition**
+rather than a second one — open PO = `purchase_orders.status NOT IN
+('RECEIVED','CANCELLED','CLOSED')`, per-line outstanding = `quantity −
+COALESCE(receivedQty, 0)` floored at 0 by `GREATEST(…, 0)` so a GRN over-receipt cannot
+manufacture negative demand. Material code resolves from `purchase_order_items.material_code`
+(migration 0103, written by `purchase-orders.ts:555`) and falls back to the pre-0103
+`"<itemCode> - <description>"` `materialName` convention via `SPLIT_PART`, which returns the
+whole string when the separator is absent so plain-itemCode legacy rows match too.
+
+The `/planning/mrp` table now renders an **On Order** column, beside On Hand, where the
+subtraction happens.
+
+**Coverage, published rather than assumed.** Open PO lines that resolve to *neither* a
+`material_code` *nor* a parseable `materialName` have their inbound quantity credited to
+nothing. Silently dropping them would make "On Order" a clean number meaning *cannot see* —
+BUG-2026-08-13-096 exactly. They are counted into `meta.onOrderUnresolvedLines`, persisted
+on the run (`mrp_runs.on_order_unresolved_lines`, **nullable**), and the page says
+*"On Order below is a floor"* when it is non-zero. A run persisted before the count existed
+reloads as `null`, not `0` — "nobody counted" is not "there were none".
+
+**Left as an owner decision, not decided here:** whether **DRAFT** POs — placed with nobody —
+should count as on order. Following the Fabric tab's existing definition keeps the two tabs
+of one page consistent, which was the higher-value property; the question is recorded in
+`docs/DASHBOARD-DATA-AUDIT.md` Part 6.
+
+**Not changed on purpose:** `onHand`'s exact-string `rmByCode.get(code)` lookup. It is its
+own open audit row, and adding a `normCode` fallback to only one side of
+`gross − onHand − onOrder` would net a *found* on-order against a *missed* on-hand and
+produce a worse number than either. `onOrder` therefore uses the identical exact-code
+lookup.
+
+**Prod impact: UNMEASURED.** No DB credentials in this session. How many materials had a
+non-zero open-PO quantity, and how many of the current SHORTAGE rows collapse once it is
+subtracted, needs a query against prod. The count is now computed at runtime and shown on
+the page, so the first real run answers it.
+
+**Verified.** `tests/planning-production-tile-truthfulness.test.mjs` — 6 assertions, each
+proved RED by reintroducing the exact removed expression with bytes-changed-on-disk asserted
+first (`const onOrder = 0;`, the widened status filter, the dropped unresolved-line counter,
+`Number(...) || 0` on reload, and the removed column). `npx tsc -p tsconfig.app.json
+--noEmit` exit 0; 4139 tests pass.
+
+---
+
+## BUG-2026-08-13-145 — `/planning/mrp` printed an invented MOQ of 50 and an invented 14-day lead time under the supplier's own name `data-integrity` `pricing-products` 🟢
+
+**Symptom.** On the Material Requirements row, beside the **supplier's name**, the page
+printed `14d lead`, and rounded the suggested purchase quantity up to a multiple of **50**.
+The "Order By" cell turned **red** on a date computed by subtracting those 14 days from the
+earliest need date. Nothing on screen distinguished a supplier who had stated these terms
+from one who had never been asked.
+
+**Root cause.** `src/api/routes/mrp.ts:710,714`:
+
+```ts
+const moq = mainBinding?.moq || 50;
+const leadTimeDays = mainBinding?.leadTimeDays || 14;
+```
+
+Two literals with no source, rendered in the same typeface as the figures that are real —
+C15's exact shape. This is not "the wrong numbers": there is no number to state.
+
+**The `|| 0` trap, and why 0 is UNMEASURED here.** `supplier_material_bindings.moq` and
+`.leadTimeDays` are `INTEGER NOT NULL DEFAULT 0` (`migrations/0001_init.sql:273,275`). An
+untouched binding row therefore holds **0**, and the column cannot express "genuinely zero"
+separately from "nobody ever filled this in". So 0 is read as unstated and renders "—". The
+audit's original note — that `|| 50` "also overrides a genuine stored MOQ of 0" — assumed 0
+could be a deliberate value; the DDL says it cannot be told apart from the default.
+
+**Fix.** Both become `number | null`, all the way through: the API type, the persisted row
+(`mrp_requirements.moq`, **nullable, no DEFAULT** — a `NOT NULL DEFAULT` here would have put
+the bug back into the schema), the shared FE type in `src/types/index.ts`, and the renderer.
+
+* No MOQ stated → **suggest exactly the shortage**. That is arithmetic over a measured
+  figure; rounding it up requires an MOQ somebody actually stated. The cell prints
+  `MOQ —` beneath it.
+* No lead time stated → **no `suggestedOrderDate` at all**. A deadline with no input is a
+  guess wearing a warning, and that cell turns red. "Order By" prints "—" with the reason
+  in its tooltip, and the supplier cell prints `lead time —` rather than silently omitting
+  the line (an omission reads as "nothing to say", not as "unknown").
+
+**Found on the way, NOT fixed here — the write side does the same thing.**
+`POST /api/supplier-materials` writes its own invented defaults:
+`leadTimeDays: Number(body.leadTimeDays) || 7` and `moq: Number(body.moq) || 1`
+(`src/api/routes/supplier-materials.ts:206,208`). A binding created through that form can
+never hold 0, and a user who explicitly types 0 gets 1 persisted. The PUT path (`:337,341`)
+is honest and passes the value through. This is the same class on the write path and
+belongs in one change with a decision about what a blank field should mean — reported in
+`docs/DASHBOARD-DATA-AUDIT.md` Part 4, not edited here, because two agents editing one
+constant is how a half-fix ships.
+
+**Prod impact: UNMEASURED.** How many main supplier bindings hold 0 in either column — i.e.
+how many rows flip from `50` / `14d` to `—` — needs a query against prod:
+`SELECT COUNT(*) FILTER (WHERE moq = 0), COUNT(*) FILTER (WHERE lead_time_days = 0),
+COUNT(*) FROM supplier_material_bindings WHERE is_main_supplier = 1;`
+
+**Verified.** 6 assertions in the same guard, including a *general-form* one
+(`!/mainBinding\?\.(moq|leadTimeDays)\s*\|\|\s*\d/`) so the next author cannot swap in a
+different literal, and one pinning `number | null` on the shared FE type — without it the
+renderer falls back to `as Record<string, unknown>` casts and any literal becomes invisible
+to `tsc`. All proved RED by reintroduction.
+
+---
+
+## BUG-2026-08-13-146 — `/production` Overview asserted "0 of 0 work orders · 0/0 cells complete" for a request it had never sent `production-orders` `ui-frontend` 🟢
+
+**Symptom.** Landing on `/production` (overview or full mode) rendered the callout
+*"No orders loaded yet."* and, **in the same viewport**, a matrix footer stating
+*"0 of 0 work orders · 0/0 cells complete"*, an Overview tab reading `0/0`, eight
+department tabs each reading `0/0`, and the matrix body captioned *"No production orders
+found."* Two contradictory claims on one screen, and the confident one was the false one.
+
+**Root cause.** The fetch and the matrix are gated on **different** conditions. The orders
+fetch is armed by `shouldFetch`, which starts `false` in overview/full mode
+(`src/pages/production/index.tsx:588`), so `ordersUrl` is `null` and **no request is ever
+made**. The matrix block is gated on `activeTab === "ALL"` alone (`:7872`), so it renders
+anyway and every count derived from the empty `orders` array printed a confident `0`.
+
+`orders` is `[]` in **three** distinct situations and the page could not tell them apart:
+a cold landing (no request sent), an in-flight fetch, and a **dead read** — a timeout, the
+30 s global abort in `api-client.ts`, or a 5xx, for which `useCachedJson` hands back
+`data = null, loading = false`, byte-identical to a successful empty response unless
+`failure` is read. It was not read.
+
+**Fix.** One named predicate, `ordersObserved`, and one stated reason:
+
+```ts
+const ordersLoadFailed = ordersUrl != null && isUnknownOutcome(ordersFailure);
+const ordersObserved =
+  ordersUrl != null && (orders.length > 0 || (!loading && !ordersLoadFailed));
+```
+
+`isUnknownOutcome` is the repo's single decision for the dead-read case
+(BUG-2026-08-13-107 / -016) — reused, not re-invented. Only the fourth situation, an
+observed body that genuinely held no orders, licenses the number 0.
+
+Every count behind it: the matrix footer (both halves), the Overview tab fraction, **all
+eight department tab fractions**, the header's "N of M orders", and the *"No production
+orders found."* caption. The audit named only the footer; the tab bar carried the identical
+unsourceable fraction nine more times, which is the "fixed only the instance in front of
+the author" failure `BUG-CLASSES.md` opens with.
+
+Each replacement states **which** of the three cases it is in — *"not loaded yet — pick a
+filter or Load all"*, *"couldn't load — this is unknown, not empty"*, *"loading…"* —
+because "—" with no reason is only a prettier lie than "0".
+
+**Verified.** 4 assertions, each proved RED. The footer assertion deliberately matches both
+spans *inside one anchored `{ordersObserved ? (` branch*: an assertion that merely finds the
+identifier somewhere in the file passes while the guard has been short-circuited out of the
+branch, which is exactly how a guard in `record-load-failure-class.test.mjs` went green over
+a live bug.
+
+---
+
+## BUG-2026-08-13-147 — `/production/wip-times`: four tiles printed `0` while loading and on a dead read, and "⚠️ Missing BOM time" printed its `0` in the all-clear colour `production-orders` `bom` 🟢
+
+**Symptom.** All four totals tiles — *WIPs in scope*, *Product appearances*, *Avg across
+WIPs*, *⚠️ Missing BOM time* — rendered `0` during the fetch, on a failed read and on an
+empty body alike. The last one is the dangerous one: it goes **amber only when `> 0`**, so a
+failed load rendered its `0` in the **neutral** colour and was pixel-identical to
+"every BOM has its times".
+
+**Root cause.** `loading` was destructured at `src/pages/production/wip-times.tsx:209` and
+used in exactly two unrelated places — the export button's `disabled` and the table's
+`loading` prop. It never reached the tiles. `failure` was not destructured at all, so the
+dead-read case had no representation on the page.
+
+**Fix.** `rowsObserved = !isUnknownOutcome(failure) && Array.isArray(resp?.data)`. Note
+`Array.isArray`, not `!loading`: a dead read also ends with `loading === false`, so `!loading`
+alone would have re-admitted the exact bug. All four tiles render "—" in grey otherwise, with
+the reason in the tooltip, and a dead read gets a stated failure banner with a **Retry**
+rather than four dashes to interpret. On the Missing-BOM tile the unknown branch is tested
+**first**, before the `> 0` branch, so unknown can never wear the all-clear colour.
+
+**Second half — the tile could not observe its own worst case.**
+`loadActiveBomRows` filters `UPPER(bt.versionStatus) = 'ACTIVE'`
+(`src/api/lib/wip-times-core.ts:172`) and `walkTree` emits a row only for a `processes[]`
+entry carrying a `deptCode` (`:132-137`). So a product with **no active BOM template at
+all** — the most complete form of "missing BOM time" — produces no row and can never be
+counted by the tile that exists to count exactly that. A "0" there asserted a coverage the
+query cannot establish.
+
+It is now observable. `countProductsWithoutActiveBom()` counts ACTIVE products with no
+ACTIVE `bom_templates` row, mirroring the exact filter that creates the blind spot, and the
+endpoint publishes it as `coverage.productsWithoutActiveBom`. The tile prints it beside the
+figure: how many products it **excludes**, or "— (not measured)" if the coverage query
+itself failed — deliberately `number | null`, never `0`, because a failed count must not
+assert full coverage.
+
+It is **not** folded into `missing`. A WIP whose process has 0 minutes and a product with no
+template to hold a process at all are different facts, and adding them launders one into the
+other. The caption also states that this count is **category-scoped, never dept-scoped** —
+a product with no BOM has no process node and therefore no department to be filtered by, so
+reading it as "in this dept" would be a fresh mislabelling.
+
+**Prod impact: UNMEASURED.** How many products currently have no ACTIVE BOM template needs
+a query; the endpoint now computes it on every load, so the first real page view answers it.
+
+**Verified.** 6 assertions, each proved RED — including one that reintroduces
+`rowsObserved = !loading` and one that removes the unknown-first colour branch.
+
+---
+
 ## BUG-2026-08-13-140 — "On-time delivery %" measured our own estimate, at the wrong end of the journey, over a population that excluded the worst cases `delivery-orders` `data-integrity` 🟢
 
 **Symptom.** The Hookka Report printed "On-time delivery" on two desks and on its lead

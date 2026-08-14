@@ -1,5 +1,30 @@
 # Recurring bug classes — the index that makes P5 executable
 
+> **Last verified: 2026-08-14** — restamped on branch `fix/dashboard-tiles`, which
+> **closes C15 row 33 and adds rows 42–44** (BUG-2026-08-13-144/-145/-146/-147: the MRP
+> shortage that ignored every open PO plus its invented MOQ / lead time, `/production`
+> Overview's 0-of-0 on a cold landing, and `/production/wip-times`' four tiles — including
+> the Missing-BOM tile that could not observe the worst case it exists to count).
+>
+> **One correction to a prior claim, verified in source.** The audit note on row 33 said
+> `|| 50` "also overrides a genuine stored MOQ of 0". It cannot: `supplier_material_bindings`
+> declares `moq INTEGER NOT NULL DEFAULT 0` and `leadTimeDays INTEGER NOT NULL DEFAULT 0`
+> (`migrations/0001_init.sql:273,275`), so **0 is what an untouched row holds** and is
+> indistinguishable from never-filled-in. 0 is therefore UNMEASURED, not a value — which is
+> the opposite of the usual corollary and worth stating: *"`0` is a claim, not a blank"*
+> cuts both ways. A column whose NOT NULL DEFAULT is 0 cannot make that claim at all.
+>
+> **A second write-side instance found and NOT fixed** (reported in
+> `docs/DASHBOARD-DATA-AUDIT.md` Part 4): `POST /api/supplier-materials` persists
+> `Number(body.leadTimeDays) || 7` and `Number(body.moq) || 1`
+> (`supplier-materials.ts:206,208`) — the same class on the write path, where it is worse,
+> because a read-side fix cannot undo a literal already in the table. Left as one change
+> with an owner decision about what a blank field means; two agents editing one constant is
+> how a half-fix ships.
+> Enforced by `tests/planning-production-tile-truthfulness.test.mjs`; all 23 reversions
+> proved RED with bytes-changed-on-disk asserted first. Suite at that point:
+> 4,139 tests / 0 fail.
+
 > **Last verified: 2026-08-14** — restamped on branch
 > `fix/on-time-delivery-and-decisions`: **C15 gains rows 39–41** (the Hookka Report's
 > on-time delivery %, the Daily Report's inability to say "I could not check", and the
@@ -904,7 +929,7 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 30 | printed receivables aging strip | Hookka Report › Billing Desk | five buckets computed, **four printed** — `d30Sen` (one month overdue) silently dropped, so the boxes did not tie to the total beside them, and every surviving caption named the bucket one to its left | ✅ 2026-08-14 (-106) |
 | 31 | **"Attendance %"** | Hookka Report › Workforce | `SUM(status='PRESENT')/COUNT(*)` where **every writer of `attendance_records.status` writes the literal `'PRESENT'`** and nothing writes `'ABSENT'`; absence creates no row → **100.0% by construction**, on a printed report | ⬜ open — `docs/DASHBOARD-DATA-AUDIT.md` |
 | 32 | **"Current Cash Position"** + the 12-week Running Balance | `/accounting/cash-flow` | `bank_accounts.balanceSen`, whose only writers are **migration seed fixtures** and that page's own Add-Transaction form. No invoice, receipt or payment touches it | ⬜ open — owner decision (wire it, or label the tab a scratchpad) |
-| 33 | MRP Net Req · Shortage · Sugg. PO · "14d lead" | `/planning/mrp` | `const onOrder = 0`, `moq \|\| 50`, `leadTimeDays \|\| 14` — material already on an open PO reports as a full shortage; the invented MOQ and lead time print under the supplier's name | ⬜ open |
+| 33 | MRP Net Req · Shortage · Sugg. PO · "14d lead" | `/planning/mrp` | `const onOrder = 0`, `moq \|\| 50`, `leadTimeDays \|\| 14` — material already on an open PO reports as a full shortage; the invented MOQ and lead time print under the supplier's name | ✅ 2026-08-14 (-144, -145) — `onOrder` sums open PO lines using the **same** definition the Fabric tab of this page already uses (`fabric-usage.ts` PO Outstanding), and is rendered in a new **On Order** column beside where it is subtracted. MOQ and lead time are `number \| null` end to end and render "—": both columns are `INTEGER NOT NULL DEFAULT 0`, so **0 cannot be told apart from never-filled-in** and is read as unstated. No MOQ → suggest exactly the shortage; no lead time → **no** `suggestedOrderDate`, because the cell that turns red must not turn red on a guess |
 | 34 | KPI "last month" score + ↑/↓ delta + "settled" | `/kpi` | `kpi_periods` has **no writer anywhere** (DDL + two SELECTs), so `isLocked` can never be true: every settled month is silently recomputed against today's data | ⬜ open |
 | 35 | Labor Cost **"Reconciled · 0 difference"** ✓ | `/employees` › Labor Cost | overhead is the closing plug, so `reconciledSum ≡ totalPayrollCost` and the diff is **algebraically 0 forever** — a verification no input can turn red, printed on a payroll report | ⬜ open |
 | 36 | **PCB** on every payslip | `/employees` › Payroll, the CSV, the printed slip, the worker phone | `pcb: pcbOn ? 0 : 0` — hardcoded on both branches, feeds `totalDeductions → netPay`, under a tooltip that lists PCB as included. **The inputs LHDN's calculation needs (tax residency, marital category, child relief) did not exist on `workers` at all**, so there was nothing to compute from either | ✅ 2026-08-14 (-121) — `src/lib/pcb.ts` returns a STATUS, never a bare number: `DISABLED` / `COMPUTED` / `ZERO_PROVEN` / `UNKNOWN`, and every screen prints `—` unless something was actually worked out |
@@ -913,6 +938,9 @@ place: `/api/department-performance` must keep dividing by clocked time,
 | 39 | **"On-time delivery %"** — lead headline, Logistics desk AND Production desk | Hookka Report | scored `dispatched_at` (not delivery) against `hookka_expected_dd` (OUR back-derived target, which `kpi-metrics.ts:18-19` forbids scoring), over a population requiring `dispatched_at IS NOT NULL` — so an order NEVER DISPATCHED, the worst case, could not appear and lateness could only be under-reported. `production.onTimePct = delivery.onTimePct` printed one number twice, as if two desks agreed | ✅ 2026-08-14 (-131) — `delivered_at` vs `customer_delivery_date` per SO, last delivery counts, every exclusion counted and published |
 | 40 | the Daily Report headline, every chip, and the Command Center tile | `/daily-report` + `/dashboard` | **all 15 checks `catch → return []`**, so a check that THREW contributed 0 to its chip and 0 to the headline — a green `0` under *"A Quiet Day on the Floor"* over a sweep that had partly not happened. The payload had no way to say "3 of 15 could not run", so no renderer COULD have told the truth. Two of the fifteen are money detectors, and `pricing-integrity.ts`'s own header records the concrete case: a type error that threw on every row and reported a clean book | ✅ 2026-08-14 (-130) — checks rethrow, `runCheck` records the failure, counts are `number \| null`, `checksRun`/`checksTotal`/`unavailable` published |
 | 41 | *"Top 3 = N% … of total customer revenue"* | `/dashboard` › Sales by Customer | the denominator was the **top-12 subtotal** — the only rows the browser receives — so numerator and denominator moved together and the figure sat near 100% by construction. A concentration metric that cannot rise is not a metric. The card's own "All customers" row above it used the REAL total | ✅ 2026-08-14 (-132) — denominator is period TOTAL over all customers, computed server-side; largest-customer and top-10 shares published with `customerCount` |
+| 42 | *"0 of 0 work orders · 0/0 cells complete"*, the Overview tab fraction, **all eight department tab fractions**, *"N of M orders"*, and *"No production orders found."* | `/production` Overview | the fetch is armed by `shouldFetch` (default `false` in overview mode) while the matrix is gated on `activeTab === "ALL"` alone — so on a cold landing **no request is ever sent** and the page printed a confident `0` next to its own *"No orders loaded yet."* callout. `orders` is `[]` for three different reasons (never fetched / in flight / dead read) and `failure` was not read, so a timeout was byte-identical to an empty factory | ✅ 2026-08-14 (-146) — one named `ordersObserved` predicate over `isUnknownOutcome`; every count states WHICH of the three cases it is in, because "—" with no reason is only a prettier lie |
+| 43 | all four totals tiles, incl. **"⚠️ Missing BOM time"** | `/production/wip-times` | `loading` was destructured and used only for the export button and the table; `failure` was never read. During the fetch, on a dead read and on an empty body all four printed `0` — and the Missing-BOM tile goes amber **only when `> 0`**, so a failed load rendered its `0` in the NEUTRAL colour and was pixel-identical to all-clear | ✅ 2026-08-14 (-147) — gated on `Array.isArray(resp?.data)` (**not** `!loading`: a dead read also ends with `loading === false`), unknown branch tested FIRST so it can never wear the all-clear colour, failure banner + Retry |
+| 44 | **"⚠️ Missing BOM time"** could not observe its own worst case | `/production/wip-times` | `loadActiveBomRows` filters `versionStatus = 'ACTIVE'` and `walkTree` emits a row only per `processes[]` entry carrying a `deptCode` — so a product with **no active BOM template at all**, the most complete form of "missing BOM time", produces no row and can never be counted. A `0` there asserted a coverage the query cannot establish (row 28's shape / BUG-2026-08-13-096) | ✅ 2026-08-14 (-147) — `countProductsWithoutActiveBom()` mirrors the exact filter that creates the blind spot and is published beside the figure as an EXCLUSION, never folded into `missing`; `number \| null` so a failed count reads "—", never 0; the caption states it is category-scoped and can never be dept-scoped |
 | 28 | `production_time_minutes`, the `efficiencyPct` and the `deptBreakdown` on EVERY attendance row | `POST /api/attendance` + `POST /api/worker/clock` + the midnight auto-close → `GET /api/attendance`, `GET /api/worker/history` | `round(workingMinutes × 0.85)` — a fixed ratio of the clock time, written at clock-out and captioned as production. The efficiency divided it by the standard day, so it measured ATTENDANCE LENGTH; the dept split republished the same number under an EMPTY productCode. Prod Aug 2026: 180,928 / 212,850 = **0.85005**. Three writers, one of which (the forgotten-punch auto-close) produced a flat **85%** that could not vary — both sides came from `stdMin` | ✅ 2026-08-13 (-103) — writers cleared, readers publish `null` / `[]`, column made nullable |
 
 **Enforced by** six files, all structural (`readFileSync` source assertions),
@@ -926,8 +954,9 @@ because nothing else can catch a number that is merely wrong-but-plausible:
 non-figure defects the same accounting-page audit found — see below),
 `tests/dashboard-truthfulness.test.mjs` (rows 28–30),
 `tests/pcb-not-fabricated.test.mjs` (row 36 — with the behaviour proved
-separately in `tests/pcb-calculation.test.mjs`).
-Rows 17–22, 31–35 and 37–38 are open or deliberate and carry no guard yet.
+separately in `tests/pcb-calculation.test.mjs`),
+`tests/planning-production-tile-truthfulness.test.mjs` (rows 33, 42–44).
+Rows 17–22, 31–32, 34–35 and 37–38 are open or deliberate and carry no guard yet.
 
 **A seventh corollary, from row 36 (PCB, 2026-08-14).** *When no real source
 exists, the fix is a REFUSAL with a name — and the refusal has to be

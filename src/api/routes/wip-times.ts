@@ -30,7 +30,11 @@ import {
   resolveWipTokens,
   type BomVariantContext,
 } from "../lib/bom-wip-breakdown";
-import { loadActiveBomRows, aggregateWipTimes } from "../lib/wip-times-core";
+import {
+  loadActiveBomRows,
+  aggregateWipTimes,
+  countProductsWithoutActiveBom,
+} from "../lib/wip-times-core";
 
 const app = new Hono<Env>();
 
@@ -132,7 +136,39 @@ app.get("/", async (c) => {
   const bomRows = await loadActiveBomRows(c.var.DB, orgId, category);
   const agg = aggregateWipTimes(bomRows, { dept });
 
-  return c.json({ success: true, data: agg });
+  // BUG-2026-08-13-147 coverage. `agg` can only ever describe products that
+  // HAVE an active BOM template — a product with none produces no row, so the
+  // "⚠️ Missing BOM time" tile was structurally blind to the most complete
+  // form of the thing it counts. Publish the blind spot beside the figure.
+  //
+  // Best-effort: a failure here must not take the whole page down, but it must
+  // also not report 0. `null` = could not measure, and the tile says so rather
+  // than claiming full coverage.
+  let productsWithoutActiveBom: number | null = null;
+  try {
+    productsWithoutActiveBom = await countProductsWithoutActiveBom(
+      c.var.DB,
+      orgId,
+      category,
+    );
+  } catch (err) {
+    console.error("[wip-times] coverage count failed", {
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  return c.json({
+    success: true,
+    data: agg,
+    coverage: {
+      // Category-scoped, NEVER dept-scoped — a product with no BOM has no
+      // process node and therefore no department to be filtered by. The page
+      // states this so the number is not read as "in this dept".
+      productsWithoutActiveBom,
+      productsWithoutActiveBomScope: category ? `${category} products` : "all products",
+      deptFilterApplied: dept != null,
+    },
+  });
 });
 
 // ---------------------------------------------------------------------------

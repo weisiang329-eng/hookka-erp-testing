@@ -22,7 +22,7 @@ import { packingRackScanUrl } from "@/api/lib/jobcard-qr-token";
 // fully synchronously when a callback is passed (see jobCardQrDataUrl below).
 import JsBarcode from "jsbarcode";
 import { QRImg } from "@/components/qr-img";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, isUnknownOutcome } from "@/lib/cached-fetch";
 // useTimeout — P4.3 effect-replacement (still referenced at L2386+).
 import { useTimeout } from "@/lib/scheduler";
 import { useToast } from "@/components/ui/toast";
@@ -1044,7 +1044,7 @@ export default function ProductionPage({
   // by Phase 6 — server-side KV snapshot cache — which gives every
   // repeat fetch a <200ms response instead of trying to optimise the
   // first-fetch parse cost.
-  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
+  const { data: ordersResp, loading, failure: ordersFailure, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
   // Date-filter-INDEPENDENT fetch used solely by the "Total Overdue SO"
   // header chip + drill-down panel. Pulls ALL POs (no dueFrom/dueTo, no
   // dept narrowing) so the count reflects the system-wide overdue state,
@@ -2699,6 +2699,40 @@ export default function ProductionPage({
 
   const overallTotal = deptFractions.reduce((s, d) => s + d.total, 0);
   const overallDone  = deptFractions.reduce((s, d) => s + d.done, 0);
+
+  // BUG-2026-08-13-146 (docs/BUG-CLASSES.md C15 — "`0` is a claim, not a
+  // blank"). `orders` is `[]` in three DIFFERENT situations and every count
+  // derived from it — the matrix footer's "N of M work orders · D/T cells
+  // complete" and the tab bar's per-dept fractions — printed a confident `0`
+  // in all of them:
+  //
+  //   1. COLD LANDING. `shouldFetch` starts `false` in overview/full mode
+  //      (:588), so `ordersUrl` is null and NO REQUEST IS EVER MADE. The page
+  //      rendered "No orders loaded yet." and, in the same viewport, the
+  //      footer asserted "0 of 0 work orders · 0/0 cells complete". The matrix
+  //      block is gated on `activeTab === "ALL"` alone, which is why the two
+  //      contradicted each other on screen.
+  //   2. IN FLIGHT — the fetch is armed but has not landed.
+  //   3. DEAD READ — a timeout, the 30 s global abort or a 5xx. `useCachedJson`
+  //      hands back `data = null, loading = false` for that, byte-identical to
+  //      a successful empty response, unless `failure` is read.
+  //
+  // Only the fourth situation — an observed 2xx body that genuinely contained
+  // no orders — licenses the number 0. `isUnknownOutcome` is the repo's single
+  // decision for (3) and is reused here rather than inventing a second one.
+  const ordersLoadFailed = ordersUrl != null && isUnknownOutcome(ordersFailure);
+  const ordersObserved =
+    ordersUrl != null && (orders.length > 0 || (!loading && !ordersLoadFailed));
+  // Why the figures are unsourceable, in the operator's words — a count that
+  // cannot be produced has to say which of the three cases it is in, otherwise
+  // "—" is only a prettier lie than "0".
+  const ordersUnobservedReason = !ordersObserved
+    ? ordersUrl == null
+      ? "not loaded yet — pick a filter or Load all"
+      : ordersLoadFailed
+        ? "couldn't load — this is unknown, not empty"
+        : "loading…"
+    : null;
 
   // Sprint 5 F2: pre-compute the lowercased haystack string for every PO
   // once when `orders` lands, then look it up by id during filter. The
@@ -7280,8 +7314,13 @@ export default function ProductionPage({
             "Pick a filter (or Load all) to fetch orders"
           ) : updatingHint ? (
             <span className="text-[#9C6F1E] font-semibold">Updating…</span>
-          ) : (
+          ) : ordersObserved ? (
             `${filteredOrders.length} of ${orders.length} orders`
+          ) : (
+            // BUG-2026-08-13-146 — a dead read printed "0 of 0 orders" here.
+            <span title={ordersUnobservedReason ?? undefined}>
+              — orders ({ordersUnobservedReason})
+            </span>
           )}
         </span>
       </div>
@@ -7355,7 +7394,13 @@ export default function ProductionPage({
                 : "text-[#6B7280] hover:text-[#1F1D1B]"
             }`}
           >
-            Overview <span className="opacity-60 font-normal">{overallDone}/{overallTotal}</span>
+            {/* Same unsourceable-zero as the matrix footer below
+                (BUG-2026-08-13-146): on a cold landing no request has been
+                made, so this fraction has no source. */}
+            Overview{" "}
+            <span className="opacity-60 font-normal" title={ordersUnobservedReason ?? undefined}>
+              {ordersObserved ? `${overallDone}/${overallTotal}` : "—"}
+            </span>
           </button>
           {deptFractions.map((d) => (
             <button
@@ -7367,7 +7412,13 @@ export default function ProductionPage({
                   : "text-[#8A7F73] hover:text-[#1F1D1B]"
               }`}
             >
-              {d.name} <span className="opacity-60 font-normal normal-case">{d.done}/{d.total}</span>
+              {d.name}{" "}
+              <span
+                className="opacity-60 font-normal normal-case"
+                title={ordersUnobservedReason ?? undefined}
+              >
+                {ordersObserved ? `${d.done}/${d.total}` : "—"}
+              </span>
             </button>
           ))}
         </div>
@@ -8098,8 +8149,14 @@ export default function ProductionPage({
             rows that wrap (long product line) get their real height
             measured. */}
         {visibleOrders.length === 0 ? (
+          // Same BUG-2026-08-13-146 gate as the footer: "No production orders
+          // found." is a statement about the factory, and only an observed 2xx
+          // body licenses it. A cold landing, an in-flight fetch and a dead
+          // read all produced this sentence too.
           <div className="px-4 py-12 text-center text-sm text-[#9A918A]">
-            No production orders found.
+            {ordersObserved
+              ? "No production orders found."
+              : `Orders not shown — ${ordersUnobservedReason}.`}
           </div>
         ) : (
           <div
@@ -8327,9 +8384,24 @@ export default function ProductionPage({
         </OverviewResizeCtx.Provider>
 
         {/* Footer */}
+        {/* BUG-2026-08-13-146 — see `ordersObserved`. This footer used to
+            assert "0 of 0 work orders · 0/0 cells complete" underneath the
+            "No orders loaded yet." callout, off a request that was never
+            sent. */}
         <div className="px-4 py-2 bg-[#FAF8F4] border-t border-[#E6E0D9] text-[10px] text-[#8A7F73] flex items-center justify-between">
-          <span>{visibleOrders.length} of {orders.length} work orders</span>
-          <span>{overallDone}/{overallTotal} cells complete</span>
+          {ordersObserved ? (
+            <>
+              <span>{visibleOrders.length} of {orders.length} work orders</span>
+              <span>{overallDone}/{overallTotal} cells complete</span>
+            </>
+          ) : (
+            <>
+              <span>— work orders</span>
+              <span title={ordersUnobservedReason ?? undefined}>
+                — cells complete ({ordersUnobservedReason})
+              </span>
+            </>
+          )}
         </div>
 
         {/* Batch Due Date — multi-select rows, pick a department scope + a

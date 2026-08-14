@@ -66,7 +66,14 @@ type MaterialRequirement = {
   preferredSupplierId?: string;
   preferredSupplierName?: string;
   byBucket: Record<TimeBucket, number>;
-  leadTimeDays?: number;
+  // `null` = the main supplier binding does not state one (BUG-2026-08-13-145).
+  // supplier_material_bindings.moq / .leadTimeDays are `INTEGER NOT NULL
+  // DEFAULT 0` (migrations/0001_init.sql:273,275), so 0 is what an unfilled
+  // row carries — it is indistinguishable from a deliberate zero and must NOT
+  // be rendered as a stated figure. `undefined` is not used for either: the FE
+  // has to be able to tell "unstated" from "the field was dropped in transit".
+  moq: number | null;
+  leadTimeDays: number | null;
   suggestedOrderDate?: string;
 };
 
@@ -294,6 +301,15 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS bucket_beyond DOUBLE PRECISION NOT NULL DEFAULT 0",
       "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS lead_time_days INTEGER",
       "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS suggested_order_date TEXT",
+      // BUG-2026-08-13-145. Nullable ON PURPOSE — NULL is "the supplier
+      // binding does not state an MOQ", which is a different fact from 0 and
+      // from 50. A NOT NULL DEFAULT here would recreate the bug in the schema.
+      "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS moq INTEGER",
+      // BUG-2026-08-13-144 coverage. How many OPEN purchase-order lines could
+      // not be resolved to a material code at all, so their inbound quantity
+      // was credited to nothing. Persisted with the run so a reloaded snapshot
+      // carries its own caveat instead of looking complete.
+      "ALTER TABLE mrp_runs ADD COLUMN IF NOT EXISTS on_order_unresolved_lines INTEGER",
       "CREATE INDEX IF NOT EXISTS idx_mrp_runs_org_run_date ON mrp_runs(org_id, run_date DESC)",
       "CREATE INDEX IF NOT EXISTS idx_mrp_requirements_run ON mrp_requirements(mrp_run_id)",
     ];
@@ -322,6 +338,9 @@ type MrpRunRow = {
   fabricDetail: string | null;
   matchedPos: number;
   unmatchedPos: number;
+  // NULL on any run persisted before BUG-2026-08-13-144 — that run never
+  // counted them, which is not the same fact as "there were none".
+  onOrderUnresolvedLines: number | null;
 };
 
 type MrpRequirementRow = {
@@ -344,6 +363,7 @@ type MrpRequirementRow = {
   bucketWeek34: number;
   bucketBeyond: number;
   leadTimeDays: number | null;
+  moq: number | null;
   suggestedOrderDate: string | null;
 };
 
@@ -372,7 +392,11 @@ function rowsToMRPRun(
       WEEK_3_4: Number(r.bucketWeek34) || 0,
       BEYOND: Number(r.bucketBeyond) || 0,
     },
-    leadTimeDays: r.leadTimeDays ?? undefined,
+    // `?? null`, never `?? undefined` and never `?? 14` / `?? 50`: a run
+    // persisted before BUG-2026-08-13-145 has NULL here and must reload as
+    // "unstated", not as the literal it used to print.
+    leadTimeDays: r.leadTimeDays ?? null,
+    moq: r.moq ?? null,
     suggestedOrderDate: r.suggestedOrderDate ?? undefined,
   }));
   return {
@@ -401,7 +425,7 @@ app.get("/", async (c) => {
     .prepare(
       `SELECT id, runDate, planningHorizon, productionOrderCount, totalMaterials,
               shortageCount, status,
-              fabric_detail, matched_pos, unmatched_pos
+              fabric_detail, matched_pos, unmatched_pos, on_order_unresolved_lines
          FROM mrp_runs
         WHERE orgId = ?
         ORDER BY runDate DESC
@@ -423,7 +447,7 @@ app.get("/", async (c) => {
               suggested_po_qty AS suggested_po_qty,
               preferredSupplierId, preferredSupplierName,
               bucket_this_week, bucket_next_week, bucket_week34, bucket_beyond,
-              leadTimeDays, suggested_order_date
+              leadTimeDays, moq, suggested_order_date
          FROM mrp_requirements
         WHERE mrpRunId = ?`,
     )
@@ -446,6 +470,13 @@ app.get("/", async (c) => {
     meta: {
       matchedPOs: Number(latestRun.matchedPos) || 0,
       unmatchedPOs: Number(latestRun.unmatchedPos) || 0,
+      // `?? null`, not `|| 0`: a run persisted before BUG-2026-08-13-144 has
+      // NULL here — nobody counted the unresolved lines on that run — and
+      // "nobody counted" must not reload as a clean "0 unresolved".
+      onOrderUnresolvedLines:
+        latestRun.onOrderUnresolvedLines == null
+          ? null
+          : Number(latestRun.onOrderUnresolvedLines),
     },
     allRuns: Number(totalRuns?.n) || 0,
   });
@@ -484,7 +515,7 @@ app.get("/runs/:id", async (c) => {
     .prepare(
       `SELECT id, runDate, planningHorizon, productionOrderCount, totalMaterials,
               shortageCount, status,
-              fabric_detail, matched_pos, unmatched_pos
+              fabric_detail, matched_pos, unmatched_pos, on_order_unresolved_lines
          FROM mrp_runs
         WHERE id = ? AND orgId = ?`,
     )
@@ -500,7 +531,7 @@ app.get("/runs/:id", async (c) => {
               suggested_po_qty AS suggested_po_qty,
               preferredSupplierId, preferredSupplierName,
               bucket_this_week, bucket_next_week, bucket_week34, bucket_beyond,
-              leadTimeDays, suggested_order_date
+              leadTimeDays, moq, suggested_order_date
          FROM mrp_requirements
         WHERE mrpRunId = ?`,
     )
@@ -541,7 +572,7 @@ app.post("/", async (c) => {
   const now = new Date();
   const horizonParam = c.req.query("horizon") || "all";
 
-  const [poRes, jcRes, bomRes, rmRes, bindRes, supRes, fabRes, fabricMetrics] = await Promise.all([
+  const [poRes, jcRes, bomRes, rmRes, bindRes, supRes, fabRes, fabricMetrics, onOrderRes] = await Promise.all([
     c.var.DB.prepare(
       `SELECT id, poNo, productCode, itemCategory, fabricCode, quantity,
               targetEndDate, status, gapInches, divanHeightInches,
@@ -579,6 +610,44 @@ app.post("/", async (c) => {
     // cross-PO siblings, buckets by FC dueDate. MRP and Inventory > Fabrics
     // both consume this same Map so the three pages always agree.
     computeFabricMetrics(c.var.DB),
+    // BUG-2026-08-13-144 — ON ORDER. Until 2026-08-14 this route did
+    // `const onOrder = 0;`, so every kilo already on an open purchase order
+    // reported as a full shortage and the page recommended re-ordering
+    // inbound stock.
+    //
+    // Definition is deliberately the SAME one the Fabric tab of this very page
+    // already uses (`computeFabricMetrics`, src/api/lib/fabric-usage.ts:539-566
+    // "PO Outstanding"): open PO = `purchase_orders.status NOT IN
+    // ('RECEIVED','CANCELLED','CLOSED')`, per-line outstanding =
+    // `quantity − COALESCE(receivedQty, 0)` floored at 0 (a GRN over-receipt
+    // must not create negative demand). Two tabs of one page disagreeing about
+    // what "on order" means would be a new defect, so this reuses the in-house
+    // definition rather than inventing a second one. Whether DRAFT POs — placed
+    // with nobody — should count is a judgement call, recorded as an owner
+    // decision in docs/DASHBOARD-DATA-AUDIT.md Part 6 and NOT decided here.
+    //
+    // Code resolution: `purchase_order_items.material_code` (migration 0103,
+    // written by purchase-orders.ts:555) when present; otherwise the legacy
+    // `materialName` convention `"<itemCode> - <description>"` that the Create
+    // PO modal authored before 0103 — SPLIT_PART returns the whole string when
+    // the separator is absent, so a plain-itemCode legacy row also matches.
+    // Lines that resolve to neither are counted separately (see
+    // onOrderUnresolvedLines) instead of being silently dropped, because a
+    // dropped line is exactly the "clean number means cannot see" failure
+    // (BUG-2026-08-13-096).
+    c.var.DB.prepare(
+      `SELECT COALESCE(
+                NULLIF(TRIM(poi.material_code), ''),
+                NULLIF(TRIM(SPLIT_PART(poi.materialName, ' - ', 1)), ''),
+                ''
+              ) AS code,
+              SUM(GREATEST(poi.quantity - COALESCE(poi.receivedQty, 0), 0)) AS qty,
+              COUNT(*) AS lines
+         FROM purchase_order_items poi
+         INNER JOIN purchase_orders po ON po.id = poi.purchaseOrderId
+        WHERE po.status NOT IN ('RECEIVED', 'CANCELLED', 'CLOSED')
+        GROUP BY 1`,
+    ).all<{ code: string; qty: number; lines: number }>(),
   ]);
 
   const activeOrders = poRes.results ?? [];
@@ -587,6 +656,20 @@ app.post("/", async (c) => {
   const rawMaterials = rmRes.results ?? [];
   const bindings = bindRes.results ?? [];
   const suppliers = supRes.results ?? [];
+  // On-order, keyed by resolved material code. The `""` bucket is the group of
+  // open PO lines that carry NEITHER a material_code NOR a parseable
+  // materialName — their inbound quantity belongs to nothing and is published
+  // as a coverage caveat rather than folded into a number.
+  const onOrderByCode = new Map<string, number>();
+  let onOrderUnresolvedLines = 0;
+  for (const r of onOrderRes.results ?? []) {
+    const code = String(r.code ?? "");
+    if (!code) {
+      onOrderUnresolvedLines += Number(r.lines) || 0;
+      continue;
+    }
+    onOrderByCode.set(code, Number(r.qty) || 0);
+  }
   // Adapt fabric_trackings shape to legacy FabricRow shape so the existing
   // detail-builder below (fab.code, fab.name, fab.category, fab.sohMeters)
   // doesn't need to be rewritten.
@@ -698,7 +781,13 @@ app.post("/", async (c) => {
     const rm = rmByCode.get(code);
     const onHand = rm ? rm.balanceQty : 0;
     const grossRequired = Math.ceil(demand.totalQty);
-    const onOrder = 0;
+    // Was `const onOrder = 0;` until 2026-08-14 (BUG-2026-08-13-144). Exact-code
+    // lookup, matching how `onHand` above resolves `rmByCode` — a normCode
+    // fallback on one column and not the other would net a found on-order
+    // against a missed on-hand and produce a worse number than either.
+    // (The exact-string on-hand lookup is its own open row in
+    // docs/DASHBOARD-DATA-AUDIT.md and is deliberately not changed here.)
+    const onOrder = onOrderByCode.get(code) ?? 0;
     const netRequired = Math.max(0, grossRequired - onHand - onOrder);
 
     let status: MaterialRequirement["status"];
@@ -707,16 +796,37 @@ app.post("/", async (c) => {
     else status = "SUFFICIENT";
 
     const mainBinding = mainBindingByCode.get(code);
-    const moq = mainBinding?.moq || 50;
-    const suggestedPOQty = netRequired > 0 ? Math.ceil(netRequired / moq) * moq : 0;
+    // BUG-2026-08-13-145. Was `mainBinding?.moq || 50` and
+    // `mainBinding?.leadTimeDays || 14` — two literals rendered on the row that
+    // carries the supplier's NAME, so the screen read as though the supplier
+    // had stated them. Neither is a measurement and neither has a source.
+    //
+    // Why 0 counts as unstated: both columns are `INTEGER NOT NULL DEFAULT 0`
+    // (migrations/0001_init.sql:273,275), so an untouched binding row holds 0.
+    // The column cannot express "genuinely zero" separately from "nobody ever
+    // filled this in", so 0 is UNMEASURED and renders "—". Note the create
+    // route writes its own invented defaults (`Number(body.leadTimeDays) || 7`,
+    // `Number(body.moq) || 1`, supplier-materials.ts:206,208) — a separate
+    // write-side instance of this class, reported in
+    // docs/DASHBOARD-DATA-AUDIT.md Part 4, not fixed here.
+    const rawMoq = Number(mainBinding?.moq);
+    const moq = Number.isFinite(rawMoq) && rawMoq > 0 ? rawMoq : null;
+    // No MOQ stated → suggest exactly the shortage. That is arithmetic over a
+    // measured figure, not a rounding rule attributed to a supplier.
+    const suggestedPOQty =
+      netRequired > 0 ? (moq == null ? netRequired : Math.ceil(netRequired / moq) * moq) : 0;
     const supplier = mainBinding ? supplierById.get(mainBinding.supplierId) : undefined;
 
-    const leadTimeDays = mainBinding?.leadTimeDays || 14;
+    const rawLead = Number(mainBinding?.leadTimeDays);
+    const leadTimeDays = Number.isFinite(rawLead) && rawLead > 0 ? rawLead : null;
     const earliestNeedDate = demand.poSources
       .filter((s) => s.dueDate)
       .sort((a, b) => a.dueDate.localeCompare(b.dueDate))[0]?.dueDate;
     let suggestedOrderDate: string | undefined;
-    if (earliestNeedDate && netRequired > 0) {
+    // No lead time stated → no deadline. The "Order By" cell used to turn RED
+    // on a date computed by subtracting a literal 14 days; a deadline with no
+    // input is not a late warning, it is a guess wearing one.
+    if (earliestNeedDate && netRequired > 0 && leadTimeDays != null) {
       const needDate = new Date(earliestNeedDate);
       needDate.setDate(needDate.getDate() - leadTimeDays);
       suggestedOrderDate = needDate.toISOString().split("T")[0];
@@ -742,6 +852,7 @@ app.post("/", async (c) => {
         WEEK_3_4: Math.ceil(demand.byBucket.WEEK_3_4),
         BEYOND: Math.ceil(demand.byBucket.BEYOND),
       },
+      moq,
       leadTimeDays,
       suggestedOrderDate,
     });
@@ -831,8 +942,9 @@ app.post("/", async (c) => {
         `INSERT INTO mrp_runs
            (id, orgId, runDate, planningHorizon, productionOrderCount,
             totalMaterials, shortageCount, status,
-            fabric_detail, matched_pos, unmatched_pos, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            fabric_detail, matched_pos, unmatched_pos, created_by,
+            on_order_unresolved_lines)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         newRun.id,
@@ -847,6 +959,7 @@ app.post("/", async (c) => {
         matchedPOs,
         unmatchedPOs,
         userId ?? null,
+        onOrderUnresolvedLines,
       )
       .run();
     for (const req of newRun.requirements) {
@@ -857,8 +970,8 @@ app.post("/", async (c) => {
               grossRequired, onHand, onOrder, netRequired, status,
               suggested_po_qty, preferredSupplierId, preferredSupplierName,
               bucket_this_week, bucket_next_week, bucket_week34, bucket_beyond,
-              leadTimeDays, suggested_order_date)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              leadTimeDays, moq, suggested_order_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           req.id,
@@ -880,6 +993,7 @@ app.post("/", async (c) => {
           req.byBucket.WEEK_3_4,
           req.byBucket.BEYOND,
           req.leadTimeDays ?? null,
+          req.moq ?? null,
           req.suggestedOrderDate ?? null,
         )
         .run();
@@ -899,6 +1013,11 @@ app.post("/", async (c) => {
     meta: {
       matchedPOs,
       unmatchedPOs,
+      // BUG-2026-08-13-144 coverage. Open PO lines that resolve to no material
+      // code at all — their inbound quantity is credited to nothing, so every
+      // "On Order" on this run is a floor, not a total. Published so the page
+      // can say that rather than looking complete.
+      onOrderUnresolvedLines,
       horizon: horizonParam,
       note:
         unmatchedPOs > 0

@@ -42,10 +42,22 @@ type FabricDetail = {
   shortage: boolean;
 };
 
+// BUG-2026-08-13-144 coverage. `onOrderUnresolvedLines` = open purchase-order
+// lines that resolve to no material code at all, so their inbound quantity was
+// credited to nothing. `null` = a run persisted before the count existed, which
+// is NOT "zero unresolved"; both cases are stated on the page rather than
+// letting "On Order" look complete.
+type MRPMeta = {
+  matchedPOs?: number;
+  unmatchedPOs?: number;
+  onOrderUnresolvedLines?: number | null;
+};
+
 type MRPPostResponse = {
   success?: boolean;
   data?: MRPRun;
   fabricDetail?: FabricDetail[];
+  meta?: MRPMeta;
 };
 
 const TABS: { key: Tab; label: string }[] = [
@@ -86,13 +98,21 @@ export default function MRPPage() {
   // response feeds mrpDataFromServer via useMemo; we render whichever is
   // newer so the user sees their just-completed run without a refetch.
   const [mrpDataLocal, setMrpDataLocal] = useState<MRPRun | null>(null);
+  // Paired with mrpDataLocal — the meta belongs to the run being displayed, so
+  // a fresh POST must replace BOTH or the page would show a new run's numbers
+  // under the old run's coverage caveat.
+  const [mrpMetaLocal, setMrpMetaLocal] = useState<MRPMeta | null>(null);
   const [fabricData, setFabricData] = useState<FabricDetail[]>([]);
   const [running, setRunning] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("ALL");
   const [sortDesc, setSortDesc] = useState(true);
   const [horizon, setHorizon] = useState<Horizon>("all");
 
-  const { data: mrpResp, loading } = useCachedJson<{ success?: boolean; data?: unknown }>("/api/mrp");
+  const { data: mrpResp, loading } = useCachedJson<{
+    success?: boolean;
+    data?: unknown;
+    meta?: MRPMeta;
+  }>("/api/mrp");
 
   const mrpDataFromServer: MRPRun | null = useMemo(() => {
     const json = mrpResp;
@@ -109,6 +129,9 @@ export default function MRPPage() {
     return null;
   }, [mrpResp]);
   const mrpData = mrpDataLocal ?? mrpDataFromServer;
+  // Meta follows whichever run is on screen, so the caveat always describes the
+  // numbers beside it.
+  const mrpMeta: MRPMeta | null = mrpDataLocal ? mrpMetaLocal : (mrpResp?.meta ?? null);
 
   const runMRP = async (h?: Horizon) => {
     const selectedHorizon = h ?? horizon;
@@ -118,6 +141,7 @@ export default function MRPPage() {
       const json = (await res.json()) as MRPPostResponse;
       if (json.success && json.data) {
         setMrpDataLocal(json.data);
+        setMrpMetaLocal(json.meta ?? null);
         if (json.fabricDetail) {
           setFabricData(json.fabricDetail);
         }
@@ -246,6 +270,7 @@ export default function MRPPage() {
           sortDesc={sortDesc}
           setSortDesc={setSortDesc}
           allRequirements={requirements}
+          meta={mrpMeta}
         />
       )}
 
@@ -465,6 +490,7 @@ function RequirementsTab({
   sortDesc,
   setSortDesc,
   allRequirements,
+  meta,
 }: {
   requirements: MaterialRequirement[];
   statusFilter: StatusFilter;
@@ -472,8 +498,16 @@ function RequirementsTab({
   sortDesc: boolean;
   setSortDesc: (d: boolean) => void;
   allRequirements: MaterialRequirement[];
+  meta: MRPMeta | null;
 }) {
   const { toast } = useToast();
+  // BUG-2026-08-13-144 coverage, published beside the figures it qualifies.
+  // `undefined` (old client / no meta) and `null` (run predates the count) are
+  // both "nobody counted", which is a different statement from "none" — the
+  // banner says which of the two it is instead of implying full coverage.
+  const unresolvedOnOrderLines = meta?.onOrderUnresolvedLines;
+  const onOrderCoverageUnknown =
+    meta != null && (unresolvedOnOrderLines === null || unresolvedOnOrderLines === undefined);
   const filters: { key: StatusFilter; label: string; count: number }[] = [
     { key: "ALL", label: "All", count: allRequirements.length },
     {
@@ -523,6 +557,26 @@ function RequirementsTab({
         </Button>
       </div>
 
+      {/* On-Order coverage. Every "On Order" below is a floor when some open
+          PO lines resolve to no material code — the shortage beside it is then
+          an over-statement, and the page has to say so rather than let the
+          column read as a complete count (BUG-2026-08-13-096's shape). */}
+      {typeof unresolvedOnOrderLines === "number" && unresolvedOnOrderLines > 0 && (
+        <div className="rounded-md border border-[#E8D597] bg-[#FAEFCB]/60 px-3 py-2 text-xs text-[#7A5A15]">
+          <span className="font-semibold">{unresolvedOnOrderLines}</span> open purchase-order
+          line{unresolvedOnOrderLines === 1 ? "" : "s"} carry no material code, so their
+          inbound quantity is credited to nothing. <strong>On Order below is a floor</strong>,
+          and any shortage it feeds may be overstated.
+        </div>
+      )}
+      {onOrderCoverageUnknown && (
+        <div className="rounded-md border border-[#E2DDD8] bg-[#F5F2ED] px-3 py-2 text-xs text-[#6B7280]">
+          On-Order coverage for this saved run is <span className="font-semibold">—</span> — it
+          was computed before unresolved purchase-order lines were counted. Re-run MRP to
+          measure it.
+        </div>
+      )}
+
       {/* Table */}
       <Card>
         <CardContent className="p-0">
@@ -539,6 +593,16 @@ function RequirementsTab({
                   <th className="text-right p-3 font-medium text-[#6B7280] bg-[#E0EDF0]/10">4+ Wk</th>
                   <th className="text-right p-3 font-medium text-[#6B7280]">Total Req</th>
                   <th className="text-right p-3 font-medium text-[#6B7280]">On Hand</th>
+                  {/* BUG-2026-08-13-144. This column did not exist while the
+                      server hard-coded `onOrder = 0`, so the operator could
+                      not see that Net Req was ignoring every open PO. The
+                      number is now real, and visible where it is subtracted. */}
+                  <th
+                    className="text-right p-3 font-medium text-[#6B7280]"
+                    title="Outstanding quantity on open purchase orders (status not RECEIVED / CANCELLED / CLOSED), per line: ordered − received. Same definition as the Fabric tab's PO Outstanding."
+                  >
+                    On Order
+                  </th>
                   <th className="text-right p-3 font-medium text-[#6B7280]">Net Req</th>
                   <th className="text-center p-3 font-medium text-[#6B7280]">Status</th>
                   <th className="text-right p-3 font-medium text-[#6B7280]">Sugg. PO</th>
@@ -549,10 +613,14 @@ function RequirementsTab({
               </thead>
               <tbody>
                 {requirements.map((req) => {
-                  const buckets = (req as Record<string, unknown>).byBucket as Record<string, number> | undefined;
-                  const leadTime = (req as Record<string, unknown>).leadTimeDays as number | undefined;
-                  const orderBy = (req as Record<string, unknown>).suggestedOrderDate as string | undefined;
-                  const supplierName = (req as Record<string, unknown>).preferredSupplierName as string | undefined;
+                  const buckets = req.byBucket;
+                  // `?? null` — NOT `|| 14`. An absent lead time is a fact
+                  // about the supplier binding, and the row must state it as
+                  // one (BUG-2026-08-13-145).
+                  const leadTime = req.leadTimeDays ?? null;
+                  const moq = req.moq ?? null;
+                  const orderBy = req.suggestedOrderDate;
+                  const supplierName = req.preferredSupplierName;
                   const tw = buckets?.THIS_WEEK || 0;
                   const nw = buckets?.NEXT_WEEK || 0;
                   const w34 = buckets?.WEEK_3_4 || 0;
@@ -578,21 +646,58 @@ function RequirementsTab({
                     <td className="p-3 text-right bg-[#E0EDF0]/10 text-[#6B7280]">{beyond || "-"}</td>
                     <td className="p-3 text-right font-medium">{req.grossRequired}</td>
                     <td className="p-3 text-right">{req.onHand}</td>
+                    <td className={`p-3 text-right ${req.onOrder > 0 ? "text-[#3E6570] font-medium" : "text-[#6B7280]"}`}>
+                      {req.onOrder > 0 ? req.onOrder : "-"}
+                    </td>
                     <td className={`p-3 text-right font-bold ${req.netRequired > 0 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}`}>{req.netRequired}</td>
                     <td className="p-3 text-center">
                       <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border ${statusBadgeColor(req.status)}`}>{req.status}</span>
                     </td>
-                    <td className="p-3 text-right font-medium">{req.suggestedPOQty > 0 ? `${req.suggestedPOQty}` : "-"}</td>
+                    <td
+                      className="p-3 text-right font-medium"
+                      title={
+                        req.suggestedPOQty > 0
+                          ? moq == null
+                            ? "Exactly the shortage — this supplier binding states no MOQ, so nothing was rounded up"
+                            : `Shortage rounded up to the supplier's stated MOQ of ${moq}`
+                          : undefined
+                      }
+                    >
+                      {req.suggestedPOQty > 0 ? `${req.suggestedPOQty}` : "-"}
+                      {req.suggestedPOQty > 0 && (
+                        <span className="block text-[10px] font-normal text-[#9CA3AF]">
+                          {moq == null ? "MOQ —" : `MOQ ${moq}`}
+                        </span>
+                      )}
+                    </td>
                     <td className="p-3 text-left text-xs text-[#6B7280]">
                       {supplierName || "-"}
-                      {leadTime ? <span className="block text-[10px] text-[#9CA3AF]">{leadTime}d lead</span> : null}
+                      {/* An em dash, not a hidden row and not "14d". The lead
+                          time sits under the supplier's NAME, so a literal
+                          here reads as something the supplier told us. */}
+                      <span
+                        className="block text-[10px] text-[#9CA3AF]"
+                        title={
+                          leadTime == null
+                            ? "This supplier binding states no lead time — no order-by date can be computed"
+                            : undefined
+                        }
+                      >
+                        {leadTime == null ? "lead time —" : `${leadTime}d lead`}
+                      </span>
                     </td>
                     <td className="p-3 text-center text-xs">
                       {orderBy ? (
                         <span className={`font-medium ${new Date(orderBy) <= new Date() ? "text-[#9A3A2D]" : "text-[#6B7280]"}`}>
                           {new Date(orderBy).toLocaleDateString("en-MY", { day: "2-digit", month: "short" })}
                         </span>
-                      ) : "-"}
+                      ) : req.netRequired > 0 && leadTime == null ? (
+                        <span className="text-[#9CA3AF]" title="No lead time on the supplier binding — a deadline cannot be computed">
+                          —
+                        </span>
+                      ) : (
+                        "-"
+                      )}
                     </td>
                     <td className="p-3 text-center">
                       {req.status === "SHORTAGE" && (
@@ -608,7 +713,7 @@ function RequirementsTab({
                 {requirements.length === 0 && (
                   <tr>
                     <td
-                      colSpan={15}
+                      colSpan={16}
                       className="p-8 text-center text-[#6B7280]"
                     >
                       No material requirements found. Run MRP to generate.

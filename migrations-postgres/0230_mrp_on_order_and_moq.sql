@@ -1,0 +1,36 @@
+-- ---------------------------------------------------------------------------
+-- 0230_mrp_on_order_and_moq.sql
+--
+-- BUG-2026-08-13-144 / BUG-2026-08-13-145 (docs/BUG-CLASSES.md C15).
+--
+-- /planning/mrp computed its shortages with `const onOrder = 0;`, so every
+-- quantity already sitting on an open purchase order reported as a full
+-- shortage and the page recommended re-ordering inbound stock. Alongside it,
+-- the suggested order quantity was rounded to a literal `|| 50` MOQ and the
+-- "Order By" deadline was built from a literal `|| 14` day lead time — both
+-- printed on the row carrying the supplier's NAME, so they read as figures the
+-- supplier had stated.
+--
+-- Two columns, both DELIBERATELY NULLABLE with no DEFAULT:
+--
+--   * mrp_requirements.moq — the main supplier binding's stated minimum order
+--     quantity, or NULL when it does not state one. NULL renders "—".
+--     `supplier_material_bindings.moq` is itself `INTEGER NOT NULL DEFAULT 0`,
+--     so 0 there cannot be told apart from "never filled in" and is read as
+--     unstated. A NOT NULL DEFAULT on THIS column would put the original bug
+--     back into the schema, which is why there isn't one.
+--
+--   * mrp_runs.on_order_unresolved_lines — how many OPEN purchase-order lines
+--     resolved to no material code at all (neither `material_code` nor a
+--     parseable `materialName`), so their inbound quantity was credited to
+--     nothing. Every "On Order" figure on that run is therefore a floor, not a
+--     total, and the page says so. NULL = this run predates the count; that is
+--     not the same fact as zero unresolved lines, so it must not default to 0.
+--
+-- Both are also applied at runtime by ensurePendingMigrations() in
+-- src/api/routes/mrp.ts — per CLAUDE.md a migration file alone is inert,
+-- the self-apply is what actually reaches prod.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS moq INTEGER;
+ALTER TABLE mrp_runs ADD COLUMN IF NOT EXISTS on_order_unresolved_lines INTEGER;

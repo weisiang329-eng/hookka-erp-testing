@@ -11,8 +11,8 @@
 //   const sql = postgres(prodUrl(), { ssl: "require", max: 1 });
 //
 // Set before running:
-//   export HOOKKA_PROD_DB_URL='postgresql://postgres:...@db.vpwdqt....supabase.co:5432/postgres'
-//   export HOOKKA_STAGING_DB_URL='postgresql://postgres:...@db.zaxygx....supabase.co:5432/postgres'
+//   export HOOKKA_PROD_DB_URL='postgresql://postgres:<YOUR-DB-PASSWORD>@db.vpwdqt....supabase.co:5432/postgres'
+//   export HOOKKA_STAGING_DB_URL='postgresql://postgres:<YOUR-DB-PASSWORD>@db.zaxygx....supabase.co:5432/postgres'
 //
 // Fails loudly rather than defaulting. A script that silently connected to the
 // wrong database would be worse than one that refuses to start — several of

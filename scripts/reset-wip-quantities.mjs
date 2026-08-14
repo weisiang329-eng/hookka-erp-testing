@@ -20,7 +20,7 @@
 // negative rows.
 //
 // USAGE
-//   export HOOKKA_PROD_DB_URL='postgresql://postgres:...@db.vpwdqt....supabase.co:5432/postgres'
+//   export HOOKKA_PROD_DB_URL='postgresql://postgres:<YOUR-DB-PASSWORD>@db.vpwdqt....supabase.co:5432/postgres'
 //   node --import tsx/esm scripts/reset-wip-quantities.mjs              # dry run
 //   node --import tsx/esm scripts/reset-wip-quantities.mjs --limit 40   # dry run, show more
 //   node --import tsx/esm scripts/reset-wip-quantities.mjs --apply      # WRITES

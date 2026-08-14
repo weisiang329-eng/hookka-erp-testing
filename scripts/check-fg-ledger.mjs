@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // check-fg-ledger.mjs — do the two finished-goods ledgers agree?
 //
-//   export HOOKKA_PROD_DB_URL='postgresql://postgres:...@db.vpwdqt....supabase.co:5432/postgres'
+//   export HOOKKA_PROD_DB_URL='postgresql://postgres:<YOUR-DB-PASSWORD>@db.vpwdqt....supabase.co:5432/postgres'
 //   node --import tsx/esm scripts/check-fg-ledger.mjs            # prod
 //   node --import tsx/esm scripts/check-fg-ledger.mjs --staging  # staging
 //

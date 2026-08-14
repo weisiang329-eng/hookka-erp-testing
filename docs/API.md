@@ -116,7 +116,7 @@ offsets pointing past the end of their own file.
 | `/api/stock` | `src/api/routes/stock-breakdown.ts` | `GET /breakdown` <sub>:168</sub> | gated |
 | `/api/goods-in-transit` | `src/api/routes/goods-in-transit.ts` | `GET /` <sub>:92</sub><br>`POST /` <sub>:117</sub><br>`GET /:id` <sub>:240</sub><br>`PUT /:id` <sub>:255</sub><br>`DELETE /:id` <sub>:364</sub> | gated |
 | `/api/suppliers` | `src/api/routes/suppliers.ts` | `GET /` <sub>:266</sub><br>`POST /` <sub>:292</sub><br>`GET /:id` <sub>:422</sub><br>`POST /_backfill-snapshot-names` <sub>:452</sub><br>`PUT /:id` <sub>:474</sub><br>`DELETE /:id` <sub>:704</sub> | gated |
-| `/api/supplier-materials` | `src/api/routes/supplier-materials.ts` | `GET /` <sub>:133</sub><br>`POST /` <sub>:165</sub><br>`GET /:id` <sub>:283</sub><br>`PUT /:id` <sub>:295</sub><br>`DELETE /:id` <sub>:429</sub> | gated |
+| `/api/supplier-materials` | `src/api/routes/supplier-materials.ts` | `GET /` <sub>:133</sub><br>`POST /` <sub>:165</sub><br>`GET /:id` <sub>:294</sub><br>`PUT /:id` <sub>:306</sub><br>`DELETE /:id` <sub>:440</sub> | gated |
 | `/api/supplier-scorecards` | `src/api/routes/supplier-scorecards.ts` | `GET /` <sub>:47</sub><br>`GET /summary` <sub>:94</sub><br>`GET /:supplierId` <sub>:182</sub> | gated |
 | `/api/price-history` | `src/api/routes/price-history.ts` | `GET /` <sub>:56</sub><br>`POST /` <sub>:100</sub> | gated |
 | `/api/auth/oauth` | `src/api/routes/auth-oauth.ts` | `GET /google/start` <sub>:52</sub><br>`GET /google/callback` <sub>:97</sub> | **public** (PUBLIC_PREFIXES) |

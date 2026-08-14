@@ -50,7 +50,7 @@ test("a line is scored against its OWN order's line", () => {
     /poItems\[gi\.poItemIndex\]/,
     "indexing the header order's lines is exactly the bug",
   );
-  // ⚠ REWRITTEN 2026-08-14 (BUG-2026-08-13-144). This test used to pin the
+  // ⚠ REWRITTEN 2026-08-14 (BUG-2026-08-13-150). This test used to pin the
   // resolution EXPRESSIONS inline in the route — `poItemById.get(lineItemId)`
   // and `(itemsByPo.get(ownerPoId) ?? [])[gi.poItemIndex]`. Both were correct
   // as far as they went and both are gone, because `ownerPoId` fell back to
@@ -80,7 +80,7 @@ test("poTotal covers every order the receipt draws down", () => {
 });
 
 test("the header PO is preserved, so single-PO matches are unchanged", () => {
-  // ⚠ REWRITTEN 2026-08-14 (BUG-2026-08-13-144). The old assertion pinned
+  // ⚠ REWRITTEN 2026-08-14 (BUG-2026-08-13-150). The old assertion pinned
   // `?? pos[0]` as if it were the fix. It was the second guess: `pos` is loaded
   // from the LINE orders, so on a receipt whose header order is not among them
   // the `.find` misses — the case this code exists for — and `pos[0]` is
@@ -98,7 +98,7 @@ test("the match row records every order, and still names one as the header", () 
   // involved.
   assert.match(SRC, /INSERT INTO three_way_matches \(id, poId, po_ids, poNumber/);
   assert.match(SRC, /JSON\.stringify\(pos\.map\(\(p\) => p\.id\)\)/);
-  // `headerPo` is nullable since BUG-2026-08-13-144 — a receipt whose header
+  // `headerPo` is nullable since BUG-2026-08-13-150 — a receipt whose header
   // order is not among its line orders has no single header to name, and
   // `poNumber` already lists every order when there is more than one.
   assert.match(

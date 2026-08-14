@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // check-first-one-wins-blast-radius.mjs — READ-ONLY. Writes nothing.
 //
-// BUG-2026-08-13-144 … -147. How many rows the four first-one-wins guesses
+// BUG-2026-08-13-150 … -147. How many rows the four first-one-wins guesses
 // could actually have touched is UNMEASURED — the branch that fixed them was
 // developed with no database credential. This script is that measurement, for
 // whoever has the credential to run it. Do NOT quote a number for any of these

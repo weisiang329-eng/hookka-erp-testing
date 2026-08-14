@@ -130,7 +130,7 @@ function parseItems(raw: string | null): MatchItem[] {
   try {
     const rows = JSON.parse(raw) as Partial<MatchItem>[];
     if (!Array.isArray(rows)) return [];
-    // Rows written before BUG-2026-08-13-144 carry no `resolution` and cannot
+    // Rows written before BUG-2026-08-13-150 carry no `resolution` and cannot
     // now be told apart from a resolved one — the guess that produced them left
     // no trace. They are reported as `legacy-unknown` rather than silently
     // labelled `id`, which would be the same lie one layer up.

@@ -254,7 +254,7 @@ a query; the endpoint now computes it on every load, so the first real page view
 
 **Verified.** 6 assertions, each proved RED — including one that reintroduces
 `rowsObserved = !loading` and one that removes the unknown-first colour branch.
-## BUG-2026-08-13-144 — the three-way match priced a receipt line against ANOTHER purchase order's line at the same position `procurement` `data-integrity` 🟢
+## BUG-2026-08-13-150 — the three-way match priced a receipt line against ANOTHER purchase order's line at the same position `procurement` `data-integrity` 🟢
 
 **Class:** [C21 — first-one-wins](BUG-CLASSES.md#c21--first-one-wins-taking-0-when-several-rows-could-answer),
 the class BUG-2026-07-17-001 named. New instance, on the money path.
@@ -335,7 +335,7 @@ exit 0; `npm test` 4,139 tests / 0 fail.
 
 ---
 
-## BUG-2026-08-13-145 — a scanned schedule barcode could open a DIFFERENT job card, and mark the whole card done `production-orders` `data-integrity` 🟢
+## BUG-2026-08-13-151 — a scanned schedule barcode could open a DIFFERENT job card, and mark the whole card done `production-orders` `data-integrity` 🟢
 
 **Class:** C21.
 
@@ -361,7 +361,7 @@ candidate is an observation; being first in a list of several is a guess. The
 
 ---
 
-## BUG-2026-08-13-146 — an 8-digit hash used as an identity, resolved by `.find` over every job card in a department `production-orders` `data-integrity` 🟢
+## BUG-2026-08-13-152 — an 8-digit hash used as an identity, resolved by `.find` over every job card in a department `production-orders` `data-integrity` 🟢
 
 **Class:** C21 — the dangerous variant: a match on a **non-unique key** deciding identity.
 
@@ -389,7 +389,7 @@ groups. The refusal is required either way: the population grows with every job 
 
 ---
 
-## BUG-2026-08-13-147 — a scan of piece 5 completed piece 1 `production-orders` `data-integrity` 🟢
+## BUG-2026-08-13-153 — a scan of piece 5 completed piece 1 `production-orders` `data-integrity` 🟢
 
 **Class:** C21.
 

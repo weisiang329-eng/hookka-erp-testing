@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// first-one-wins-refusal.test.mjs — BUG-2026-08-13-144 … -147.
+// first-one-wins-refusal.test.mjs — BUG-2026-08-13-150 … -147.
 //
 // THE CLASS: code needs ONE row, several could answer (or none exactly does),
 // and it takes `[0]`. The pick is silent, it is arbitrary — `IN (...)` and a
@@ -67,7 +67,7 @@ const PO_ITEMS = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
-// BUG-2026-08-13-144 — BEHAVIOURAL: the money path refuses to guess.
+// BUG-2026-08-13-150 — BEHAVIOURAL: the money path refuses to guess.
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("-144 a line with no po_id on a MULTI-order receipt is refused, not priced off order [0]", () => {
@@ -166,7 +166,7 @@ test("-144 buildPoLineIndex preserves the caller's ORDER BY and does not re-sort
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// BUG-2026-08-13-144 — STRUCTURAL: the route wires the resolver in, prices
+// BUG-2026-08-13-150 — STRUCTURAL: the route wires the resolver in, prices
 // NULL rather than 0, and cannot report FULL_MATCH over an unchecked line.
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -246,7 +246,7 @@ test("-144 the position is read against the SAME order the stock draw-down uses"
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// BUG-2026-08-13-145 — the worker's barcode opens the card they scanned.
+// BUG-2026-08-13-151 — the worker's barcode opens the card they scanned.
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("-145 a schedule barcode resolves only to a SOLE match, never to matches[0]", () => {
@@ -268,7 +268,7 @@ test("-145 the whole-card completion still hangs off that single hit", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// BUG-2026-08-13-146 — an 8-digit hash is not an identity.
+// BUG-2026-08-13-152 — an 8-digit hash is not an identity.
 // ═══════════════════════════════════════════════════════════════════════════
 
 for (const [label, src] of [
@@ -298,7 +298,7 @@ for (const [label, src] of [
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// BUG-2026-08-13-147 — a scan of piece 5 must not complete piece 1.
+// BUG-2026-08-13-153 — a scan of piece 5 must not complete piece 1.
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("-147 the scanned piece resolves to its own slot, or to a card that has only one", () => {

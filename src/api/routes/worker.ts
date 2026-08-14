@@ -684,7 +684,7 @@ app.get("/scan-lookup", async (c) => {
                 departmentCode: string | null;
               }>()
           ).results ?? [];
-        // BUG-2026-08-13-146. COUNT the claimants — this was `.find(...)`,
+        // BUG-2026-08-13-152. COUNT the claimants — this was `.find(...)`,
         // first-one-wins on a NON-UNIQUE key. `deriveBarcodeToken` is an
         // 8-digit FNV-1a fold (`% 100_000_000`), and the comment above it
         // justifies the collision risk as "bounded by current WIP for one

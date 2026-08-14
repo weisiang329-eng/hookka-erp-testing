@@ -2,7 +2,7 @@
 // grn-po-line-link.ts — the per-line link from a GOODS RECEIPT line back to the
 // PURCHASE-ORDER line it receives.
 //
-// BUG-2026-08-13-144. `three-way-match.ts` resolved that link with two guesses
+// BUG-2026-08-13-150. `three-way-match.ts` resolved that link with two guesses
 // stacked on each other:
 //
 //     const headerPo  = pos.find((p) => p.id === grn.poId) ?? pos[0];

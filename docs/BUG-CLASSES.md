@@ -1,7 +1,7 @@
 # Recurring bug classes — the index that makes P5 executable
 
 > **Last verified: 2026-08-14** — restamped on branch `fix/dashboard-tiles`, which
-> **closes C15 row 33 and adds rows 42–44** (BUG-2026-08-13-144/-145/-146/-147: the MRP
+> **closes C15 row 33 and adds rows 42–44** (BUG-2026-08-13-150/-145/-146/-147: the MRP
 > shortage that ignored every open PO plus its invented MOQ / lead time, `/production`
 > Overview's 0-of-0 on a cold landing, and `/production/wip-times`' four tiles — including
 > the Missing-BOM tile that could not observe the worst case it exists to count).
@@ -40,7 +40,7 @@
 > **Last verified: 2026-08-14** — restamped on branch `fix/first-one-wins-sweep`:
 > adds **C21 — first-one-wins: taking `[0]` when several rows could answer**, the class
 > BUG-2026-07-17-001 named and never got an index entry. 15 rows: five FIXED
-> (BUG-2026-08-13-144…147, incl. the three-way match pricing a receipt line against another
+> (BUG-2026-08-13-150…147, incl. the three-way match pricing a receipt line against another
 > ORDER's line at the same position), two left OPEN with reasons, and eight classified
 > BENIGN **with the reason**, so the next sweep does not re-litigate them. Enforced by
 > `tests/first-one-wins-refusal.test.mjs`; all 23 mutations proved RED with bytes-changed
@@ -1434,11 +1434,11 @@ IDENTITY or MONEY.
 
 | # | site | what `[0]` decided | state |
 |---|---|---|---|
-| 1 | `three-way-match.ts:590/596/600` — `pos.find(p => p.id === grn.poId) ?? pos[0]`, then a POSITIONAL index into that order | the PO **price** a receipt line is matched against | ✅ 2026-08-14 (BUG-2026-08-13-144) — `grn-po-line-link.ts`; unresolved lines price NULL, carry a `resolution`, and cannot reach `FULL_MATCH` |
-| 2 | same site — `poItemIndex` read against `ORDER BY id` while `grn.ts:930` reads it against `PO_ITEMS_ORDER` | which PO line was **priced** vs which was **drawn down** | ✅ 2026-08-14 (BUG-2026-08-13-144) — both now read `PO_ITEMS_ORDER` |
-| 3 | `worker/scan.tsx:1010` — `matches.find(exact) ?? matches[0]`, then `wholeCard: true` | which job card a worker **completes** | ✅ 2026-08-14 (BUG-2026-08-13-145) — sole claimant only |
-| 4 | `worker.ts:687` + `public-rack-qr.ts:337` — `cand.find(deriveBarcodeToken(...) === term)` over EVERY card in a dept | which physical piece a scan refers to, and which card a stock-in is stamped with | ✅ 2026-08-14 (BUG-2026-08-13-146) — `filter` + `length === 1`, refusal logged |
-| 5 | `production-orders.ts:2063` — `slots.find(s => s.pieceNo === pieceNo) ?? slots[0]` | which **piece** gets completed and who is credited | ✅ 2026-08-14 (BUG-2026-08-13-147) — sole-slot cards only |
+| 1 | `three-way-match.ts:590/596/600` — `pos.find(p => p.id === grn.poId) ?? pos[0]`, then a POSITIONAL index into that order | the PO **price** a receipt line is matched against | ✅ 2026-08-14 (BUG-2026-08-13-150) — `grn-po-line-link.ts`; unresolved lines price NULL, carry a `resolution`, and cannot reach `FULL_MATCH` |
+| 2 | same site — `poItemIndex` read against `ORDER BY id` while `grn.ts:930` reads it against `PO_ITEMS_ORDER` | which PO line was **priced** vs which was **drawn down** | ✅ 2026-08-14 (BUG-2026-08-13-150) — both now read `PO_ITEMS_ORDER` |
+| 3 | `worker/scan.tsx:1010` — `matches.find(exact) ?? matches[0]`, then `wholeCard: true` | which job card a worker **completes** | ✅ 2026-08-14 (BUG-2026-08-13-151) — sole claimant only |
+| 4 | `worker.ts:687` + `public-rack-qr.ts:337` — `cand.find(deriveBarcodeToken(...) === term)` over EVERY card in a dept | which physical piece a scan refers to, and which card a stock-in is stamped with | ✅ 2026-08-14 (BUG-2026-08-13-152) — `filter` + `length === 1`, refusal logged |
+| 5 | `production-orders.ts:2063` — `slots.find(s => s.pieceNo === pieceNo) ?? slots[0]` | which **piece** gets completed and who is credited | ✅ 2026-08-14 (BUG-2026-08-13-153) — sole-slot cards only |
 | 6 | `production/scan.tsx:186` — `order.jobCards.find(IN_PROGRESS\|WAITING) \|\| order.jobCards[0]` on a PO-number search | which job card the production floor opens | ⬜ **open** — same shape as row 3 on the desktop scan page. Not touched on 2026-08-14 because `src/pages/production/` was owned by another branch that day |
 | 7 | `service-cases/detail.tsx:270` — `hubs.find(h => h.isDefault) ?? hubs[0]` | the **Deliver-To address printed** on a service report | ⬜ **open, and it is also C3.** C3's rule is *derive the hub from the document's own contents* — the case's SV orders carry one. Left for the owner: whether a service report may print a hub the customer never flagged is a judgement call, not a provable defect (owner rule: ask when unsure) |
 | 8 | `admin.ts:1229`, `delivery-orders/_helpers.ts:1419` — `inv.salesOrderId ?? soIds[0]` as `priceForItem`'s `fallbackSoId` | a price, but only for lines with **no production-order link** | ⬜ **deliberate, do not "fix" in isolation** — this is `priceForItem`'s documented first-one-wins, whose last resort is `byAnyCode` anyway. Closed as the price half of BUG-2026-07-17-001 (2026-08-07) |

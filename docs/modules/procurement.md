@@ -45,8 +45,8 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
 1. **Create PO** — `app.post("/")` `purchase-orders.ts:430`. Takes `body.status` verbatim (MANUAL create sends `CONFIRMED`; defaults DRAFT only when omitted). Fills blank supplier SKUs from bindings (`fillBlankSupplierSku` `:172`); column self-apply in `ensurePendingMigrations` (`:1063`).
 2. **Receive → Post-to-Stock cascade** — GRN status derives from ARRIVAL on create (`grn.ts:1300`): local-in-hand (arrival ARRIVED) is born POSTED and posts immediately; OCR/import → DRAFT. Crossing to POSTED calls `postGRNToStock` (`:521`, resolves RM via `resolveRmForGRNItem` `:473`, bumps `raw_materials.balanceQty`, writes `cost_ledger`) then `cascadePOStatusAfterGRNPost` (`:811`, flips PO → RECEIVED/PARTIAL_RECEIVED). `COMMITTED_STATUSES = {CONFIRMED,POSTED}` (`:305`).
 3. **Edit a POSTED GRN line** — `app.put("/:id")` `grn.ts:1789`; when prev+new both committed, `buildPostedGRNStockAdjustment` (`:670`) posts only the DELTA via the same helpers, and `cascadePOReceivedQtyDelta` (`:1085`) moves the parent PO line. Blocked when `newAccepted < invoiced_qty` or lines added/removed (`checkGrnLineQtyEdit` in `purchase-edit-rules.ts:135`).
-4. **PI create → convert-chain + GL post** — `app.post("/")` `purchase-invoices.ts:1047`; `ensurePiMigrations` is defined at `:49` and awaited inside. MANUAL → PENDING_APPROVAL, OCR (`ocrUsed`) → DRAFT. `checkConvertAvailability` (`convert-chain.ts:81`) line-level 409 guard; increments `grn_items.invoiced_qty`. Reaching APPROVED posts AP legs via `mapPurchaseLinesToAccounts` (`:170`) → `buildPiApprovalLegs` (`pi-posting.ts:35`).
-5. **Edit PI (DRAFT or APPROVED)** — `app.put("/:id")` `purchase-invoices.ts:1900`, gated by `isPiEditable` (`purchase-edit-rules.ts:34`). Re-syncs `grn_items.invoiced_qty` (floored by `clampDecrement`, ceilinged by `checkInvoicedQtyCeilingAfterEdit` `:665`); an APPROVED edit posts a GL CORRECTION for the amount delta against a fresh sourceId.
+4. **PI create → convert-chain + GL post** — `app.post("/")` `purchase-invoices.ts:1068`; `ensurePiMigrations` is defined at `:49` and awaited inside. MANUAL → PENDING_APPROVAL, OCR (`ocrUsed`) → DRAFT. `checkConvertAvailability` (`convert-chain.ts:81`) line-level 409 guard; increments `grn_items.invoiced_qty`. Reaching APPROVED posts AP legs via `mapPurchaseLinesToAccounts` (`:170`) → `buildPiApprovalLegs` (`pi-posting.ts:35`).
+5. **Edit PI (DRAFT or APPROVED)** — `app.put("/:id")` `purchase-invoices.ts:1921`, gated by `isPiEditable` (`purchase-edit-rules.ts:34`). Re-syncs `grn_items.invoiced_qty` (floored by `clampDecrement`, ceilinged by `checkInvoicedQtyCeilingAfterEdit` `:665`); an APPROVED edit posts a GL CORRECTION for the amount delta against a fresh sourceId.
 6. **Supplier payment allocation** — `app.post("/")` `supplier-payments.ts:124` (multi-allocation MYR/FX; unallocated = advance); `/knock-off` (`:572`) / `/un-knock` (`:733`) reattribute an advance with NO GL move; void/unvoid via `buildSupplierPaymentLifecycle` (`:827`).
 
 ## Key functions / sections (locate-to-function)
@@ -66,11 +66,11 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
 | `restorePOReceivedQtyForGRN` | `src/api/routes/grn.ts:992` | Un-post/cancel/delete: give back PO qty |
 | `resolveRmForGRNItem` | `src/api/routes/grn.ts:473` | Resolve GRN line → raw_material |
 | `app.post("/")` (GRN create) | `src/api/routes/grn.ts:1300` | GRN create; status derived from arrival |
-| `app.put("/:id/arrival")` | `src/api/routes/grn.ts:2174` | Arrival state transition (gate) |
-| `app.post("/")` (PI create) | `src/api/routes/purchase-invoices.ts:1047` | PI create + convert-chain + GL post |
-| `app.put("/:id")` (PI edit) | `src/api/routes/purchase-invoices.ts:1900` | PI edit (DRAFT+APPROVED) + GL correction |
-| `checkInvoicedQtyCeilingAfterEdit` | `src/api/routes/purchase-invoices.ts:665` | Ceiling on re-synced invoiced_qty |
-| `mapPurchaseLinesToAccounts` | `src/api/routes/purchase-invoices.ts:170` | PI lines → GL account buckets |
+| `app.put("/:id/arrival")` | `src/api/routes/grn.ts:2183` | Arrival state transition (gate) |
+| `app.post("/")` (PI create) | `src/api/routes/purchase-invoices.ts:1068` | PI create + convert-chain + GL post |
+| `app.put("/:id")` (PI edit) | `src/api/routes/purchase-invoices.ts:1921` | PI edit (DRAFT+APPROVED) + GL correction |
+| `checkInvoicedQtyCeilingAfterEdit` | `src/api/routes/purchase-invoices.ts:686` | Ceiling on re-synced invoiced_qty |
+| `mapPurchaseLinesToAccounts` | `src/api/routes/purchase-invoices.ts:183` | PI lines → GL account buckets |
 | `buildPiApprovalLegs` | `src/lib/pi-posting.ts:35` | PI AP GL legs on APPROVED |
 | `isPiEditable` / `checkGrnLineQtyEdit` | `src/lib/purchase-edit-rules.ts:34 / 135` | Shared FE+BE edit gates |
 | `checkConvertAvailability` / `clampDecrement` | `src/lib/convert-chain.ts:81 / 138` | Line-level 409 guard + floor |
@@ -95,7 +95,7 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
 ## Common tasks (mini-playbook)
 - **Add a field to a PO/GRN/PI** → snake_case column + runtime `ALTER … ADD COLUMN IF NOT EXISTS` in the route's `ensure*Migrations` before the first write; add a `column-rename-map.json` entry; persist in POST/PUT; surface in the `rowTo*` mapper; render in the page. Read dual-keyed.
 - **Change the receive/stock cascade** → edit `postGRNToStock` (`grn.ts:521`) + `cascadePOStatusAfterGRNPost` (`:811`); keep `restorePOReceivedQtyForGRN` (`:992`) symmetric. Verify `tests/grn-arrival-state.test.mjs` + `tests/purchase-edit-cascade.test.mjs`.
-- **Adjust a PI GL posting** → change legs in `buildPiApprovalLegs` (`pi-posting.ts:35`) / bucket mapping `mapPurchaseLinesToAccounts` (`purchase-invoices.ts:170`); post on the APPROVED transition AND create-as-APPROVED; never mutate existing ledger legs.
+- **Adjust a PI GL posting** → change legs in `buildPiApprovalLegs` (`pi-posting.ts:35`) / bucket mapping `mapPurchaseLinesToAccounts` (`purchase-invoices.ts:183`); post on the APPROVED transition AND create-as-APPROVED; never mutate existing ledger legs.
 - **Touch the convert-chain** → guard in `checkConvertAvailability` (`convert-chain.ts:81`); keep `invoiced_qty`/`receivedQty` increment+restore paired. Verify `tests/convert-chain.test.mjs` + `tests/purchasing-convert-flow.test.mjs`.
 - **Change supplier pricing** → binding CRUD in `supplier-materials.ts`; append audit via `price-history.ts`; render the log in `suppliers/detail.tsx`. Verify `tests/supplier-effective-pricing.test.mjs`.
 

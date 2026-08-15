@@ -49,6 +49,20 @@ jobs:
           fi
           echo "Manual sync confirmed."
 
+      # Needed by the sanitisation step at the end of this job. Checked out and
+      # installed up front so a dependency problem fails the run BEFORE prod is
+      # dumped, rather than after staging has already been loaded with
+      # unsanitised production data.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies (for the sanitiser)
+        run: npm ci --no-audit --no-fund
+
       - name: Install PostgreSQL 17 client
         # Supabase runs Postgres 17.6 on Pro plan as of 2026-05. pg_dump
         # requires client version >= server major. Ubuntu 24.04 only ships
@@ -153,6 +167,26 @@ jobs:
           psql "$PROD_URL" -c "SELECT (SELECT COUNT(*) FROM job_cards) AS jc, (SELECT COUNT(*) FROM audit_events) AS audit, (SELECT MAX(applied_at) FROM _migrations) AS latest_migration;"
           echo "=== Staging row counts ==="
           psql "$STAGING_URL" -c "SELECT (SELECT COUNT(*) FROM job_cards) AS jc, (SELECT COUNT(*) FROM audit_events) AS audit, (SELECT MAX(applied_at) FROM _migrations) AS latest_migration;"
+
+      # MANDATORY. The step above has just loaded a verbatim copy of production
+      # into a public-internet test site: real payroll, real bank accounts and
+      # passport numbers, ~4,200 live auth tokens, every customer and supplier
+      # contact detail, ~3,200 real business emails, and a queue of outbound
+      # mail addressed to real customers.
+      #
+      # This step is what makes staging safe to hand to a tester or an intern.
+      # It is deliberately placed so that it CANNOT be skipped: if it fails, the
+      # job fails, and the job failing is the signal that staging is not safe to
+      # use. Do not add `continue-on-error` here. If this step is ever removed,
+      # the sync must be disabled with it.
+      #
+      # The script asserts it is talking to the staging project before writing a
+      # single row, and re-queries afterwards to prove the scrub landed.
+      - name: Sanitise staging (MANDATORY — strips payroll / PII / credentials)
+        env:
+          STAGING_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          STAGING_TEST_PASSWORD: ${{ secrets.STAGING_TEST_PASSWORD }}
+        run: node scripts/sanitize-staging.mjs --apply
 
       # Staging is a TEST environment — after cloning prod, set every worker's
       # phone-portal PIN to the shared test value 123456 so the owner / test

@@ -1,0 +1,18 @@
+# Every file in this repository is owned by the business owner.
+#
+# Paired with "Require review from Code Owners" on `main`, this is what makes
+# the owner's approval SPECIFICALLY required — not just any approval.
+#
+# Without this file, branch protection only asks for "1 approving review", and
+# GitHub lets ANY collaborator with write access give it. Four accounts besides
+# the owner have write on this repo, so two of them could approve each other
+# and merge to main without the owner ever seeing the change. That is the exact
+# thing the owner asked to prevent (2026-08-15).
+#
+# The owner is an admin, so he can still merge his own PRs — admins are allowed
+# to bypass protection. Everyone else needs his review.
+#
+# Keep this as a single catch-all line. Narrower per-directory rules would mean
+# some paths quietly fall back to "any collaborator can approve".
+
+* @weisiang329-eng

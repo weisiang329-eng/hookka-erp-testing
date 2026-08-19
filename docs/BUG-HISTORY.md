@@ -34,6 +34,79 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-19-155 — every SO created by dragging a PDF into the scan modal silently kept NO copy of the customer's PO, for a month `sales-orders` `ui-frontend` `data-integrity` 🟢
+
+> Owner, 2026-08-19: 「新的 SO 也是没有 PO 就是顾客的 PO 记录 可以返回」 — and then, decisively:
+> 「**我之前修改过了的 可是发现还是没有那个附件**」. He had already had this fixed. It had been
+> merged on 2026-07-15 (`8563f509`). It had never once run.
+
+**Symptom.** The "View original" button never appears on an SO. It is gated on
+`(order.customerPOImageB64 || poOriginalUrl)` (`src/pages/sales/detail.tsx:1467`); with
+neither present it renders nothing at all — so the failure looked like a missing feature,
+not a missing file. Sampled on prod: **0 SOs carried an `/api/files` attachment.**
+
+**Root cause — two independent faults, both invisible to a reader.**
+
+```js
+// src/components/scan-po-modal.tsx, before
+if (data.data.id && row.scanQueueRowId) {          // fault 1
+  originalUploads.push(persistSoOriginal(data.data.id, row.scanQueueRowId, po.customerPO));
+}
+```
+
+1. **The gate is never true for the common case.** `scanQueueRowId` is set only on rows
+   *resumed from the background scan queue*. The sync `/extract` path — dragging a PDF
+   straight into the modal, which is how the POs actually arrive — constructs its rows with
+   `scanQueueRowId: null` (`scan-po-modal.tsx:760`). The `if` simply did not run.
+2. **The template-match fallback branch had no call at all.** A second SO-creation loop
+   exists for POs that Claude failed to parse; nobody added the line there.
+
+**Why a month passed.** Fault 1 is a *silent skip*. There is no error, no console line, no
+warning on the done step — an `if` that does not fire leaves no trace anywhere. The
+machinery for reporting a failed save already existed and was correct; it was simply never
+reached. **An unmet condition is not a caught error, and code that only reports the errors
+it catches will not tell you it did nothing.**
+
+**The shape, because it will recur.** The two scan entry points are COMPLEMENTARY, and each
+is missing exactly what the other has:
+
+| entry point | `file` | `scanQueueRowId` |
+|---|---|---|
+| direct upload (sync `/extract`) | the **real File** | `null` |
+| resumed from scan queue | a **zero-byte placeholder** (`scan-po-modal.tsx:1389`) | the row id |
+
+The old code asked for the queue id only, so it was a no-op for every operator who drags a
+file in. Note the trap in the other direction too: "just use `row.file`" would upload an
+**empty** attachment for queue rows and report success — worse, because it looks fixed.
+
+**Fix.** `src/lib/so-original.ts` (new). `originalSourceForRow()` asks the question once and
+takes whichever source is real — File if `size > 0`, else the queue id, else `null`; and
+`persistSoOriginal()` now takes that source, so a File is uploaded directly with no server
+round trip. Both create branches call it, ungated, and a `null` source returns
+`{ ok: false }` — which the existing done-step warning surfaces to the operator **while they
+still have the paper in hand**. The logic was moved OUT of the component deliberately: at
+~3,500 lines it cannot be unit-tested, and untestable is how this survived review.
+
+**Verified.** `tests/so-original-every-path.test.mjs` — 8 tests, 7 of them behavioural
+against the real functions with a stubbed `fetch`. Proven RED against each original fault
+before being trusted: restoring the queue-id gate, deleting the fallback call, and dropping
+the zero-byte check each turn the suite red; the tree restores green. `tsc` strict: 0 errors.
+
+**UNVERIFIED on prod:** no live SO has been created through the fixed modal yet, and this
+session had no working DB credential (`.dev.vars` is the rotated one, `28P01`; the Supabase
+REST key cannot see these tables). The proof that matters is the next scanned PO showing
+"View original" — that is an owner-side check, not a claim to make here.
+
+**Same class, NOT fixed — `src/components/scan-supplier-modal.tsx`.** The supplier scan
+gates its source-document upload the same way, `if (card.scanQueueRowId)` (~:2091), and
+`buildCard(upload.file.name, …)` at **:1755** and **:4405** (the file holds two copies of the
+component) leaves that argument at its `null` default for the direct-upload path. So a
+purchase invoice scanned by dragging a PDF in loses its source document too — owner rule
+2026-06-30, same failure, different document. It is **not** fixed here because
+`PreviewCard` keeps only `fileName`, never the File, so closing it means threading the File
+through two duplicated ~2,000-line components. Recorded rather than done: it is outside what
+was asked, and worth its own change.
+
 ## BUG-2026-08-13-154 — creating a supplier binding invented a 7-day lead time and an MOQ of 1, and `/planning/mrp` printed them under the supplier's name `procurement` `mrp` `data-integrity` 🟢
 
 > **The write-side half of BUG-2026-08-13-145.** That entry fixed the READ: `/planning/mrp`

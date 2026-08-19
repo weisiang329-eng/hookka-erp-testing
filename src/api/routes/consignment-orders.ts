@@ -2377,6 +2377,18 @@ app.put("/:id", async (c) => {
       ),
     );
 
+    // The CO edit form can move the hub too, and the sticker prints
+    // fg_units.customerHub as stored. PATCH /:id/hub below already cascades
+    // this; PUT /:id did not, so editing a CO's hub through the form left the
+    // boxes labelled with the old hub. Units reach fg_units through their
+    // production order, hence the poId sub-select (same shape as the PATCH).
+    // Shipped units keep their printed sticker.
+    stmts.push(
+      c.var.DB.prepare(
+        "UPDATE fg_units SET customerHub = ? WHERE poId IN (SELECT id FROM production_orders WHERE consignmentOrderId = ?) AND status NOT IN ('LOADED','DELIVERED','RETURNED')",
+      ).bind(merged.hubName, existing.id),
+    );
+
     // Cascade through to the CO's child production_orders + job_cards.
     // Mirrors cascadeSOStatusToPOs in routes/sales-orders.ts.
     // Tier A fix 2026-05-21: also triggers on ON_HOLD and RESUME

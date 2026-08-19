@@ -34,6 +34,61 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-19-157 — the packing sticker printed the OLD delivery hub after the order's hub moved: 3 of the 5 handlers that move a hub never told `fg_units` `delivery-orders` `data-integrity` `production-orders` 🟢
+
+> Owner 2026-08-19, on a screenshot: 「为什么 sticker 出来的 hubs 和 view original 的那个看不到去了？」
+> He rated it an old, low-priority problem. It is, and the cause is worth writing down
+> anyway, because the guard that should have caught it **existed and passed**.
+
+**Why the sticker and the order can disagree.** The label prints
+`fg_units.customerHub` **as stored** — `POST /api/fg-units/generate/:poId` returns the rows
+verbatim, with no join back to the order. The fg-units LIST endpoint
+(`src/api/routes/fg-units.ts:596`) *does* compute a live `COALESCE(so.hubName, co.hubName)`,
+which is why nothing looks wrong on screen: **the divergence is only visible on the printed
+box.**
+
+**Root cause.** An order's hub can be moved from **five** handlers across two route files.
+Measured 2026-08-19, **three did not cascade** to `fg_units.customerHub`:
+
+| handler | cascaded? |
+|---|---|
+| `sales-orders` `POST /backfill-hub-by-state` | **no** |
+| `sales-orders` `PUT /:id` | yes |
+| `sales-orders` `PATCH /:id/hub` | **no** |
+| `consignment-orders` `PUT /:id` | **no** |
+| `consignment-orders` `PATCH /:id/hub` | yes |
+
+`PATCH /:id/hub` is the sharpest of the three: it faithfully cascades to **seven**
+downstream tables — production orders, DOs, invoices, credit notes, debit notes, service
+orders, the SO itself — and misses the one the warehouse reads off the box.
+
+**Why the existing guard passed.** `tests/hub-cascade-completeness.test.mjs` was written
+after BUG-2026-05-30-004/005/006, which all lived in `PATCH /:id/hub` — so it was scoped to
+**that handler**, and it enumerates snake_case hub-derived columns, which
+`fg_units.customerHub` is not. It proved one handler correct and said nothing about the
+field. **A guard scoped to the place the last bug happened will not find the next one.**
+
+**Fix.** All three handlers now carry the cascade, matching the two that already did —
+`WHERE soId = ? AND status NOT IN ('LOADED','DELIVERED','RETURNED')` for SO paths and the
+`poId IN (SELECT … consignmentOrderId = ?)` sub-select for the CO path. Shipped units are
+deliberately untouched: their sticker is already on the box. In
+`backfill-hub-by-state` the two statements are pushed as a pair, and the batch chunk size
+(50) is even, so a chunk boundary can never split an SO update from its cascade.
+
+**Verified.** `tests/hub-cascade-completeness.test.mjs` gained a guard scoped to the FIELD
+rather than to a handler: it walks every route in both files, finds each one that writes
+`hubName`, and requires an `fg_units.customerHub` update in the same handler. It also asserts
+it found **at least 5** such handlers, so a broken regex fails loudly instead of passing on
+zero — the same shape of silent-pass this entry is about. Proven RED by deleting each of the
+three new cascades in turn; the tree restores green. `tsc` strict: 0 errors.
+
+**Historical rows are NOT repaired by this.** Units stamped before the fix keep the old hub.
+A repair route already exists and is **dry-run by default**:
+`POST /api/fg-units/backfill-hub` (`fg-units.ts:796`) re-resolves each in-stock unit's hub
+from its order and reports `from -> to` counts; `?execute=1` writes. It is idempotent and
+skips shipped units. **UNMEASURED:** how many rows currently diverge — that needs a live
+query, and this session had no working DB credential.
+
 ## BUG-2026-08-19-156 — a purchase invoice scanned by dragging a PDF in kept NO source document, by the same gate that lost the customer POs `procurement` `ui-frontend` `data-integrity` 🟢
 
 > **The purchasing-side twin of BUG-2026-08-19-155**, found by sweeping the class rather

@@ -875,13 +875,25 @@ app.post("/backfill-hub-by-state", async (c) => {
 
   if (execute && changeable.length > 0) {
     const now = new Date().toISOString();
-    const stmts = changeable.map((r) =>
+    const stmts = changeable.flatMap((r) => [
       c.var.DB
         .prepare(
           "UPDATE sales_orders SET hubId = ?, hubName = ?, updated_at = ? WHERE id = ?",
         )
         .bind(r.newHubId, r.newHubName, now, r.soId),
-    );
+      // Cascade to the SO's in-stock FG units, EXACTLY as PUT /:id does — the
+      // packing sticker prints `fg_units.customerHub` as stored, never a live
+      // join (POST /api/fg-units/generate/:poId returns the rows verbatim), so
+      // an SO whose hub moves without this line prints one hub on the sticker
+      // and shows another on the order. Shipped units are left alone: their
+      // sticker is already on the box. Part of the BUG-2026-06-05 sticker-hub
+      // fix, which this route was written without.
+      c.var.DB
+        .prepare(
+          "UPDATE fg_units SET customerHub = ? WHERE soId = ? AND status NOT IN ('LOADED','DELIVERED','RETURNED')",
+        )
+        .bind(r.newHubName, r.soId),
+    ]);
     for (let i = 0; i < stmts.length; i += 50) {
       await c.var.DB.batch(stmts.slice(i, i + 50));
     }
@@ -4816,6 +4828,23 @@ app.patch("/:id/hub", async (c) => {
       after: afterSnap,
     });
     if (soAudit) stmts.push(soAudit);
+
+    // 6b. fg_units — the packing sticker prints `customerHub` AS STORED.
+    //     POST /api/fg-units/generate/:poId returns the rows verbatim, with no
+    //     join back to the order, so a hub moved here without this line leaves
+    //     every un-shipped unit printing the OLD hub while the order shows the
+    //     new one. This handler cascaded to seven downstream tables and missed
+    //     the one the warehouse reads off the box. Shipped units are left
+    //     alone — their sticker is already printed. Same rule as PUT /:id;
+    //     part of the BUG-2026-06-05 sticker-hub fix, which this endpoint was
+    //     written without.
+    stmts.push(
+      c.var.DB
+        .prepare(
+          "UPDATE fg_units SET customerHub = ? WHERE soId = ? AND status NOT IN ('LOADED','DELIVERED','RETURNED')",
+        )
+        .bind(hub.shortName, so.id),
+    );
 
     for (const po of poRows) {
       stmts.push(

@@ -6,6 +6,12 @@
 > where the coverage fraction is derived mechanically. Neither pass can be trusted to
 > have read a doc it does not cite by path.
 >
+> **Last verified: 2026-08-19** — **Part 4 (below)** re-audited the six module guides
+> `docs/modules/{customers,procurement,products,rnd,sales,service-repair}.md` claim-by-claim
+> against the source and corrected ~40 wrong anchors plus one whole stale owner ruling (the
+> PI lifecycle). Coverage of *which docs have been opened* is unchanged at 81/81; Part 4
+> raises the bar for those six from "opened" to "every claim in it checked".
+>
 > **Last verified: 2026-08-14** against `docs/context-packs/HOOKKA-GOTCHAS.md`,
 > `docs/BUG-CLASSES.md`, `docs/DEV-OPERATING-FRAMEWORK.md`, `docs/PLAYBOOKS.md`,
 > `docs/CODEBASE-MAP.md`, `CLAUDE.md`, `docs/API.md`, `docs/BUG-HISTORY.md` (all 576 entries)
@@ -491,3 +497,275 @@ Stated plainly, because a gap someone knows about is cheaper than one they disco
   it to the audit docs' tables is the obvious next step and is **not done here**.
 
 ---
+
+---
+
+# Part 4 — the SIX module guides that had never been checked against source
+
+> **Last verified: 2026-08-19.** Scope: `docs/modules/customers.md`,
+> `docs/modules/procurement.md`, `docs/modules/products.md`, `docs/modules/rnd.md`,
+> `docs/modules/sales.md`, `docs/modules/service-repair.md`.
+>
+> Parts 1–3 audited *whether each doc had been opened*. These six had been opened, but
+> their **claims** had only ever been checked against each other and against `wc -l`.
+> This pass opened the source for every factual claim in them: file path, route, table,
+> column, offset, migration number, test name and behaviour. 「我需要是可以信的」
+
+## Method, and its limits
+
+Three things were checked mechanically and re-read by hand afterwards:
+
+1. **Existence + line counts** — every path cited in all six guides, via `wc -l`.
+2. **Offsets** — a script dumped the actual source line under every `path:line` in
+   *prose* (the `Key functions / sections` tables are already gated by
+   `tests/docs-module-guide-anchors.test.mjs`, which passes at ±8 lines and therefore
+   does **not** catch a 3-line drift or an anchor that lands on a JSX *usage* instead of
+   the definition — two failure modes this pass found).
+3. **Behaviour** — the handler/function body was read for every rule the guides assert.
+
+**What that gate misses, demonstrated.** `docs-module-guide-anchors` was green before and
+after this pass, yet the pass found ~40 wrong offsets. Two reasons: (a) prose anchors are
+not in the table and are ungated; (b) a table row whose symbol cell has no backticks is
+skipped entirely — that is how `| SV-order pricing skip | sales-orders.ts:1751 |` survived
+while pointing 163 lines away from the guard it names.
+
+**Source files opened for this pass** (beyond the ones the six stamps now name):
+`src/api/routes/{customers,customer-products,customer-maintenance,customer-hubs,customer-quotation,users,auth,worker-auth,files,purchase-orders,grn,purchase-invoices,supplier-materials,three-way-match,supplier-payments,products,bom,bom-master-templates,maintenance-config,mdm,rd-projects,rd-team-members,sales-orders,consignment-orders,service-cases,service-orders,stock-adjustments}.ts`,
+`src/api/routes/sales-orders/_helpers.ts`, `src/lib/{convert-chain,purchase-edit-rules,pi-posting,repair-scope,so-mode}.ts`,
+`src/api/lib/{sofa-combo,sofa-combo-pass,bom-wip-breakdown,column-rename-map.json}`,
+`src/pages/mail-center/mail-prefs.ts`, the `src/pages/{customers,products,rd,sales,procurement,suppliers,service-cases,service-orders,service-order,consignment,maintenance}` trees,
+`src/dashboard-routes.tsx`, `src/api/worker.ts`, `migrations/`, `migrations-postgres/`,
+`tests/db-schema.json`, `tests/customer-notify.test.mjs`, `tests/customer-quotation-batched.test.mjs`.
+
+---
+
+## 4a — `docs/modules/customers.md`
+
+| # | Contradiction | Resolution |
+|---|---|---|
+| C1 | Three separate places said `customer-maintenance.ts` copy-from-master "mirrors EVERY master `maintenance_config_history` snapshot" — as if that were the whole operation. Reading the file end-to-end (185 lines): it is **primarily a `kv_config` blob copy**, `variants-config` → `variants-config:<customerId>` (`:81-89`), and the history mirror is a *second* step (`:91-171`). *(I initially wrote this up as "the history claim is false"; reading past line 90 refuted my own finding — the mirror is real, the description was just half the story.)* | Data model, Core flow 3 and the Gotcha rewritten to describe both steps, with the corrupt-JSON guard pinned to `:66-73` and the mirror's idempotency key `(effective_from, config)` named. |
+| C2 | `app.put("/:id")` cited as `customers.ts:500` in three places. `:500` is inside the `_backfill-snapshot-names` handler. | → `:508` (flow 1, table, playbook). |
+| C3 | `/me/permissions` cited as `auth.ts:487` — **34 lines off**, landing on a `Set-Cookie` clear inside `POST /logout`. | → `:521`; `/me` `:491` added. |
+| C4 | `app.post("/login")` cited as `auth.ts:148`. | → `:149` (flow + table). |
+| C5 | "every mutation in `users.ts` calls `requireSuperAdmin(c)` … `:166`, `:259`, `:361`, `:556`, `:633`, `:778`, `:941`, `:996` — create / edit / delete / reset-password / invite / invite-resend / invite-delete" — **8 offsets, 7 labels**, and `:166` is not create: it is `POST /backfill-org-from-aliases` (`:165`). | Every gate paired to its handler line explicitly. The *claim itself* is TRUE — all 8 mutating handlers are gated, the 3 GETs are not. |
+| C6 | `CustomerProductsPanel` `customers.tsx:192` → actual `:193`; `AssignSkuModal` `:3216` → actual `:3218`. | Fixed in flow, table and playbook. |
+| C7 | Playbook: "Adjust per-customer pricing … Test `tests/customer-notify.test.mjs`". That file is 1,069 lines of **DO / invoice / CN dispatch email template** tests — zero pricing content. | → `tests/customer-quotation-batched.test.mjs`, which actually asserts `customer-products.ts` exports the batched resolver and reads `FROM customer_product_prices`. The wrong pointer is called out so nobody re-adds it. |
+| C8 | "`/api/files` … serves them with attachment disposition, but `<img src=…/download>` still renders" — describes the wrong handler. `GET /:id/download` (`files.ts:446`) **302-redirects** to a signed Supabase URL; the `attachment` disposition is set only by the `/stream` proxy fallback (`:485`, headers `:503-511`). | Rewritten with both handlers, and the real reason `<img>` renders (browsers ignore `Content-Disposition` on subresource loads). |
+| C9 | The doc's own 2026-08-13 stamp claimed "`customers.ts` is 795 lines" while its Entry points said 803. | Superseded. Actual **803** — the Entry-points figure was right, the stamp was wrong. |
+
+**Confirmed still true (re-measured, not assumed):** every one of the 13 entry-point line
+counts is **exact** (803 / 1235 / 185 / 75 / 268 / 1037 / 1235 / 240 / 612 / 349 / 2476 /
+571 / 117). `validateDebtorCode :76`, `rowToCustomer :271`, `app.post("/") :350`,
+`ensureCustomerCompanyColumn :39`, `resolvePrices :95`, `prices POST :434`,
+`bulk-assign :743`, `copy-from-master :833`, `resolveCustomerPriceAsOf :1004`,
+`customer-maintenance :30`, all four `worker-auth.ts` handlers (`:124/241/297/312`) —
+**all exact**. `resolvePrices` really is inherit-or-override (NULL → master). All 20 tables
+named in Data model exist. `kv_config['public_holidays']` really is read by payroll
+(`payslips.ts:508/731/1080`, `leaves.ts:37`, `payroll-hour-deductions.ts:236`). The three
+Mail Center toggles are real (`mail-prefs.ts:24`) and `classifyCategory` really is
+client-side (`:155`) — its path (`src/pages/mail-center/`, not `src/lib/`) is now given.
+
+---
+
+## 4b — `docs/modules/procurement.md`
+
+| # | Contradiction | Resolution |
+|---|---|---|
+| P1 | **The whole PI lifecycle was an owner ruling out of date.** The guide described DRAFT + APPROVED with `PENDING_APPROVAL` on manual create. The live lifecycle (owner ruling **2026-06-29**, stated at `purchase-invoices.ts:8-12` and `:311-325`) is **DRAFT → CONFIRMED → PAID**; `PENDING_APPROVAL`/`APPROVED` were dropped and are backfilled to CONFIRMED by `ensurePiMigrations` (`:89`). Affected: "What it does", Core flows 4 & 5, three Gotchas, one table row, one playbook step, one Entry-points parenthetical. | All rewritten around CONFIRMED, with the legacy states explained rather than deleted (un-backfilled rows still exist in `VALID_TRANSITIONS`). |
+| P2 | "PI manual → PENDING_APPROVAL; only OCR/scan (`ocrUsed`) → DRAFT." **PI create is now always DRAFT** (`:1127`) and `ocrUsed` is explicitly a legacy no-op (`:1090-1092`). | Gotcha rewritten. The PO half of the same gotcha was verified TRUE (`purchase-orders.ts:519` — `body.status ?? "DRAFT"`). |
+| P3 | "PI editable in DRAFT *and* APPROVED (owner 2026-06-22)". Actual `PI_EDITABLE_STATUSES = ["DRAFT","CONFIRMED","APPROVED"]` (`purchase-edit-rules.ts:32`). | → DRAFT / CONFIRMED / legacy APPROVED. **Also flagged, not fixed:** the route's own header comment (`purchase-invoices.ts:10`) says CONFIRMED is "locked-for-editing (same as PAID)", which contradicts both `PI_EDITABLE_STATUSES` and the PUT gate at `:1959-1969`. The code wins; the stale comment is a source change and is out of scope for a docs pass. |
+| P4 | **Nine Entry-points page anchors wrong**, none caught by the ±8 gate because they are prose: `detail.tsx:111`→`:113`; `grn.tsx:347`→`:351`; `grn/create.tsx:103`→`:126`; `grn-detail.tsx:129`→`:136`; `pi.tsx:93`→`:96`; `pi/create.tsx:116`→`:135`; `PurchaseInvoiceDetail.tsx:137`→`:160` (23 off); `suppliers/detail.tsx:156`→`:157`; `create.tsx` had no offset. | All re-derived. Where a default-export wrapper shadows the real component (`GRNCreatePageWrapper :110`, `CreatePurchaseInvoicePageWrapper :121`, `CreatePurchaseOrderPageWrapper :63`) both lines are now given. |
+| P5 | `ThreeWayMatchPanel` cited at `detail.tsx:1349` in prose **and in the gated table** — 43 lines off. It passed CI because `:1349±8` contains the JSX *usage* at `:1341`. The definition is `:1392`. | → `:1392` in both places, with the render site noted. **This is the gate's blind spot made concrete.** |
+| P6 | `fillBlankSupplierSku` `:172` → actual `:185`. | Fixed. |
+| P7 | "Supplier pricing is effective-dated (**mig 0183**)" — twice. `0183` is `supplier_reference_numbers` (the `grns.supplier_do_no` migration, which the same doc separately and correctly attributes to 0183). Effective-dated binding pricing is **`0184_supplier_binding_effective_from.sql`**. | → 0184, with 0183 kept where it is right. Both verified in `migrations-postgres/`. **Note for future passes:** `migrations/` (D1, 130 files, 0001–0110 then 0194+) and `migrations-postgres/` (253 files, the live numbering) do **not** share a numbering scheme. Every migration number the six guides cite resolves in `migrations-postgres/`, and I nearly published "mig 0182 does not exist" from looking in the wrong directory. |
+| P8 | The doc's own stamp said `purchase-orders.ts` is 1,177 lines while Entry points said 1190. | Actual **1,190**. Superseded. |
+
+**Confirmed still true:** `grn.ts` 2,592 / `purchase-invoices.ts` 2,869 lines — exact. **Every
+API-side anchor is exact**: `postGRNToStock :521`, `buildPostedGRNStockAdjustment :670`,
+`cascadePOStatusAfterGRNPost :811`, `restorePOReceivedQtyForGRN :992`,
+`cascadePOReceivedQtyDelta :1085`, `resolveRmForGRNItem :473`, GRN create `:1300`,
+GRN edit `:1789`, arrival `:2174`, `COMMITTED_STATUSES :305`, PO create `:430`,
+PO edit `:760`, `ensurePendingMigrations :1063`, PI create `:1047`, `ensurePiMigrations :49`,
+PI edit `:1900`, `checkInvoicedQtyCeilingAfterEdit :665`, `mapPurchaseLinesToAccounts :170`,
+`buildPiApprovalLegs :35`, `isPiEditable :34`, `checkGrnLineQtyEdit :135`,
+`checkConvertAvailability :81`, `clampDecrement :138`, `three-way-match by-po :303`,
+`supplier-payments :124/572/733`, `buildSupplierPaymentLifecycle :827`. The in-transit page
+really is deleted and the redirect really is `dashboard-routes.tsx:378`. All 17 tables exist.
+
+---
+
+## 4c — `docs/modules/products.md`
+
+| # | Contradiction | Resolution |
+|---|---|---|
+| R1 | **Every page-side anchor was 3–5 lines stale** (a block of imports moved): `ProductsPage :2004`→`:2007`, `VariantEditorDialog :651`→`:654`, `MaintenanceView :1109`→`:1112`, `CustomerAssignmentsSection :469`→`:472`, `ProductionConfig :376`→`:379`, `CategoryBadge :363`→`:366`, `BOMPage :457`→`:462`, `ProductDocumentsPage :87`→`:92`. Under the ±8 gate, all eight were "green". | All re-derived, in Entry points, the table, the Gotchas and the playbook. |
+| R2 | The doc's own stamp said `index.tsx` is **5,307** lines; its Gotchas said **5,316**. | Actual **5,316** — the Gotchas were right. Stamp superseded. |
+| R3 | Master-preset bulk replace cited as `bom-master-templates.ts:189`; `app.put("/")` is `:190`. | Fixed in flow, table and playbook; the two put-handlers are now distinguished by path (`/` vs `/:id`). |
+| R4 | "flags a `masterPending` future master change (`:189`)". There is no `masterPending` field: it is `masterPendingByProduct` (built `:184-206`) surfaced as **`masterPendingEffectiveFrom`** (`:262`). | Renamed and re-anchored. |
+| R5 | Same `/api/files` disposition error as C8. | Rewritten identically, so the two guides now agree. |
+
+**Confirmed still true:** `products.ts` 1245, `customer-products.ts` 1235, `bom.ts` 1454,
+`bom-master-templates.ts` 243, `product-configs.ts` 88, `maintenance-config.ts` 248,
+`mdm.ts` 248 — all exact. **Every API anchor exact**: `ensureProductCreatedAtColumn :28`,
+`rowToProduct :161`, POST `:584` / PUT `:730`, `resolveProductPriceAsOf :998`,
+price-history GET `:1061`, prices POST `:1087`, `resolvePrices :95`, prices POST `:434`,
+`bom.ts` templates bulk `:377` / single `:484`, `resolveMaintenanceConfigAsOf :66`,
+`/resolved :120`, `/history :141`, `/changes :174`, `resolveRow :148`, detection-run `:232`,
+`ProductCatalog catalog.tsx:138`. The "`/templates` must precede `/:id`" rule is real and
+documented in-source at `bom.ts:9`, and holds (`GET /templates :231` before `GET /:id :1336`).
+`rowToTemplateListItem :87` and the "~1.95 MB" figure both check out (`bom.ts:84`).
+`baseProductCode` is at `index.tsx:36` ("near the top" ✓); modular photos really do go
+through `/api/files?resourceType=modular` (`index.tsx:2901`, `catalog.tsx:29`).
+MDM really is detection-only.
+
+---
+
+## 4d — `docs/modules/rnd.md`
+
+| # | Contradiction | Resolution |
+|---|---|---|
+| D1 | "**`productionBOM` is dead (removed Task #8)**" — false on the backend. `rd_projects.production_bom` exists; `rowToProject` parses it (`:136`), create INSERTs it (`:432`), PUT persists it (`:587-592`). | Rewritten as **backend-live, UI-dead**, with the warning that a write dropping it silently blanks the column. |
+| D2 | "leftover comment markers at `detail.tsx ~2225` and `~2739`" — **there are none**. `grep productionBOM src/pages/` returns zero hits repo-wide; `:2225` is a right-rail layout comment and `:2739` a defects textarea. | Claim deleted, with a note that it was checked and found absent. |
+| D3 | "Pricing-target cols are snake_case … Most other R&D cols are camelCase (`projectId`, `productCategory`)" — backwards. **Every physical column is snake_case** (`tests/db-schema.json`: `actual_cost`, `product_category`, `project_type`, `production_bom`, …). The camelCase is the *identifier the route SQL writes*, rewritten by `column-rename-map.json` (921 entries). | Both the Data-model bullet and the Gotcha rewritten to name the mechanism, which is the thing that actually matters when adding a column. |
+| D4 | Edit Project modal cited `detail.tsx:2421` — that line is a "Clear override" button in the manual-labour-cost card. The modal is `:2454`. | → `:2454`. |
+| D5 | Status buttons cited `detail.tsx:1764-1858`; `:1764` is a prototype `labourHours` span. The action block is `:1795-1860`. | → `:1795-1860`, plus the handler lines (`handleComplete :450`, `handleHold :483`, `handleResume :489`). |
+| D6 | Page anchors 1–4 lines stale: `RDProjectDetailPage :222`→`:226`, `CreateProjectDialog :984`→`:986`, `SummaryView/PipelineView/ReportsView :485/716/776`→`:487/718/778`, `ProjectCard/DraftCard/StageProgressBar :313/197/96`→`:315/199/98`, `getStageLabels :78`→`:82`, `makeBlankIssuanceLine/MilestoneStatusChip :131/150`→`:135/154`, `RDMaintenancePage :93`→`:94`. | All re-derived (table, Entry points, Gotchas, playbook). |
+
+**Confirmed still true — this guide's API half was the most accurate of the six.** All six
+status-transition endpoints (`:796/862/915/976/1038/1098`), all four `stock_movements`
+INSERTs (`:1224/1460/1699/1852`), `computeLabourCostSummary :259` with its comment block
+`:230-258`, the `rd_labour_hours`-missing graceful degrade (`:286`), the "PUT does not own
+`actualCost`" comment (`:576-580`), `rowToProject :115`, create `:383`, PUT `:543`,
+`issue-material :1157`, issuances `:1403`, batch `:1555`, reversal `:1807`,
+`labour-cost PATCH :2172`, `labour-hours POST :2048`, all four `rd-team-members.ts`
+handlers, the `worker.ts:1380-1381` mounts, and the 2,261 / 3,176-line counts — **every one
+exact**. "No automated tests cover R&D" re-confirmed (`ls tests/` → no `rd-*`). One
+enrichment: `actualCost` is recomputed at `:1281`, `:1512` **and** `:1768`, not only `:1281`.
+
+---
+
+## 4e — `docs/modules/sales.md`
+
+| # | Contradiction | Resolution |
+|---|---|---|
+| S1 | `runSofaComboPass` "called from SO POST (`:2043`) and PUT (`:3589`)" — cited twice. Actual call sites: **`:2121`** and **`:3667`**. | Fixed in Core flows 1, 3 and 4. Confirmed these are the *only* two call sites. |
+| S2 | `createProductionOrdersForSO` "called at `:2457`" → actual **`:2535`** (a second call site exists at `:3982`, previously unmentioned). | Both given. |
+| S3 | `app.post("/copy-for-service-order")` `:5094` → actual **`:5172`** (78 lines off). | Fixed. |
+| S4 | `ensurePendingMigrations` `_helpers.ts:1273` → actual **`:1283`**. Cited in the gated table and the playbook — and in `service-repair.md` too. | Fixed in both guides. |
+| S5 | `seatHeightOf` `sofa-combo-pass.ts:46` → actual **`:64`**. | Fixed. |
+| S6 | "invalidation config at `sales-orders.ts:374 / 444 / 496 / 523`" — there are **five** `withSnapshot` configs, at `:374 / 452 / 522 / 574 / 601`; three of the four listed were wrong. "The rationale comment is at `:5599`" → actual **`:5677`**. | Both corrected. |
+| S7 | `SalesOrderDetailPage :337` → `:338`. | Fixed (Entry points, table, playbook). |
+| S8 | Consignment playbook: CO confirm `:1578` → **`:1700`**; CO edit `:1695` → **`:1817`**. | Fixed; cancel `:2475` and hub `:2618` added. |
+| S9 | Stamp said 5,626 + 1,452 lines while Entry points said 5,704 + 1,462. | Actual **5,733 / 1,462** as of 19:16 — see the concurrency note in 4g. Superseded. |
+
+**Confirmed still true:** the three top-level handler anchors — SO create `:1581`, confirm
+`:2362`, edit `:2964` — are **exact**, as are `rowToSO :243`, `rowToSOList :307`,
+`createProductionOrdersForSO :576`, `cascadeSOStatusToPOs :773`, `applySofaCombos :209`,
+`findComboSubset :98`, `resolveLineBasePriceSen :76`, `runSofaComboPass :132`,
+CO create `:653`, CO status-changes `:1133`, `ConsignmentNotePage note.tsx:454`,
+`SofaCombosPage :370`, `SalesPage :172`, `CreateSalesOrderPage :214` (+ wrapper `:206`),
+`CopyFromSourceModal :2395`, `LineItemCard :3021`, and the `worker.ts:1195` mount.
+All 18 tables in Data model exist. The item-catalog-snap import really is at `:42`.
+
+---
+
+## 4f — `docs/modules/service-repair.md`
+
+| # | Contradiction | Resolution |
+|---|---|---|
+| V1 | **Every `sales-orders.ts` offset in this guide was wrong — including the ones the 2026-08-13 pass had just "corrected".** It claimed SO create `:1503`, the `isServiceOrder` flag `:1751`, `body.caseId` `:1758`, pricing guards `:1836`/`:1853`. Actual: create **`:1581`** (which `sales.md` had right all along — the two guides disagreed), flag **`:1829`**, `body.caseId` **`:1836`**, and the two `if (!isServiceOrder && …)` skips at **`:1914`** and **`:1931`**. | Core flow 3, the pricing Gotcha, the table row and the playbook all re-anchored; the `caseId`-on-a-non-service-order rejection (`:1837-1840`) and unknown-case 404 (`:1844-1852`) added. **The cross-guide disagreement is the lesson: two guides citing the same handler at two different lines means at least one is wrong, and nothing was checking.** |
+| V2 | The gated table row `| SV-order pricing skip | sales-orders.ts:1751 |` was 163 lines off yet CI was green — the symbol cell has no backticks, so `docs-module-guide-anchors` skips the row entirely. | → `:1914`. Recorded here as a **gap in the gate**, not just a fixed row (see J16 below). |
+| V3 | "**`caseid` is snake_case in SQL**" — it is not; it is **folded lowercase**, one word, no underscore (`tests/db-schema.json`: `sales_orders.caseid`, `stock_adjustments.caseid`, and likewise `production_orders.repairscope`, `sales_order_items.repairscope`). The distinction matters because `column-rename-map.json` maps `caseId → case_id`, a column that does not exist on these tables. | Gotcha rewritten with the rename-map warning. |
+| V4 | `ensurePendingMigrations` `_helpers.ts:1273` → `:1283`; the `caseid` ALTER itself is at `:1327`. | Fixed. |
+| V5 | `ServiceCaseDetailPage :203` → `:204`; `ServiceOrderDetailPage :128` → `:129`. | Fixed in Entry points, table and playbook. |
+| V6 | "Never fork the ~1400-line sales list" — `src/pages/sales/index.tsx` is now **2,181** lines. (The in-code comment at `service-order/index.tsx` still says 1400; that is source, left alone.) | Figure corrected, with the stale in-code comment noted. |
+
+**Confirmed still true — the rest of this guide is exact.** `service-orders.ts` 1,859 lines;
+`ensureServiceOrderMigrations :531`, create `:556`, mode `:1214`, returns `:1468`,
+scrap `:1669`. `service-cases.ts`: `STATUS_TRANSITIONS :60`, `sanitizeRootCauses :178`,
+`synthesizeRootCauses :208`, `ensureCaseLinkColumns :239`, `nextCaseNo :366`,
+`rowToApi :386`, create `:614`, edit `:757` — all exact. All four `repair-scope.ts` anchors
+(`validateRepairScopeInput :292`, `filterWipsByRepairScope :410`,
+`filterWipsByRepairComponents :443`, `canonicalizeComponentPicks :524`) exact.
+`deriveTopLevelWipKey bom-wip-breakdown.ts:125`, `stock-adjustments.ts:209`,
+`useSOMode so-mode.ts:27`, `worker.ts:1419-1420`, `service-cases/detail.tsx` = 3,600 lines,
+and every panel anchor in it (`CasePipeline :965`, `RootCausePanel :1052`,
+`StockTopUpPanel :2448`, `SpawnServiceOrderModal :3096`) — exact. The singular-vs-plural
+split is real: the four `src/pages/service-order/*` files are 6–18 lines of
+`export { default } from "@/pages/sales…"`, read in full. Migrations **0164**
+(`stock_adjustments_caseid`) and **0165** (`sales_orders_caseid`) both exist in
+`migrations-postgres/`. All four named tests exist.
+
+---
+
+## 4g — UNMEASURED, and what this pass did NOT check
+
+**First, a live hazard worth more than any single correction below.**
+`src/api/routes/sales-orders.ts` **was being edited by a different session throughout this
+pass** — 5,704 → 5,716 (19:10) → 5,733 (19:14, rewritten again 19:16:49). Every offset into
+it was re-derived three times, and one intermediate self-check read the file *mid-write* and
+produced 15 spurious failures that cleared on a re-read. Two consequences:
+
+1. **Every `sales-orders.ts` offset in `sales.md` and `service-repair.md` was true at
+   `wc -l = 5,733` and was re-asserted against the live file at the end of the pass.** If that
+   count has changed by the time you read this, re-derive before trusting them. No other file
+   in the six guides moved during the pass.
+2. **Never derive an anchor from a file another session is writing without re-reading it after.**
+   A mid-write read looks exactly like real drift, and "fixing" the doc from it would have
+   written 15 wrong numbers under a fresh `Last verified` stamp — precisely the failure this
+   whole audit file exists to prevent.
+
+
+**No production state is asserted anywhere in this pass.** No DB credentials were available
+(`.dev.vars` carries a rotated password); nothing here was run against prod. Concretely:
+
+- **Every schema claim above is from `tests/db-schema.json`, not from prod.** That file is a
+  checked-in snapshot. Whether the live database matches it today is **UNMEASURED**. The
+  query that would settle it is `SELECT table_name, column_name FROM
+  information_schema.columns WHERE table_schema='public'` — and, per the `_centi→_sen`
+  lesson, it must be unioned with `pg_matviews`, which `information_schema.views` misses.
+- **Whether the `PENDING_APPROVAL`/`APPROVED` backfill has actually run on prod is
+  UNMEASURED.** `ensurePiMigrations` runs it at the top of PI writes, so it should have —
+  but "the code runs an UPDATE" is a claim about history, not about production today.
+  `SELECT status, count(*) FROM purchase_invoices GROUP BY 1` settles it, and should be run
+  before anyone acts on the corrected lifecycle section.
+- **No test was executed for this pass** beyond `tests/docs-module-guide-anchors.test.mjs`,
+  `scripts/check-docs-freshness.mjs` and `scripts/check-codebase-map.mjs` (all three green
+  after the edits). The named tests in the six guides were verified to **exist** and, for
+  `customer-notify` / `customer-quotation-batched`, to test what the guide says they test —
+  the other 12 were not opened.
+- **Frontend behaviour was read, not run.** Claims like "FE shows a Confirm dialog before
+  saving" or "`Users.tsx` hides Disable/Reset/Delete unless SUPER_ADMIN" were left in place
+  on the strength of the backend gate, not verified in a browser.
+- **`consignment-notes.ts` (2,152 lines) and `sofa-combos.ts` were not opened** — only their
+  line counts and mount points were checked. The CN dispatch/delivered idempotency claim
+  (folded-lowercase `dispatchemailat` / `deliveredemailat`) in `sales.md` is therefore
+  **carried forward unverified** from the 2026-08-13 pass.
+- **`mail-center.ts` (2,476 lines) was not opened.** Only `mail-prefs.ts` and the
+  `classifyCategory` call sites in `mail-center/index.tsx` were read; the Mail Center data
+  model bullet in `customers.md` is carried forward unverified.
+- **The three audit-doc `file:line` tables from Part 3d are still not gated** and were not
+  touched here.
+
+## 4h — COLLECTED: judgement calls, NOT decided here
+
+- **J16 — `docs-module-guide-anchors` has two silent blind spots, both hit in this pass.**
+  (a) It only reads the `Key functions / sections` table, so every anchor in Entry points,
+  Core flows, Gotchas and the playbook is ungated — that is where ~30 of this pass's ~40
+  wrong offsets lived. (b) A table row whose symbol cell contains no backticks is dropped
+  with no warning, which is how a 163-line-stale row stayed green for a week. Extending the
+  collector to prose anchors and making an unparseable symbol cell **fail** rather than skip
+  are both small changes — but both will light up rows across all 15 guides at once, so the
+  size of that first red build is the owner's call, not mine.
+- **J17 — the ±8 window hides the drift class this pass found most often.** Nine of the
+  corrections were 1–5 lines. Each is individually harmless; collectively they are the
+  signal that a file moved, and they are exactly what a tighter window would catch early.
+  Tighten to ±2, or accept that small drift is untracked between manual passes?
+- **J18 — `purchase-invoices.ts:10`'s header comment contradicts `PI_EDITABLE_STATUSES`.**
+  One says CONFIRMED is locked for editing, the other (and the live PUT gate) says it is
+  editable. This pass documented the code's behaviour and flagged the comment. Fixing the
+  comment is a one-line source change and needs an owner who can confirm which is intended.
+- **J19 — two migration directories, one numbering namespace in the docs.** `migrations/`
+  and `migrations-postgres/` number differently; the guides cite bare numbers ("mig 0183")
+  that only resolve in the latter. I nearly filed a false "this migration does not exist".
+  Prefix the numbers (`pg-0183`) in docs, or add a note to `CLAUDE.md`?

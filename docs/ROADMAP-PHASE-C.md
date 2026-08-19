@@ -1,9 +1,45 @@
 # Phase C — Enterprise Upgrade Arc (6-Month Roadmap)
 
-> **Last verified: 2026-08-13** against `src/api/lib/tenant.ts`, `journal-hash.ts`, `mdm-detect.ts`, `oauth-google.ts`, `totp.ts`, `src/api/queues/po-emission-consumer.ts`, `.github/workflows/backup.yml`, `migrations-postgres/0050_mv_revenue_by_month.sql` and `0123_drop_dashboard_mvs.sql`.
-> Corrected 2026-08-13: **all seven quick-win subsets have shipped**, so the "6-month dependency-ordered sequence" table below is a record of intent, not a plan to execute — check the code before starting any row. Specifically: #1 `org_id` + `withOrgScope` (`src/api/lib/tenant.ts`), #2 hash-chained journal (`src/api/lib/journal-hash.ts`), #3 PO emission on a queue (`src/api/queues/po-emission-consumer.ts`), #4 duplicate detection (`src/api/lib/mdm-detect.ts` + `src/api/routes/mdm.ts`), #5 `mv_revenue_by_month` — **shipped in 0050 and then deliberately DROPPED in `migrations-postgres/0123_drop_dashboard_mvs.sql`**, so do not assume the mart exists; #6 Google OAuth + TOTP (`src/api/lib/oauth-google.ts`, `totp.ts`, `src/api/routes/auth-oauth.ts`, `auth-totp.ts`); #7 daily backup (`.github/workflows/backup.yml`).
-> Also corrected: every "Cloudflare D1" reference below is dead. **D1 was retired 2026-04-27 (commit `7059259`)** — the live store is Supabase Postgres via Hyperdrive, so §1's "Cloudflare D1 / Postgres" and §5's "for D1 we use `--read-replication`" describe a runtime that no longer exists.
-> **UNVERIFIED ASSERTION** (as of 2026-08-13): every cost estimate, engineer-week figure and dollar/ARR number in this doc is business projection; not checkable from source; treat as owner intent, not fact.
+> **Last verified: 2026-08-19** against `migrations-postgres/0049_multi_tenant_skeleton.sql`,
+> `0050_mv_revenue_by_month.sql`, `0051_journal_entries.sql`, `0052_mdm_review_queue.sql`,
+> `0087_org_id_full_rollout.sql`, `0088_hotfix_org_id_core_tables.sql`, `0122_dashboard_snapshot.sql`,
+> `0123_drop_dashboard_mvs.sql`; `src/api/lib/tenant.ts`, `journal-hash.ts`, `mdm-detect.ts`,
+> `oauth-google.ts`, `totp.ts`, `queue-po-emission.ts`; `src/api/routes/mdm.ts`, `auth-oauth.ts`,
+> `auth-totp.ts`, `auth.ts`, `sales-orders.ts:2583`; `src/api/queues/po-emission-consumer.ts`;
+> `src/api/cron/daily-backup.ts`; `wrangler.toml`; the full `.github/workflows/` listing incl.
+> `backup.yml`; and `docs/DR-RUNBOOK.md`.
+>
+> **The 2026-08-13 line "all seven quick-win subsets have shipped" was too broad and is
+> withdrawn.** Re-measured against the tree, three of the seven are code-present but NOT
+> operating, and one never shipped in the form this doc describes. Per item, what exists NOW:
+>
+> | # | Measured status, 2026-08-19 | Proof in the tree |
+> |---|---|---|
+> | **#1 multi-tenant** | ✅ **past the quick-win** — the long tail landed too | `0049` (5 tables + `users`), `0088` (hotfix: `0049` was never applied to Postgres, so prod went live 2026-04-29 returning 0 rows), `0087` (298 lines, the rest); middleware `src/api/lib/tenant.ts:44` `tenantMiddleware` + `getOrgId` (`:109`) + `withOrgScope` (`:146`). `0049`'s own header notes this schema has no `inventory_balances` table, so `production_orders` was substituted for it. |
+> | **#2 ledger** | ⚠️ **half** — chain yes, enforcement no | Table `ledger_journal_entries` (`0051`, deliberately NOT the pre-existing `journal_entries` from `0010_accounting.sql`) + `src/api/lib/journal-hash.ts`, imported by 10 modules. **The immutability trigger does not exist: `CREATE TRIGGER` appears ZERO times in `migrations-postgres/`.** The nightly tamper-check does not run either — `verifyJournalChain` (`journal-hash.ts:309`) has **no caller** anywhere in `src/` (the only other mention is a comment at `routes/accounting.ts:11753`) and no workflow invokes it. |
+> | **#3 PO on a queue** | ⚠️ **code only, NOT active** | Producer `src/api/lib/queue-po-emission.ts`, consumer `src/api/queues/po-emission-consumer.ts` — but **both binding blocks in `wrangler.toml:165` / `:169` are commented out**, so `enqueuePoEmission` returns `{ via: "inline", reason: "PO_EMISSION_QUEUE binding not configured" }` (`queue-po-emission.ts:107`) and `routes/sales-orders.ts:2583` keeps the synchronous path. Whether the prod deployment carries a binding this repo does not declare is **UNMEASURED**. |
+> | **#4 MDM detect** | ⚠️ **half** — no nightly job, no merge | `src/api/lib/mdm-detect.ts` + `0052_mdm_review_queue.sql` + `src/api/routes/mdm.ts`. Detection fires **only** from `POST /api/mdm/detection/run` (`mdm.ts:232`), whose own comment says *"TODO once Cron infra exists … wire this to a nightly schedule"*; no file in `.github/workflows/` mentions mdm. `/review-queue/:id/merge` (`mdm.ts:212`) just flags the row — no record merge, no FK repoint. |
+> | **#5 revenue mart** | ❌ **never shipped in this form, and since removed** | `0050_mv_revenue_by_month.sql` is an **intentionally-empty D1 placeholder** (`SELECT 1 AS noop`) — not a mart. The real views were `9901`/`9902`, which are **no longer present in `migrations-postgres/`**, and `0123_drop_dashboard_mvs.sql` drops all five plus `refresh_dashboard_mvs()` because zero frontends read them. The live replacement is the write-through `dashboard_snapshot` table (`0122`). **No read replica exists anywhere in this repo.** |
+> | **#6 enterprise auth** | ✅ **quick-win only** | `src/api/lib/oauth-google.ts` + `routes/auth-oauth.ts` (2 routes), `src/api/lib/totp.ts` + `routes/auth-totp.ts` (7 routes). **SCIM: zero hits in `src/`. Microsoft/Azure: zero hits.** Session-per-device is not built — `user_sessions` is only INSERTed and DELETEd by token or by user (`routes/auth.ts:302, 467, 721, 1042, 1215`); there is no list-my-sessions or per-device revoke. |
+> | **#7 daily backup** | ✅ **running on a schedule** — but see the §7 correction below | `.github/workflows/backup.yml`, `cron: '0 18 * * *'`, uploading to Supabase Storage and pruning via `POST /api/internal/backup-prune` (`backup.yml:207`). WAL shipping and the first drill are still open (`docs/DR-RUNBOOK.md:15`, `:303-312`). |
+>
+> **Corrected 2026-08-19 — §7's "GitHub Actions artifact retained for 90 days as the off-vendor
+> floor" DOES NOT EXIST.** `backup.yml` contains zero `upload-artifact` steps, so the dump AND
+> its store are both Supabase and there is **no off-vendor copy at all**. `docs/DR-RUNBOOK.md:9`
+> recorded this on 2026-08-13; this roadmap went on asserting the opposite for six days. The
+> sentence in §7 has been fixed in place.
+>
+> Also corrected: every "Cloudflare D1" reference below is dead. **D1 was retired 2026-04-27
+> (commit `7059259`, verified in `git log`)** — the live store is Supabase Postgres via
+> Hyperdrive. The two surviving D1 phrases (§1's acceptance list, §5's `--read-replication`)
+> are struck through in place rather than deleted, so the original intent stays readable.
+> **UNVERIFIED ASSERTION** (still, as of 2026-08-19): every cost estimate, engineer-week figure
+> and dollar/ARR number in this doc is business projection; not checkable from source; treat as
+> owner intent, not fact.
+> **UNMEASURED**: nothing here is a claim about production. No DB credentials were available
+> (`.dev.vars` is rotated, `28P01`), so "the code declares X" is all that is asserted — whether
+> the deployed Cloudflare project carries queue bindings, cron triggers or applied migrations
+> today was not queried.
 
 **Status:** Draft, written 2026-04-25
 **Prerequisites:** Phase A complete (TypeScript clean, RBAC matrix live, audit log writing on every mutation), Phase B complete (Workers SDK split, CI strict-build gate, OAuth-ready auth, Supabase Storage attachment store [was R2 pre-storage-supabase-migration], canary deploy pipeline)
@@ -27,7 +63,7 @@ Every table that holds tenant-owned data gets an `org_id` column. Every query go
 
 ### Acceptance criteria
 
-- Two tenants seeded into the same Cloudflare D1 / Postgres database (e.g., `org_id=hookka` and `org_id=demo-buyer`) cannot see each other's:
+- Two tenants seeded into the same ~~Cloudflare D1 /~~ Postgres database (D1 retired 2026-04-27; the store is Supabase Postgres via Hyperdrive) (e.g., `org_id=hookka` and `org_id=demo-buyer`) cannot see each other's:
   - SOs, POs, DOs, invoices
   - Customer hubs, supplier records
   - Inventory ledgers, BOM templates, production scans
@@ -172,7 +208,7 @@ Ship the **detection** half only — a nightly job that flags suspected duplicat
 
 ### What
 
-Move dashboard reads off the primary database. Add a read replica (Supabase has this as a one-click feature; for D1 we use `--read-replication`). Add a `kpi_marts` schema with materialized views that pre-aggregate the slow queries (revenue-by-month, GP-by-product, AR-aging-by-customer). A nightly job refreshes the marts. Dashboard queries hit the marts, not the source tables.
+Move dashboard reads off the primary database. Add a read replica (Supabase has this as a one-click feature; ~~for D1 we use `--read-replication`~~ — D1 was retired 2026-04-27). **Measured 2026-08-19: no read replica is configured anywhere in this repo (`wrangler.toml` declares only `HYPERDRIVE` + `HYPERDRIVE_STAGING`).** Add a `kpi_marts` schema with materialized views that pre-aggregate the slow queries (revenue-by-month, GP-by-product, AR-aging-by-customer). A nightly job refreshes the marts. Dashboard queries hit the marts, not the source tables.
 
 ### Acceptance criteria
 
@@ -237,7 +273,7 @@ Ship **Google Workspace OAuth only**, no SCIM yet, no Microsoft yet. Hookka's ow
 
 ### What
 
-Documented and *drilled* recovery process. Daily automated logical backup (`pg_dump` for Supabase) to an off-vendor object store with 90-day retention. (Originally specced as Cloudflare R2; the storage-supabase-migration moved daily dumps to Supabase Storage, with the same-vendor-as-Postgres caveat called out in `docs/DR-RUNBOOK.md` plus a GitHub Actions artifact retained for 90 days as the off-vendor floor.) A runbook that walks through restoring to a fresh project. A quarterly drill where someone *actually does* the restore on a Friday afternoon and times it.
+Documented and *drilled* recovery process. Daily automated logical backup (`pg_dump` for Supabase) to an off-vendor object store with 90-day retention. (Originally specced as Cloudflare R2; the storage-supabase-migration moved daily dumps to Supabase Storage, with the same-vendor-as-Postgres caveat called out in `docs/DR-RUNBOOK.md`. **Corrected 2026-08-19: this sentence used to end "plus a GitHub Actions artifact retained for 90 days as the off-vendor floor" — there is NO such artifact. `.github/workflows/backup.yml` contains zero `upload-artifact` steps, so dump and store are both Supabase and there is no off-vendor copy. Same finding as `docs/DR-RUNBOOK.md:9`.**) A runbook that walks through restoring to a fresh project. A quarterly drill where someone *actually does* the restore on a Friday afternoon and times it.
 
 ### Acceptance criteria
 
@@ -274,23 +310,28 @@ Phase C settles.
 
 The order below respects the dependency graph (each item only starts after its blockers are at least at quick-win stage). Single-track sequence, assuming 1.5 engineers active.
 
-| Month | Weeks | Milestone | What ships |
-|-------|-------|-----------|------------|
-| **M1** | W1-W2 | #1 quick-win | `org_id` on the 5 leak-critical tables + middleware |
-| | W3-W4 | #1 finish | `org_id` everywhere, two-tenant isolation test green |
-| **M2** | W5-W6 | #2 quick-win | Dual-write to `journal_entries` (chain collecting, not yet enforced) |
-| | W7-W8 | #2 part 2 | Reversal model + tamper-check job |
-| **M3** | W9 | #2 finish | Flip immutability trigger; ledger is read-only |
-| | W10-W11 | #7 quick-win | Daily `pg_dump` to off-vendor object store (Supabase Storage post-migration), 90-day retention |
-| | W12 | #4 quick-win | Duplicate-detection nightly job + review queue |
-| **M4** | W13-W14 | #3 quick-win | PO emission moved to Cloudflare Queue (kills ~70% of stuck cascades) |
-| | W15-W17 | #3 finish | Full SO->payment cascade as Workflows; idempotency + retry |
-| **M5** | W18-W19 | #5 quick-win | First mart (`mv_revenue_by_month_by_org`) live; homepage chart hits it |
-| | W20-W21 | #5 finish | Read replica wired, all dashboard queries on marts, p95 < 300ms verified at 5x |
-| | W22 | #4 finish | Auto-merge engine live, golden-record FK repoint working |
-| **M6** | W23-W24 | #6 quick-win | Google Workspace OAuth + 2FA on admin roles |
-| | W25 | #6 finish | SCIM endpoints + Microsoft 365 + session-per-device |
-| | W26 | #7 finish | First quarterly DR drill executed end-to-end; runbook hardened |
+> **This table is a 2026-04-25 record of intent, not a work queue.** The right-hand column is
+> what the tree actually contains on 2026-08-19. Read it before picking up any row: of the 15
+> rows, **3 are in the code, 5 are code-present but not switched on, and 7 are not started**.
+> "Written but not wired" is a different job from "build it", and the row alone will not say so.
+
+| Month | Weeks | Milestone | What ships | **Status measured 2026-08-19** |
+|-------|-------|-----------|------------|--------------------------------|
+| **M1** | W1-W2 | #1 quick-win | `org_id` on the 5 leak-critical tables + middleware | ✅ in the tree (`0049` + `0088`, `lib/tenant.ts`) |
+| | W3-W4 | #1 finish | `org_id` everywhere, two-tenant isolation test green | ⚠️ columns yes (`0087`, 298 lines). `tests/tenant-isolation.test.mjs` exists but is **static analysis, not a two-org seed** — its own header says the dynamic version is impossible because "Hyperdrive + Supabase aren't reachable from CI", so it pins `withOrgScope`'s `WHERE orgId = ?` and `getOrgId`'s fail-closed throw instead of asserting 10-rows-each |
+| **M2** | W5-W6 | #2 quick-win | Dual-write to `journal_entries` (chain collecting, not yet enforced) | ✅ in the tree (`0051`, table `ledger_journal_entries`; `lib/journal-hash.ts`) |
+| | W7-W8 | #2 part 2 | Reversal model + tamper-check job | ⚠️ reversal columns exist; **tamper-check job NOT wired — `verifyJournalChain` has no caller** |
+| **M3** | W9 | #2 finish | Flip immutability trigger; ledger is read-only | ❌ **not started — zero `CREATE TRIGGER` in `migrations-postgres/`** |
+| | W10-W11 | #7 quick-win | Daily `pg_dump` to off-vendor object store (Supabase Storage post-migration), 90-day retention | ⚠️ daily dump runs (`backup.yml`, `0 18 * * *`) but the store is **Supabase, i.e. same vendor — not off-vendor** |
+| | W12 | #4 quick-win | Duplicate-detection nightly job + review queue | ⚠️ review queue + detection pass exist; **the nightly job does not — manual `POST /api/mdm/detection/run` only** |
+| **M4** | W13-W14 | #3 quick-win | PO emission moved to Cloudflare Queue (kills ~70% of stuck cascades) | ⚠️ producer + consumer written; **queue bindings commented out in `wrangler.toml:165`/`:169`, so it still runs inline** |
+| | W15-W17 | #3 finish | Full SO->payment cascade as Workflows; idempotency + retry | ❌ not started — `src/api/queues/` holds one file |
+| **M5** | W18-W19 | #5 quick-win | First mart (`mv_revenue_by_month_by_org`) live; homepage chart hits it | ❌ **superseded** — the MV was dropped in `0123`; the live model is `dashboard_snapshot` (`0122`) |
+| | W20-W21 | #5 finish | Read replica wired, all dashboard queries on marts, p95 < 300ms verified at 5x | ❌ **no read replica anywhere in the repo**; p95 at 5x is UNMEASURED |
+| | W22 | #4 finish | Auto-merge engine live, golden-record FK repoint working | ❌ not started — `/review-queue/:id/merge` only flags the row |
+| **M6** | W23-W24 | #6 quick-win | Google Workspace OAuth + 2FA on admin roles | ✅ in the tree (`auth-oauth.ts`, `auth-totp.ts`) |
+| | W25 | #6 finish | SCIM endpoints + Microsoft 365 + session-per-device | ❌ **none of the three exist — zero SCIM / Microsoft hits in `src/`** |
+| | W26 | #7 finish | First quarterly DR drill executed end-to-end; runbook hardened | ❌ not run (`docs/DR-RUNBOOK.md:15` says the first drill is still TODO) |
 
 **Total: 26 weeks (6 months) at 1.5 FTE = ~36 engineer-weeks of work.** Matches the per-milestone estimates above (5+6+7+5+5+5+3 = 36).
 

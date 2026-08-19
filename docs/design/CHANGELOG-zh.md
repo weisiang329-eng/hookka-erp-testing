@@ -10,10 +10,25 @@
 
 # Hookka ERP — 移动版 + Fold 版 · 需求与更改记录
 
-> **Last verified: 2026-08-14** (branch `docs/docs-vs-code-audit`) — corrected against the
-> source by the prose audit; the row(s) touched here are itemised in
-> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md). Only the claims listed there were
-> re-verified; the rest of this file still carries its earlier stamp.
+> **Last verified: 2026-08-19** — 逐条对过档案与当前组件：`docs/design/` 目录列表、
+> `docs/design/standalone/` 目录列表、`git ls-files "*.dc.html"`、`docs/design/README.md:65-72`、
+> `src/pages/m/MobileLayout.tsx:80-95`、`src/pages/m/nav.ts:43-53`、
+> `src/pages/m/screens/More.tsx:138-205`、`src/pages/m/screens/` 目录列表。
+>
+> **2026-08-19 更正一处：一·B 段落所列的登录 / 工人端 `.dc.html` 档案不在本仓库内。**
+> 该段写「依项目内文件补记」，但 `git ls-files "*.dc.html"` 只有三个档：
+> `Hookka ERP Desktop.dc.html`、`Hookka ERP Fold.dc.html`、`Hookka ERP Mobile.dc.html`。
+> `Hookka Main Login.dc.html` / `Hookka Worker Login.dc.html` /
+> `Hookka Worker Portal Mobile.dc.html` 一个都没有 tracked。已在该段就地注明。
+>
+> **本轮抽验的三条「已落实到当前 App」的说法都成立**（这份档案本身只描述原型，但这三条
+> 恰好在 React 端也可查）：折叠断点 720px = `MobileLayout.tsx:87` 的
+> `useMediaQuery("(min-width: 720px)")`；底部中间凸起 More = `nav.ts:53` 的 `raised: true`；
+> 手机版 Dark/Light 切换在 More 菜单 = `More.tsx:138` 起（源码注释还直接引了本档案的原文）。
+> 其余模块清单描述的是 `.dc.html` 原型，**不构成对 `src/pages/m/` 的任何断言**，未逐条比对。
+>
+> 2026-08-14 那轮（branch `docs/docs-vs-code-audit`）的更正仍然有效，明细见
+> [`docs/DOCS-VS-CODE-AUDIT.md`](../DOCS-VS-CODE-AUDIT.md)。
 
 > 本文件记录你（客户）给出的每一条 prompt（= 需求），以及对应做了什么改动。
 > 交付物：`standalone/Hookka ERP Mobile (Phone).html`、`standalone/Hookka ERP Fold.html`（单文件、离线可用）
@@ -99,7 +114,12 @@
 
 ## 一·B、更早期阶段（登录 / 工人端，先于详细记录）
 
-> 这些是 ERP 主程序之前完成的部分，依项目内文件补记：
+> 这些是 ERP 主程序之前完成的部分。
+>
+> ⚠️ **2026-08-19 更正：下列 `.dc.html` 档案不在本仓库内。** 原文写「依项目内文件补记」，
+> 会让读者以为可以在 repo 里打开它们。`git ls-files "*.dc.html"` 实测只有三个：
+> `docs/design/Hookka ERP {Desktop,Fold,Mobile}.dc.html`。下面四行是**设计阶段的历史记录**，
+> 档案本体在设计工具那边，不是 repo 里的路径；要找请向设计端要，不要在 repo 里搜。
 - **Hookka 主登录页**（`Hookka Main Login.dc.html` + Light 默认版）：品牌深色背景、logo、登录表单。
 - **Hookka 工人登录页**（`Hookka Worker Login.dc.html` / Light / 默认版若干）。
 - **Hookka 工人端移动 Portal**（`Hookka Worker Portal Mobile.dc.html` 及副本）。

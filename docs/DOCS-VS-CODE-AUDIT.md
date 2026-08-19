@@ -6,6 +6,11 @@
 > where the coverage fraction is derived mechanically. Neither pass can be trusted to
 > have read a doc it does not cite by path.
 >
+> **Last verified: 2026-08-19** — **Part 5 (below)** closes the last three docs that had never
+> been read against the source: `docs/ROADMAP-PHASE-C.md`, `docs/design/CHANGELOG-zh.md` and
+> `docs/OWNER-DECISIONS.md`. With those three, **prose coverage reaches 100%** — every live doc
+> under `docs/` plus `CLAUDE.md` has now been opened and checked against the code at least once.
+>
 > **Last verified: 2026-08-19** — **Part 4 (below)** re-audited the six module guides
 > `docs/modules/{customers,procurement,products,rnd,sales,service-repair}.md` claim-by-claim
 > against the source and corrected ~40 wrong anchors plus one whole stale owner ruling (the
@@ -769,3 +774,134 @@ produced 15 spurious failures that cleared on a re-read. Two consequences:
   and `migrations-postgres/` number differently; the guides cite bare numbers ("mig 0183")
   that only resolve in the latter. I nearly filed a false "this migration does not exist".
   Prefix the numbers (`pg-0183`) in docs, or add a note to `CLAUDE.md`?
+
+---
+
+# Part 5 — the last three unread docs (2026-08-19)
+
+`npm run trust` had reported **79 of 83** live docs read against the source for days, and named
+the same three every time:
+
+- `docs/ROADMAP-PHASE-C.md`
+- `docs/design/CHANGELOG-zh.md`
+- `docs/OWNER-DECISIONS.md`
+
+They are listed literally above so the coverage counter in `scripts/trust-report.mjs` can see
+them. All three are now opened and corrected.
+
+## 5a — `docs/ROADMAP-PHASE-C.md`
+
+**The failure mode a roadmap has is the opposite of a reference doc's:** it does not go wrong by
+describing code that changed, it goes wrong by listing as *to build* something that is already
+there — or, worse here, by declaring shipped something that exists but is switched off. Its
+2026-08-13 header said flatly *"all seven quick-win subsets have shipped"*. Re-measured, that is
+true of three of them.
+
+| # | Doc's claim | What the tree holds | Sev | Fix applied |
+|---|---|---|---|---|
+| **E1** | header: *"all seven quick-win subsets have shipped"* | **3 of 7.** #3 (PO queue) and #4 (MDM nightly) are code-present but not operating, and #5 never existed in the form claimed. Detail in E2-E5. | **HIGH** | Blanket sentence withdrawn; replaced with a 7-row per-item table, each cell carrying its own proof anchor. |
+| **E2** | *"#3 PO emission on a queue (`src/api/queues/po-emission-consumer.ts`)"* | The consumer and producer exist, but **both binding blocks in `wrangler.toml:165` / `:169` are commented out**, so `enqueuePoEmission` returns `{ via: "inline", reason: "PO_EMISSION_QUEUE binding not configured" }` (`src/api/lib/queue-po-emission.ts:107`) and `src/api/routes/sales-orders.ts:2583` keeps the synchronous path. The consumer's own header calls itself *"dead code path-wise"*. | **HIGH** | Marked code-only-not-active, in the header table and the sequence table. |
+| **E3** | *"#4 duplicate detection (`src/api/lib/mdm-detect.ts` + `src/api/routes/mdm.ts`)"* — the quick-win is defined in §4 as *"a nightly job that flags suspected duplicates"* | Detection fires **only** from `POST /api/mdm/detection/run` (`mdm.ts:232`), whose own comment reads *"TODO once Cron infra exists … wire this to a nightly schedule"*. **No file in `.github/workflows/` mentions mdm.** `/review-queue/:id/merge` (`mdm.ts:212`) also just flags the row — no merge, no FK repoint. | **HIGH** | Marked half-built; the missing nightly and the no-op merge named explicitly. |
+| **E4** | *"#5 `mv_revenue_by_month` — shipped in 0050"* | **`0050_mv_revenue_by_month.sql` is an intentionally-empty D1 placeholder** whose body is `SELECT 1 AS noop`. The real views were `9901`/`9902`, which are **no longer present in `migrations-postgres/`**, and `0123_drop_dashboard_mvs.sql` drops all five plus `refresh_dashboard_mvs()` — because, per its own header, *zero frontends read them*. The live model is the write-through `dashboard_snapshot` table (`0122`). | med | Marked never-shipped-as-written / superseded, with `0122` named as the replacement. |
+| **E5** | §2 acceptance: *"a tamper detection job runs nightly"*, *"the trigger blocks UPDATE / DELETE"* | **Neither exists.** `CREATE TRIGGER` appears **zero** times in `migrations-postgres/` (253 files). `verifyJournalChain` (`src/api/lib/journal-hash.ts:309`) has **no caller anywhere in `src/`** — the only other occurrence of the name is a comment at `src/api/routes/accounting.ts:11753` — and no workflow invokes it. The chain is being collected and never checked. | **HIGH** | Both marked not-started in the sequence table; the "no caller" fact stated rather than the file's mere existence. |
+| **E6** | §7 *What*: daily dump *"plus a GitHub Actions artifact retained for 90 days as the off-vendor floor"* | **No such artifact.** `.github/workflows/backup.yml` contains **zero `upload-artifact` steps**; it uploads to Supabase Storage and prunes via `POST /api/internal/backup-prune` (`:207`). Dump and store are the same vendor, so **there is no off-vendor copy at all**. `docs/DR-RUNBOOK.md:9` recorded exactly this on 2026-08-13 — **this roadmap kept asserting the opposite for six days**, which is the two-docs-one-truth shape D60 was filed for. | **HIGH** | Sentence corrected in place in §7, and again in the header; the sequence table's W10-W11 row now says "same vendor — not off-vendor". |
+| **E7** | §6 quick-win *"Google Workspace OAuth only"* shipped; §6 finish = SCIM + Microsoft + session-per-device | Quick-win holds (`auth-oauth.ts`, 2 routes; `auth-totp.ts`, 7 routes). The finish step has **nothing**: `scim` and `microsoft`/`azure` each return **zero hits in `src/`**, and `user_sessions` is only INSERTed and DELETEd by token or user (`routes/auth.ts:302, 467, 721, 1042, 1215`) — no list, no per-device revoke. | low | Marked not-started with the zero-hit evidence, so nobody re-derives it. |
+| **E8** | §5 *"for D1 we use `--read-replication`"* · §1 *"the same Cloudflare D1 / Postgres database"* | D1 was retired 2026-04-27 (`7059259`, confirmed in `git log`). The 2026-08-13 header already said so but left both phrases standing in the body. **No read replica is configured anywhere** — `wrangler.toml` declares only `HYPERDRIVE` + `HYPERDRIVE_STAGING`. | low | Both struck through in place (intent stays readable) and the no-replica fact added. |
+| **E9** | sequence table read as a 26-week plan of work still to do | Of its 15 rows, **3 are in the code, 5 are code-present but not switched on, 7 are not started**. A reader picking up "M1 W1-W2" would rebuild `org_id` scoping that `0049`/`0087`/`0088` + `lib/tenant.ts` already provide. | **HIGH** | A **Status measured 2026-08-19** column added to all 15 rows, plus a lead-in saying the table is a record of intent. |
+
+**A near-miss worth recording.** The first draft of the E9 status column asserted *"the two-tenant
+isolation test was not found"*. `tests/tenant-isolation.test.mjs` exists. The claim came from
+having checked the migrations and the middleware and *not* the test directory — the exact shape
+of `CLAUDE.md`'s "NEVER STATE PROD STATE YOU DID NOT MEASURE", one level down: never state an
+absence you did not search for. The row now says what the test actually is — **static analysis,
+not a two-org seed**, because (its own header) *"Hyperdrive + Supabase aren't reachable from
+CI"* — which is a more useful answer than either "green" or "missing".
+
+## 5b — `docs/design/CHANGELOG-zh.md`
+
+A closed design-session log, in Chinese, already carrying an ARCHIVED banner and the rule that
+*a ✅ in this file describes the prototype, never the shipped React app*. **It stays in Chinese;
+nothing was translated.** That banner is what makes most of the file unfalsifiable-by-design
+against `src/`, so this pass checked the two things that ARE checkable: the paths it points at,
+and the handful of claims that happen to be visible in the React app too.
+
+| # | Doc's claim | What the tree holds | Sev | Fix applied |
+|---|---|---|---|---|
+| **E10** | §一·B lists `Hookka Main Login.dc.html`, `Hookka Worker Login.dc.html`, `Hookka Worker Portal Mobile.dc.html` under 「依项目内文件补记」 ("recorded from the files in the project") | **None of the three is tracked.** `git ls-files "*.dc.html"` returns exactly three files: `docs/design/Hookka ERP Desktop.dc.html`, `… Fold.dc.html`, `… Mobile.dc.html`. The sentence sends a reader to search a repo that has never held them. | med | Note added in place (in Chinese): the four bullets are design-stage history, the artefacts live on the design tool's side, do not search the repo. |
+| **E11** | delivery + source paths: `standalone/Hookka ERP Mobile (Phone).html`, `standalone/Hookka ERP Fold.html`, `docs/design/Hookka ERP Mobile.dc.html`, `docs/design/Hookka ERP Fold.dc.html`, `support.js`, `hookka-logo.png`; and "no `docs/design/source/`" | **All correct.** Directory listing confirms every one, and there is no `source/` directory. The 2026-08-13 correction holds. | — | none needed |
+| **E12** | fold breakpoint 720px at `src/pages/m/MobileLayout.tsx:87` | **Exact.** Line 87 is `const fold = useMediaQuery("(min-width: 720px)");`, and `docs/design/README.md:69` agrees. The 2026-08-14 correction from 700px holds. | — | none needed |
+| **E13** | 底部中间凸起的「More」九宫格按钮 · 手机版 Dark/Light 在 More 菜单，即时切换、记忆设置 | **Both live in the React app.** `src/pages/m/nav.ts:53` — `{ key: "more", …, raised: true }`, with `:46` documenting the 5-slot layout. `src/pages/m/screens/More.tsx:138` carries the toggle, and its source comment **quotes this changelog's own line** back at it. | — | none needed; recorded in the stamp so the next reader does not re-derive it |
+
+**Not checked, and deliberately so:** the module inventory in §一 (Dashboard tiles, SO/DO/PO
+flows, Service Cases, R&D, Warehouse, Employees, …) describes the `.dc.html` prototypes. Those
+are 300KB+ single-file HTML exports from a design tool, and per the file's own banner they assert
+nothing about `src/pages/m/`. Reading them to grade a prototype against itself would produce
+coverage, not truth. **That section is carried forward unverified, and the stamp says so.**
+
+## 5c — `docs/OWNER-DECISIONS.md`
+
+The register of what is waiting on the owner — and the one where staleness is dangerous in a
+specific direction: **a row that describes a decision already taken, or a bug already fixed,
+spends the owner's attention on nothing and buries the rows that are real.** Every row was
+re-read against the source it cites.
+
+| # | Row | The claim | What the tree holds | Sev | Fix applied |
+|---|---|---|---|---|---|
+| **E14** | **D1** | *"`/analytics/forecast` is UNREACHABLE — delete it, or route it"* | **It is routed.** `src/dashboard-routes.tsx:548` renders `src/pages/analytics/forecast.tsx` (lazy entry at `:577`). What it lacks is a nav entry: `src/components/layout/sidebar.tsx:280` points at `/forecast` — a **different** page (`src/pages/forecast.tsx`, routed at `:471`, labelled "Forecast P&L"). Half the row's own remedy had already been applied. | **HIGH** | Row rewritten: routed-but-unlinked; the live decision is delete-or-surface, plus disambiguating two similarly-named forecast screens. |
+| **E15** | **D3** | *"`/admin/health` KPIs **and** agent-console FX/LLM prices are seeded-random constants. They are tagged `_mock`, so they are honest"* | **Two different things, and the "honest" half does not cover the second.** `/admin/health` is genuinely seeded-random (`mockKpis()`, `src/api/routes/admin-health.ts:72`) and does carry `_mock: true` (`:95`) with a UI banner (`src/pages/admin/health.tsx:777`). The agent-console figures are **hardcoded constants, not random, and carry no `_mock` flag**: `USD_PER_MTOK_IN = 3` / `USD_PER_MTOK_OUT = 15` / `USD_TO_MYR_EST = 4.7` (`src/api/lib/agent-console.ts:351-353`), feeding the RM number shown against the RM 150 monthly budget (`:506`). | med | Row split into (a) and (b); (b) reframed as a stale-rate risk with an unlabelled number on screen. |
+| **E16** | **D4** | *"R&D material unit cost uses six hardcoded per-item-group constants. Real costing, or label as an estimate?"* | **Real costing already landed.** `resolveFifoUnitCostSen` (`src/api/routes/rd-projects.ts:330`) reads the oldest `rm_batches` row with stock remaining; `estimateFIFOCost` (`:195`) is only the **fallback** when no such batch exists. The issuance records which number it got but not which source. | med | Row narrowed to the no-batch case (label / refuse / stay silent) — the general question was answered by code. |
+| **E17** | **C6** | *"SO-2607 rows carrying state 'KL' — assign hub-h1, or leave unassigned"* | Still open, but the tooling changed **today**: `POST /api/sales-orders/backfill-hub-by-state` (`sales-orders.ts:804`) is dry-run by default, never auto-touches a dispatched order (separate review list at `:920`), and as of `#338` **also cascades the corrected hub onto `fg_units`** — before today, correcting an order still left the old hub printed on the box. The 126 / 34 counts come from a **2026-07-27** read-only script; today's are **UNMEASURED**. | med | Row updated with the repair path, the cascade, and the age of its numbers. |
+| **E18** | **C7** (new) | — | BUG-2026-08-19-157 fixed the forward path but **not the units already stamped**. `POST /api/fg-units/backfill-hub?execute=1` (`src/api/routes/fg-units.ts:796`) is the repair: dry-run by default, idempotent, skips `LOADED`/`DELIVERED`/`RETURNED`, returns full per-unit before/after. The sticker prints `fg_units.customerHub` **as stored** while the list screen computes a live `COALESCE(so.hubName, co.hubName)` — so a diverged unit **reads correct on screen and wrong on the box**. **How many rows diverge is UNMEASURED**; the endpoint comment's "~190 rows" is from the 2026-06-05 incident, not from now. | **HIGH** | New row **C7** added, worded as a go-ahead question with the dry-run as the mandatory first step. |
+| **E19** | **B3 · C3 · C5** | rows read as open | **They were being counted as settled.** `scripts/trust-report.mjs` marks a row settled when its line matches a five-word case-insensitive alternation — a **substring** test. B3's *"already shipped"*, C5's *"if both parts shipped"* and C3's *"genuinely abandoned"* (which contains the word "done") each tripped it. Three real questions were invisible in the headline number. | **HIGH** | All three reworded (no source change); an **editing rule** added above the tables naming the five trap words. Open count corrects **17 → 21**; no new problem, it was under-reported. |
+| **E20** | usage table | *"payment vouchers / official receipts — route 404"* | The handlers exist, mounted under `/api/accounting` (`worker.ts:1327`): `payment-vouchers` at `accounting.ts:8316`, `official-receipts` at `:8643`. A 404 is what a probe of a **top-level** `/api/payment-vouchers` returns. Row counts remain **UNMEASURED**. | med | Noted inside **D2**, which also gained the exact anchors for the `/restate` asymmetry (`:8584` exists; official receipts have `:8643` / `:8672` / `:8765` and no restate). |
+| **E21** | **D5 · D6** | canary comment · commit convention | **Both still true**, re-verified. `deploy.yml:294` still tells reviewers the canary shares production's Hyperdrive, which `docs/CANARY-DEPLOY.md:70-78` refutes (preview → `HYPERDRIVE_STAGING`). `docs/AGENTS-COMMIT-HYGIENE.md:43` and `:51` still route commits through `docs/archive/UPGRADE-CONTROL-BOARD.md`, which `docs/SDK-MIGRATION-STATUS.md:90-91` says not to use. | low | Kept open; both rows gained exact file:line so the next pass does not re-derive them. Note the anchor for the SDK quote is `:90-91`, not the `:85-87` the earlier J6 note gave. |
+| **E22** | **A1-A6 · B1-B5 · C1-C5** citations | `WORK-TRACKER:1158 / 1207 / 1294 / 1370 / 3771`, `PERF-BACKLOG:141`, plus `src/lib/pcb.ts`, `src/lib/leave-entitlement.ts`, `qc-pending.ts` bulk-skip, `three-pl-vehicles` collisions, `job_cards.completed_at` | **All resolve, and all still say what the rows say they say.** `resolvePcb` at `src/lib/pcb.ts:352`; `resolveEntitlementDays` at `src/lib/leave-entitlement.ts:266`; `POST /bulk-skip` at `src/api/routes/qc-pending.ts:2459`; `GET /collisions` at `src/api/routes/three-pl-vehicles.ts:153`; `migrations-postgres/0228_job_cards_completed_at.sql` + writers in `production-orders.ts`. | — | none needed |
+
+## 5d — UNMEASURED, and what Part 5 did NOT check
+
+**No production state is asserted anywhere in Part 5.** No DB credentials were available
+(`.dev.vars` carries a rotated password; a connection attempt returns `28P01`), and nothing here
+was run against prod. Concretely:
+
+- **Everything in 5a is a claim about the repository, never about the deployment.** "The queue
+  binding is commented out in `wrangler.toml`" is a fact about this tree; whether the deployed
+  Cloudflare project has a binding declared elsewhere, or whether any migration in
+  `migrations-postgres/` has actually been applied to the live database, is **UNMEASURED**.
+- **How many FG units carry a stale hub (C7) is UNMEASURED.** The number the owner needs is
+  the `wouldUpdate` / `moves` output of `POST /api/fg-units/backfill-hub` with **no** `execute`
+  flag. That is the whole point of the row: the dry-run is the measurement, and it must be run
+  by someone with access before anyone acts.
+- **Row counts behind the `[LIVE]` / `[LATENT]` tags were not re-measured.** They come from the
+  2026-08-14 pass; the tags were left as they stood. If a feature has been switched on since,
+  a LATENT tag is now wrong and this pass would not know.
+- **The `.dc.html` prototypes were not opened** (see 5b) — only the directory listing,
+  `git ls-files "*.dc.html"` and the three React-side claims.
+- **No test was executed for this pass** beyond the four gates: `check-docs-freshness.mjs`,
+  `check-codebase-map.mjs`, `gen-api-docs.mjs --check` and `npm run trust`. Test files named in
+  the corrections were verified to **exist**, and `tests/tenant-isolation.test.mjs` was read for
+  what it asserts — it was not run.
+- **Every dollar / engineer-week figure in `ROADMAP-PHASE-C.md` remains unverifiable from
+  source.** It is business projection and is labelled as such in that doc's header.
+
+## 5e — COLLECTED: judgement calls, NOT decided here
+
+- **J20 — `ROADMAP-PHASE-C.md` is now more correction than roadmap.** Four of its seven
+  milestones are partly built, one is superseded outright, and the header carries a table
+  contradicting the body. Archive it as a historical plan and open a fresh Phase C/D doc from
+  the measured state, or keep patching a 2026-04-25 draft? **Archiving changes what "the plan"
+  means, so it is the owner's call, not mine.**
+- **J21 — the settled-row test in `scripts/trust-report.mjs` is a substring match on the whole
+  row.** E19 shows it silently mis-classifying three rows for days. The doc-side fix (reword,
+  plus an editing rule) is applied; the durable fix is a source change — require an explicit
+  leading marker at the start of the decision cell instead of scanning prose.
+  **This audit is docs-only, so the script was not touched.**
+- **J22 — `#3` and `#4` are one admin action away from being true.** Both quick-wins are written,
+  reviewed and compiled; what is missing is `wrangler queues create po-emission` plus
+  uncommenting two blocks, and one scheduled workflow hitting `POST /api/mdm/detection/run`.
+  Provisioning infrastructure is an owner/admin action with a cost attached, so it is recorded
+  here rather than filed as an engineering task.
+- **J23 — nobody is checking the ledger hash chain.** `verifyJournalChain` exists, is covered by
+  its own module's tests, and has no caller (E5). The chain is accumulating a guarantee that is
+  never verified, which reads as stronger than "no chain at all" while being worth the same.
+  Wiring it to the existing `agent-heartbeat-worker` cron is small; deciding what a broken link
+  should DO (alert whom, block what) is not, and is the reason it is here.

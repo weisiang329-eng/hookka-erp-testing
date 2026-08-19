@@ -140,7 +140,23 @@ if (existsSync(REGISTER)) {
   // a backlog figure that does not fall when work is done teaches people to
   // ignore it.
   const rows = t.split(/\r?\n/).filter((l) => /^\|\s*\*\*[A-D]\d+\*\*\s*\|/.test(l));
-  const settled = rows.filter((l) => /DECIDED|DONE|PARKED|CLOSED|SHIPPED/i.test(l));
+
+  // A row counts as settled ONLY when the ruling marker is the first thing in
+  // the description cell, right after the id — the shape every closure here
+  // uses: `| **A4** | ✅ **DECIDED 2026-08-14 — …`.
+  //
+  // It used to match those words ANYWHERE in the row, which quietly hid live
+  // questions whose prose happened to contain one: B3 ("already shipped"),
+  // C5 ("if both parts shipped"), C3, D2. Four open decisions were invisible,
+  // and the register exists precisely because the owner could not get a
+  // straight count. A counter that under-reports is worse than no counter —
+  // it reads as "nothing waiting on me" and the work simply stops being seen.
+  //
+  // The narrow anchor also means a row cannot be closed by wording alone: to
+  // settle one you must put the marker where a reader sees it too.
+  const SETTLED_MARKER =
+    /^\|\s*\*\*[A-D]\d+\*\*\s*\|\s*(?:✅|⏸️|❌)\s*\*\*(DECIDED|DONE|PARKED|CLOSED|SHIPPED)\b/i;
+  const settled = rows.filter((l) => SETTLED_MARKER.test(l));
   decisions = rows.length - settled.length;
   resolvedCount = settled.length;
 }

@@ -322,6 +322,7 @@ function ThreadList({
   onInjectTest,
   onRowAction,
   listKey,
+  isSuperAdmin,
 }: {
   threads: MailThread[];
   loading: boolean;
@@ -334,6 +335,9 @@ function ThreadList({
   onOpen: (id: string) => void;
   onInjectTest: () => void;
   onRowAction: (action: RowAction, t: MailThread) => void;
+  /** Gates the test-inject affordance — POST /test-inject is admin-only, so
+   *  offering the button to anyone else only produces a 403. */
+  isSuperAdmin: boolean;
   /** Identifies the current list (folder + mailbox + search) — changing it
    *  rewinds the rendered slice to the first screenful. */
   listKey: string;
@@ -362,16 +366,24 @@ function ThreadList({
         </p>
         {!loading && folder === "inbox" && (
           <>
+            {/* Inbound mail has been live since the MX cutover — prod was
+                receiving on 2026-08-19. The old copy here still told every
+                reader that receiving was not switched on yet, so an empty
+                mailbox read as a broken system rather than as an empty
+                mailbox. Say the true thing instead (owner 2026-08-19). */}
             <p className="max-w-xs text-[11px] leading-snug text-muted-foreground/70">
-              Incoming mail will appear here once the domain MX is switched to
-              Cloudflare and the inbound Worker is live.
+              Nothing has arrived in this mailbox yet.
             </p>
-            <button
-              onClick={onInjectTest}
-              className="mt-1 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 hover:bg-amber-100"
-            >
-              Inject a test email (verify inbox)
-            </button>
+            {/* Admin-only: POST /test-inject is requireSuperAdmin, so this
+                button could only ever have produced a 403 for anyone else. */}
+            {isSuperAdmin && (
+              <button
+                onClick={onInjectTest}
+                className="mt-1 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 hover:bg-amber-100"
+              >
+                Inject a test email (verify inbox)
+              </button>
+            )}
           </>
         )}
       </div>
@@ -1034,9 +1046,24 @@ export default function MailCenterPage() {
       if (g.dept === UNASSIGNED_DEPT) continue;
       real.set(g.dept, g.mailboxes);
     }
-    // Ensure every canonical department is present even with zero mailboxes.
+    // Ensure every canonical department is present even with zero mailboxes —
+    // but ONLY for a SUPER_ADMIN, who is the only person who can act on the
+    // result (the "Set up" button is admin-gated).
+    //
+    // For everyone else this injection was actively misleading (owner
+    // 2026-08-19). GET /addresses is scoped by mail_user_scope, so a Sales user
+    // is returned only their own mailbox — support@/finance@/hr@ come back
+    // absent because they are NOT VISIBLE TO THEM, not because they don't
+    // exist. The sidebar then labelled all three "not set up", telling a
+    // salesperson that Finance has no mailbox while finance@hookka.com in fact
+    // held 1,039 threads. It also disclosed the addresses themselves.
+    //
+    // The rule: the sidebar shows what the backend actually returned, and
+    // nothing else.
     const deptNames = new Set<string>(real.keys());
-    for (const c of CANONICAL_DEPT_MAILBOXES) deptNames.add(c.dept);
+    if (isSuperAdmin) {
+      for (const c of CANONICAL_DEPT_MAILBOXES) deptNames.add(c.dept);
+    }
 
     const groups: { dept: string; entries: MailboxEntry[] }[] = [];
     for (const dept of Array.from(deptNames).sort(sortDepts)) {
@@ -1047,15 +1074,19 @@ export default function MailCenterPage() {
         address,
       }));
       // Add any canonical shared mailbox for this dept that has no row yet.
-      for (const c of CANONICAL_DEPT_MAILBOXES) {
-        if (c.dept === dept && !haveAddrs.has(c.address.toLowerCase())) {
-          entries.push({ kind: "missing", address: c.address, dept });
+      // Admin-only for the same reason as above: to a non-admin, "missing"
+      // is indistinguishable from "not yours to see".
+      if (isSuperAdmin) {
+        for (const c of CANONICAL_DEPT_MAILBOXES) {
+          if (c.dept === dept && !haveAddrs.has(c.address.toLowerCase())) {
+            entries.push({ kind: "missing", address: c.address, dept });
+          }
         }
       }
       groups.push({ dept, entries });
     }
     return groups;
-  }, [deptGroups]);
+  }, [deptGroups, isSuperAdmin]);
 
   // The personal "Other" bucket (aliases with no department).
   const personalMailboxes = useMemo(() => {
@@ -1781,6 +1812,7 @@ export default function MailCenterPage() {
                 onOpen={openThread}
                 onInjectTest={injectTest}
                 onRowAction={onRowAction}
+                isSuperAdmin={isSuperAdmin}
                 listKey={`${folder}|${filter.kind}|${filter.kind === "mailbox" ? filter.value : ""}|${q}`}
               />
             )}

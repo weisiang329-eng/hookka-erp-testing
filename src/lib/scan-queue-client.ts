@@ -46,35 +46,75 @@ export async function postScanQueueConsume(
 }
 
 /**
- * Upload a scan-queue row's stored PDF (or image) bytes to /api/files so the
- * resulting PI/GRN can link back to its source supplier document. Owner
- * ruling 2026-06-30 — for auto-split parents, this is the SPECIFIC chunk's
- * PDF (not the original 85-page bundle). Returns the file_assets row id
- * (which the PI POST persists as `sourceDocumentFileId`).
+ * Where a scanned document's bytes can be read from.
  *
- * Best-effort: failures don't block PI creation — the PI just won't have
- * the "View source document" link surfaced. Caller logs/swallows on null.
+ * The two scan entry points are COMPLEMENTARY and each is missing exactly what
+ * the other has: a direct upload holds the real File but has no queue row,
+ * while a card resumed from the queue has the row id and no File. Asking for
+ * one of them only is a no-op for half the operators — that is precisely how
+ * BUG-2026-08-19-155 lost a month of customer POs on the SALES side, and the
+ * same gate stood here on the purchasing side.
  */
-export async function uploadScanQueueRowAsSourceDoc(
-  rowId: string,
+export type SourceDocOrigin =
+  | { kind: "file"; file: File }
+  | { kind: "queue"; rowId: string };
+
+/**
+ * Pick whichever source is REAL for this card. The local File wins: it needs no
+ * round trip and survives `/consume` NULLing the stored bytes.
+ */
+export function sourceDocOriginForCard(card: {
+  sourceFile?: File | null;
+  scanQueueRowId?: string | null;
+}): SourceDocOrigin | null {
+  if (card.sourceFile && card.sourceFile.size > 0) {
+    return { kind: "file", file: card.sourceFile };
+  }
+  if (card.scanQueueRowId) return { kind: "queue", rowId: card.scanQueueRowId };
+  return null;
+}
+
+/**
+ * Upload a scanned supplier document to /api/files so the resulting PI/GRN can
+ * link back to it. Owner ruling 2026-06-30 — for auto-split parents this is the
+ * SPECIFIC chunk's PDF (not the original 85-page bundle). Returns the
+ * file_assets row id (which the PI POST persists as `sourceDocumentFileId`).
+ *
+ * Best-effort: failures don't block PI creation — the PI just won't have the
+ * "View source document" link. It now logs instead of vanishing: the old bare
+ * `catch {}` meant a document that was never saved looked exactly like one that
+ * was.
+ */
+export async function uploadSourceDoc(
+  origin: SourceDocOrigin | null,
   resourceType: string,
   resourceId: string,
 ): Promise<string | null> {
   try {
-    // 1. Fetch the raw bytes from the scan_queue row.
-    const bytesRes = await fetch(
-      `/api/scan-queue/${encodeURIComponent(rowId)}/bytes`,
-      { credentials: "include" },
-    );
-    if (!bytesRes.ok) return null;
-    const blob = await bytesRes.blob();
-    // The bytes endpoint sets Content-Disposition with the row's filename.
+    if (!origin) throw new Error("no source document held for this card");
+    let blob: Blob;
     let filename = "source-document.pdf";
-    const disposition = bytesRes.headers.get("Content-Disposition") || "";
-    const m = disposition.match(/filename="?([^";]+)"?/i);
-    if (m && m[1]) filename = m[1];
-    const contentType =
-      bytesRes.headers.get("Content-Type") || "application/pdf";
+    let contentType = "application/pdf";
+
+    if (origin.kind === "file") {
+      blob = origin.file;
+      filename = origin.file.name || filename;
+      contentType = origin.file.type || contentType;
+    } else {
+      // Fetch the raw bytes from the scan_queue row.
+      const bytesRes = await fetch(
+        `/api/scan-queue/${encodeURIComponent(origin.rowId)}/bytes`,
+        { credentials: "include" },
+      );
+      if (!bytesRes.ok) throw new Error(`source bytes HTTP ${bytesRes.status}`);
+      blob = await bytesRes.blob();
+      // The bytes endpoint sets Content-Disposition with the row's filename.
+      const disposition = bytesRes.headers.get("Content-Disposition") || "";
+      const m = disposition.match(/filename="?([^";]+)"?/i);
+      if (m && m[1]) filename = m[1];
+      contentType = bytesRes.headers.get("Content-Type") || contentType;
+    }
+    if (!blob.size) throw new Error("source bytes empty");
 
     // 2. Upload to /api/files as a multipart POST.
     const fd = new FormData();
@@ -86,13 +126,17 @@ export async function uploadScanQueueRowAsSourceDoc(
       credentials: "include",
       body: fd,
     });
-    if (!upRes.ok) return null;
+    if (!upRes.ok) throw new Error(`file upload HTTP ${upRes.status}`);
     const upJson = (await upRes.json().catch(() => null)) as {
       success?: boolean;
       data?: { id?: string };
     } | null;
-    return upJson?.success && upJson.data?.id ? upJson.data.id : null;
-  } catch {
+    if (!upJson?.success || !upJson.data?.id) {
+      throw new Error("upload returned no file id");
+    }
+    return upJson.data.id;
+  } catch (e) {
+    console.error(`[scan] failed to save source document for ${resourceId}:`, e);
     return null;
   }
 }

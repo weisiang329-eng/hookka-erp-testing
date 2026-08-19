@@ -34,6 +34,57 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-19-156 — a purchase invoice scanned by dragging a PDF in kept NO source document, by the same gate that lost the customer POs `procurement` `ui-frontend` `data-integrity` 🟢
+
+> **The purchasing-side twin of BUG-2026-08-19-155**, found by sweeping the class rather
+> than waiting for it to be reported. Same gate, same silence, different document.
+
+**Owner ruling 2026-06-30:** a scanned supplier document stays linked to the purchase
+invoice it produced — the PI's "View source document".
+
+**Root cause.** `src/components/scan-supplier-modal.tsx`, before:
+
+```js
+if (card.scanQueueRowId) {
+  const fileId = await uploadScanQueueRowAsSourceDoc(card.scanQueueRowId, …);
+  if (fileId) payload.sourceDocumentFileId = fileId;
+}
+```
+
+`scanQueueRowId` is set only on cards resumed from the background scan queue.
+`buildCard(upload.file.name, result.data, result.sampleId)` — the sync `/extract` path,
+i.e. dragging a PDF into the modal — left that argument at its `null` default. So a PI
+created that way silently linked nothing.
+
+**Two things made it invisible.** The gate is an `if` that does not fire, which leaves no
+trace; and the helper ended in a bare `catch {}` returning `null`, so a document that was
+never saved looked exactly like one that was. The caller drops `null` on the floor.
+
+**Why the card could not simply be read.** `PreviewCard` held only `fileName` — never the
+File — so there was nothing to upload even if the gate had been removed. The File existed
+one frame earlier (`upload.file`, right where `buildCard` is called) and was thrown away.
+
+**Fix.** `src/lib/scan-queue-client.ts` now exports `SourceDocOrigin`,
+`sourceDocOriginForCard()` and `uploadSourceDoc()` — the same shape as
+`src/lib/so-original.ts` on the sales side, deliberately, so the two read alike.
+`PreviewCard` gained `sourceFile`, `buildCard` takes it as its LAST parameter (the queue
+call sites pass `(…, it.id, idx)` positionally and had to keep working untouched), and the
+create path calls the upload ungated. The bare `catch {}` now logs.
+
+Note the trap in the other direction, which the tests pin: queue-resumed cards have **no**
+File, so "just use `card.sourceFile`" would have saved nothing for them instead — and a
+zero-byte File must lose to a usable queue row, or the PI gets an empty attachment that
+reports success.
+
+**Verified.** `tests/supplier-source-doc-every-path.test.mjs` — 9 tests, 8 behavioural
+against the real exported functions with a stubbed `fetch`. Proven RED against each fault
+before being trusted: restoring the gate, withholding the File from the card, and dropping
+the zero-byte check each turn the suite red; the tree restores green. `tsc` strict: 0 errors.
+
+**Not changed, and not a regression:** the GRN wizard in the same file has never saved a
+source document at all (`sourceDocumentFileId` appears only on the PI path). That is a
+design question for the owner, not a defect to fix silently.
+
 ## BUG-2026-08-19-155 — every SO created by dragging a PDF into the scan modal silently kept NO copy of the customer's PO, for a month `sales-orders` `ui-frontend` `data-integrity` 🟢
 
 > Owner, 2026-08-19: 「新的 SO 也是没有 PO 就是顾客的 PO 记录 可以返回」 — and then, decisively:

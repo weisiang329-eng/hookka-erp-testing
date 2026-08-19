@@ -92,7 +92,12 @@ against the real functions with a stubbed `fetch`. Proven RED against each origi
 before being trusted: restoring the queue-id gate, deleting the fallback call, and dropping
 the zero-byte check each turn the suite red; the tree restores green. `tsc` strict: 0 errors.
 
-**UNVERIFIED on prod:** no live SO has been created through the fixed modal yet, and this
+**Deployed and verified live 2026-08-19.** `erp.hookka.com` serves the chunk carrying this
+fix byte-identically to the local build of `049d1f74` (sha256 `1b3e53cc…`), and the marker
+string `"no source document held"` appears **0 times** in the pre-fix source — so the code
+running in production is this code, not a cached older build.
+
+**Still UNVERIFIED:** no live SO has been created through the fixed modal yet, and this
 session had no working DB credential (`.dev.vars` is the rotated one, `28P01`; the Supabase
 REST key cannot see these tables). The proof that matters is the next scanned PO showing
 "View original" — that is an owner-side check, not a claim to make here.

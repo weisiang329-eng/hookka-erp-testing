@@ -13,6 +13,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { ensureCustomerStageColumns } from "../lib/customer-stage";
+import { planImport, makeBatchLabel, type RawLeadRow } from "../../lib/lead-import";
 
 const app = new Hono<Env>();
 
@@ -98,17 +99,113 @@ function normStage(s: unknown): LeadStage {
   return (LEAD_STAGES as readonly string[]).includes(up) ? (up as LeadStage) : "NEW";
 }
 
-// GET /api/sales-leads  — the whole board (optionally ?stage=NEW)
+// GET /api/sales-leads — one page of the pipeline.
+//
+// This used to be `SELECT *` with no LIMIT: the entire table, every call. That
+// was survivable while the table held a handful of hand-typed leads. It is not
+// survivable next to a bought list — the Penang file alone adds 939 rows, and
+// the response would carry all of them on every page load.
+//
+// So there is a LIMIT now, and `total` comes back beside the rows. Two notes on
+// the shape, because both were deliberate:
+//   * `data` is still the plain array the existing board already reads, so
+//     nothing breaks. The new counts ride alongside it.
+//   * the cap applies even when the caller asks for no limit. A caller that
+//     forgets to paginate should get a slow-but-alive page and a `total` that
+//     tells it the truth, not a silent half-list — which is why `total` is not
+//     optional.
+//
+// Filters are the ones a salesperson actually works by: which list this came
+// from, which industry, where it is up to, and free-text over name and phone.
 app.get("/", async (c) => {
   const denied = await requirePermission(c, "customers", "read");
   if (denied) return denied;
   await ensureTable(c.var.DB);
+  await ensureImportColumns(c.var.DB);
+
+  const orgId = getOrgId(c);
   const stage = c.req.query("stage");
-  const base = `SELECT * FROM sales_leads WHERE org_id = ?`;
-  const stmt = stage
-    ? c.var.DB.prepare(`${base} AND stage = ? ORDER BY updated_at DESC`).bind(getOrgId(c), normStage(stage))
-    : c.var.DB.prepare(`${base} ORDER BY updated_at DESC`).bind(getOrgId(c));
-  const res = await stmt.all<LeadRow>();
+  const industry = c.req.query("industry");
+  const batch = c.req.query("batch");
+  const q = (c.req.query("q") ?? "").trim();
+
+  const MAX = 500;
+  const DEFAULT = 200;
+  const askedLimit = Number(c.req.query("limit"));
+  const limit = Math.min(
+    Number.isFinite(askedLimit) && askedLimit > 0 ? askedLimit : DEFAULT,
+    MAX,
+  );
+  const askedOffset = Number(c.req.query("offset"));
+  const offset = Number.isFinite(askedOffset) && askedOffset > 0 ? askedOffset : 0;
+
+  const where: string[] = ["org_id = ?"];
+  const args: unknown[] = [orgId];
+  if (stage) {
+    where.push("stage = ?");
+    args.push(normStage(stage));
+  }
+  if (industry) {
+    where.push("industry = ?");
+    args.push(industry);
+  }
+  if (batch) {
+    where.push("import_batch = ?");
+    args.push(batch);
+  }
+  if (q) {
+    // Phone is matched on digits so "0102486699" finds "+60 10-248 6699" —
+    // a salesperson pastes the number the way the customer said it.
+    const digits = q.replace(/\D+/g, "");
+    where.push(
+      digits
+        ? "(company ILIKE ? OR name ILIKE ? OR REGEXP_REPLACE(COALESCE(phone,''), '[^0-9]', '', 'g') LIKE ?)"
+        : "(company ILIKE ? OR name ILIKE ?)",
+    );
+    args.push(`%${q}%`, `%${q}%`);
+    if (digits) args.push(`%${digits}%`);
+  }
+  const clause = where.join(" AND ");
+
+  const totalRow = await c.var.DB.prepare(
+    `SELECT COUNT(*) AS n FROM sales_leads WHERE ${clause}`,
+  )
+    .bind(...args)
+    .first<{ n: number }>();
+
+  const res = await c.var.DB.prepare(
+    `SELECT * FROM sales_leads WHERE ${clause} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+  )
+    .bind(...args, limit, offset)
+    .all<LeadRow>();
+
+  return c.json({
+    success: true,
+    data: res.results ?? [],
+    total: Number(totalRow?.n ?? 0),
+    limit,
+    offset,
+  });
+});
+
+// GET /api/sales-leads/industries — the industry facet, with counts, for the
+// tabs across the top of the list. Derived from the data rather than a fixed
+// enum, so a new bought list in a new trade appears on its own.
+app.get("/industries", async (c) => {
+  const denied = await requirePermission(c, "customers", "read");
+  if (denied) return denied;
+  await ensureTable(c.var.DB);
+  await ensureImportColumns(c.var.DB);
+  const res = await c.var.DB.prepare(
+    `SELECT COALESCE(industry, '(none)') AS industry,
+            COUNT(*) AS total,
+            SUM(CASE WHEN stage <> 'NEW' THEN 1 ELSE 0 END) AS contacted,
+            SUM(CASE WHEN last_reply_at IS NOT NULL THEN 1 ELSE 0 END) AS replied
+       FROM sales_leads WHERE org_id = ?
+      GROUP BY 1 ORDER BY total DESC`,
+  )
+    .bind(getOrgId(c))
+    .all();
   return c.json({ success: true, data: res.results ?? [] });
 });
 
@@ -229,6 +326,226 @@ app.post("/", async (c) => {
   }
 
   return c.json({ success: true, data: { id, customerId } });
+});
+
+// ---------------------------------------------------------------------------
+// Columns a bought contact list needs. Runtime self-apply — a migration file
+// alone is inert on deploy in this repo.
+//
+//   industry / location / website  the scraped list carries these and a
+//                                  salesperson sorts by them
+//   import_batch                   which list this row came from. The single
+//                                  most important one: bought lists vary in
+//                                  quality, and this is what makes "that batch
+//                                  was rubbish, remove all of it" one action
+//                                  instead of an unpickable mess months later
+//   contact_role                   "purchasing", "owner" — learned on the call
+//   original_company               the untouched scraped title, when the stored
+//                                  name was shortened from it
+//   also_listed_as                 other names that shared this phone
+//   last_contacted_at / last_reply_at  drives the follow-up view
+// ---------------------------------------------------------------------------
+let importColsEnsured = false;
+async function ensureImportColumns(db: D1Database): Promise<void> {
+  if (importColsEnsured) return;
+  for (const col of [
+    "industry TEXT",
+    "location TEXT",
+    "website TEXT",
+    "import_batch TEXT",
+    "contact_role TEXT",
+    "original_company TEXT",
+    "also_listed_as TEXT",
+    "last_contacted_at TEXT",
+    "last_reply_at TEXT",
+  ]) {
+    await db.prepare(`ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS ${col}`).run();
+  }
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS ix_sales_leads_batch ON sales_leads (org_id, import_batch)",
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE INDEX IF NOT EXISTS ix_sales_leads_industry ON sales_leads (org_id, industry)",
+    )
+    .run();
+  importColsEnsured = true;
+}
+
+// POST /api/sales-leads/import — bring in a bought contact list.
+//
+// TWO THINGS THIS DELIBERATELY DOES NOT DO.
+//
+// 1. It does not create a customer per lead. POST / does, and that is the
+//    owner's own 2026-08-01 ruling ("要不然我不习惯") — a salesperson typing in
+//    one lead is about to quote it, so the account has to exist. A bought list
+//    is the opposite case: 1,029 scraped names nobody has spoken to. Minting an
+//    account for each would put them in the same table the quotations, invoices
+//    and statements read from, next to the 7 real customers, and unpicking that
+//    afterwards is far harder than never doing it. A lead gets its account when
+//    someone actually talks to them.
+//
+// 2. It does not write anything on `dryRun`. The planner returns what WOULD
+//    happen — how many duplicates, how many unreachable — and the operator
+//    confirms. On a 1,029-row file you want to see "90 duplicates" before.
+app.post("/import", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
+  await ensureTable(c.var.DB);
+  await ensureImportColumns(c.var.DB);
+
+  const b = (await c.req.json().catch(() => ({}))) as {
+    rows?: RawLeadRow[];
+    batchName?: string;
+    source?: string;
+    dryRun?: boolean;
+  };
+  const rows = Array.isArray(b.rows) ? b.rows : [];
+  if (rows.length === 0) return c.json({ success: false, error: "rows required" }, 400);
+  if (rows.length > 5000) {
+    return c.json({ success: false, error: "too many rows in one import (max 5000)" }, 400);
+  }
+
+  const orgId = getOrgId(c);
+
+  // Dedupe against what is already here, not just within the file — the second
+  // import of an overlapping list is where duplicates really come from.
+  const existing = await c.var.DB.prepare(
+    "SELECT phone FROM sales_leads WHERE org_id = ? AND phone IS NOT NULL",
+  )
+    .bind(orgId)
+    .all<{ phone: string }>();
+  const { normalizePhone } = await import("../../lib/lead-import");
+  const existingKeys = (existing.results ?? [])
+    .map((r) => normalizePhone(r.phone))
+    .filter(Boolean);
+
+  const plan = planImport(rows, existingKeys);
+
+  if (b.dryRun) {
+    return c.json({
+      success: true,
+      data: {
+        dryRun: true,
+        summary: plan.summary,
+        // A sample, not the lot — the point is to let a person eyeball what the
+        // rules did, and 90 identical-looking skip rows teach nothing.
+        sampleSkipped: plan.skipped.slice(0, 25),
+        sampleInsert: plan.insert.slice(0, 10),
+      },
+    });
+  }
+
+  const batch = makeBatchLabel(b.batchName ?? "import", new Date().toISOString());
+  const now = new Date().toISOString();
+  const by = actingUserId(c);
+  const source = String(b.source ?? "").trim() || "IMPORT";
+
+  // Chunked so one oversized statement cannot blow the parameter limit, and so
+  // a partial failure leaves a coherent prefix rather than nothing.
+  const CHUNK = 50;
+  let inserted = 0;
+  for (let i = 0; i < plan.insert.length; i += CHUNK) {
+    const slice = plan.insert.slice(i, i + CHUNK);
+    await c.var.DB.batch(
+      slice.map((r) =>
+        c.var.DB.prepare(
+          `INSERT INTO sales_leads
+             (id, name, company, phone, email, source, stage, est_value_sen, notes,
+              assigned_to, org_id, created_by, created_at, updated_at,
+              industry, location, website, import_batch, original_company, also_listed_as)
+           VALUES (?, ?, ?, ?, ?, ?, 'NEW', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          genId(),
+          r.contactName ?? null,
+          r.company ?? null,
+          r.phone ?? null,
+          r.email ?? null,
+          source,
+          r.notes ?? null,
+          null, // unassigned — a bought list is not anyone's yet
+          orgId,
+          by,
+          now,
+          now,
+          r.industry ?? null,
+          r.location ?? null,
+          r.website ?? null,
+          batch,
+          r.originalCompany ?? null,
+          r.alsoListedAs?.length ? r.alsoListedAs.join(" | ") : null,
+        ),
+      ),
+    );
+    inserted += slice.length;
+  }
+
+  return c.json({
+    success: true,
+    data: { batch, inserted, summary: plan.summary },
+  });
+});
+
+// DELETE /api/sales-leads/import/:batch — remove one imported list, whole.
+//
+// The reason the batch label exists. Refuses once any lead in the batch has
+// been worked, because deleting those would erase somebody's phone calls: the
+// operator sees the count and decides, rather than the system silently keeping
+// or silently destroying them.
+app.delete("/import/:batch", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
+  await ensureTable(c.var.DB);
+  await ensureImportColumns(c.var.DB);
+  const batch = c.req.param("batch");
+  const orgId = getOrgId(c);
+  const force = c.req.query("force") === "true";
+
+  const worked = await c.var.DB.prepare(
+    `SELECT COUNT(*) AS n FROM sales_leads
+      WHERE org_id = ? AND import_batch = ? AND (stage <> 'NEW' OR last_contacted_at IS NOT NULL)`,
+  )
+    .bind(orgId, batch)
+    .first<{ n: number }>();
+  const workedCount = Number(worked?.n ?? 0);
+
+  if (workedCount > 0 && !force) {
+    return c.json(
+      {
+        success: false,
+        error: `${workedCount} lead(s) in this batch have already been contacted. Re-send with ?force=true to delete them too.`,
+        workedCount,
+      },
+      409,
+    );
+  }
+
+  const res = await c.var.DB.prepare(
+    "DELETE FROM sales_leads WHERE org_id = ? AND import_batch = ?",
+  )
+    .bind(orgId, batch)
+    .run();
+  return c.json({ success: true, data: { batch, deleted: res.meta?.changes ?? null } });
+});
+
+// GET /api/sales-leads/batches — what has been imported, for the filter menu.
+app.get("/batches", async (c) => {
+  const denied = await requirePermission(c, "customers", "read");
+  if (denied) return denied;
+  await ensureTable(c.var.DB);
+  await ensureImportColumns(c.var.DB);
+  const res = await c.var.DB.prepare(
+    `SELECT import_batch AS batch, COUNT(*) AS total,
+            SUM(CASE WHEN stage <> 'NEW' THEN 1 ELSE 0 END) AS worked
+       FROM sales_leads
+      WHERE org_id = ? AND import_batch IS NOT NULL
+      GROUP BY import_batch ORDER BY import_batch DESC`,
+  )
+    .bind(getOrgId(c))
+    .all();
+  return c.json({ success: true, data: res.results ?? [] });
 });
 
 // PUT /api/sales-leads/:id  — edit fields

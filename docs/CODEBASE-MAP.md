@@ -235,6 +235,28 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 - **A `supplierCode` holding the document's line NUMBER is not a code** (`supplierCodeOf` / `looksLikeRowNumber`). ADD WOOD's invoice is `No | Description | Qty | Unit/Price | Amount` — no product code anywhere, and the leading column counts 1, 2, 3. The extractor filled `supplierCode` with it, and that ONE junk character broke three things at once, which is why only this supplier misbehaved: the description fallback was gated on `!rawSku` so it never ran (and the description is their only identifying text — no amount of manual picking could ever make their invoice auto-resolve), the prefix-tolerant binding search matched any SKU ending in that digit, and the digit joined the matching text where a rare token carries high IDF weight and drags the score under the bar. Fixed at both ends: the extractor prompt says a counter column is not a code, and the client refuses to read one regardless. Also `MIN_SKU_SUFFIX_MATCH` — suffix matching needs ≥3 chars on both sides, since a two-character key suffix-matches nearly every binding a supplier has. Tests: `tests/scan-row-number-not-a-code.test.mjs`.
 - Supplier bindings resolve by `supplierSku` FIRST, then by `supplierDescription` — and the description path runs whenever the SKU path FAILED, not only when the code column was empty. The description path exists because some suppliers print no product code at all (ADD WOOD's invoice is `No | Description | Qty | Unit/Price | Amount`), so the SKU path can never fire and Internal Code could never auto-resolve for them. `supplierDescription` was always in the table and the API, but was missing from the `SupplierMaterialBinding` FE type, so the scanner could not see it. Description containment matches ONLY when exactly one binding qualifies — two candidates means the line is ambiguous and guessing would book stock against the wrong material. Both scan modes (create-PI and create-GRN) must resolve identically, or the same document maps differently depending on which door it came through.
 - ~~PENDING task to merge Supplier Pricing (pricing.tsx) into the Supplier module~~ — **DONE.** Consolidated by `8c12bfb6`, the dead page deleted by `b3b42b6c`; the comparison surface now lives in `procurement/maintenance.tsx` (ComparisonTab) and `/procurement/pricing` redirects there. Still don't duplicate it (a duplicate modal was shipped+reverted before).
+- **A bought contact list imports through `POST /api/sales-leads/import`, NOT through
+  `POST /`.** The single-lead POST mints a POTENTIAL customer per lead, and that is the
+  owner's own ruling (2026-08-01, 「要不然我不习惯」) — someone typing in one lead is about to
+  quote it. The bulk path must NOT: the first supplied list was 1,029 Google-Maps-scraped
+  names against 7 real customers, and minting accounts for those puts them in the very table
+  quotations, invoices and statements read from. Rules live in `src/lib/lead-import.ts` (pure,
+  no DB): dedupe key is the PHONE reduced to digits and lifted to +60 — the list carried **zero
+  emails and 1,029 phones**, so the phone is the only identity the data has; a row with no
+  phone is skipped rather than imported as an uncontactable name; two branches sharing one
+  phone collapse into one lead with the other name kept in `also_listed_as`; keyword-stuffed
+  Google titles are cut to the business name with the original kept in `original_company`; the
+  `&opi=` tracking suffix is stripped from websites. Every import carries `import_batch`, which
+  is what makes `DELETE /import/:batch` able to remove a bad list whole (it 409s if any lead in
+  it was already worked, unless `?force=true`). `POST /import` with `dryRun` writes nothing and
+  returns the counts — always run it first; on the Penang file it reports 939 new / 90 duplicate.
+  Pinned by `tests/lead-import.test.mjs` + `tests/lead-import-route.test.mjs`.
+- **`GET /api/sales-leads` is paginated and returns `total`.** It used to `SELECT *` the whole
+  table on every call, which was fine for hand-typed leads and fatal beside a bought list.
+  Default 200, hard cap 500, filters `stage` / `industry` / `batch` / `q` (q matches the phone
+  on digits, so a pasted "0102486699" finds "+60 10-248 6699"). The kanban board reads one page
+  and shows a banner when `total` exceeds it — a board silently holding 200 of 939 is worse
+  than a slow board, because the salesperson would work it believing it was the whole list.
 - Convert-chain availability (PO→GRN→PI, mig 0182): per-line CONSUMED tracking. PO line available = `quantity − receivedQty`; GRN line available = `accepted_qty − invoiced_qty` (both exposed as `availableQty` on item reads, dual-keyed). PI POST takes `body.grnId` + per-line `grnItemId`; a LINE-LEVEL 409 guard (`src/lib/convert-chain.ts` `checkConvertAvailability`) replaced the old PO-level double-bill 409 — a 2nd PI is allowed when qty remains, only the over-drawn line is rejected. Increment `grn_items.invoiced_qty` on PI create (same batch as the line insert); RESTORE on PI delete / PI items-replace / PI→CANCELLED, and on GRN un-post/cancel/delete (`restorePOReceivedQtyForGRN` decrements `purchase_order_items.receivedQty`, recomputes PO status). Stock posting (`postGRNToStock`) is NOT reversed by any restore — availability only. GRN DELETE is blocked while a non-CANCELLED PI references it (`purchase_invoices.grn_id`). **A GRN-sourced PI is capped by the receipt AND by the purchase order (BUG-2026-08-07-003, BUG-CLASS C10): `checkPoRemaining` (`purchase-invoices.ts:945`) is the ONE PO ceiling, called by the PO branch, the GRN branch and the PUT re-line (the last with the edited PI excluded from its own already-invoiced sum). Before this, a GRN-sourced invoice saw only `accepted − invoiced_qty`, so 100 could be billed off the PO and 100 more off its GRN. The ceiling is `poInvoiceCeiling` = max(ordered, receivedQty) so an accepted over-receipt stays invoiceable; requested qty is aggregated per material code; a GRN line with no PO (direct receipt) is not PO-capped. A GRN-sourced line's `purchase_invoice_items.po_id` is resolved the same way the guard resolves it — `line.poId → body.purchaseOrderId → grn_items.po_id → grns.poId`.** Tests: `tests/convert-chain.test.mjs` + `tests/purchasing-convert-flow.test.mjs`.
 - Convert UX (2026-06): GRN create = manual default + "Convert from PO" line-pick (`convert-from-po-modal.tsx`); PI create = "Convert from Goods Receipt" line-pick with GRN+PO tabs (`convert-to-pi-modal.tsx`). Pickers show per-line `availableQty`, checkbox + qty (≤ available), skip fully-consumed lines. PI GRN-source lines carry `grnItemId` → POST sends `body.grnId` + per-line `grnItemId`. Both pickers are SINGLE-source (one PO→one GRN; one GRN/PO→one PI) because the GRN backend keys lines to ONE parent PO by `poItemIndex` (grns.poId single column). Multi-source consolidation into one doc is a FOLLOW-UP (needs schema work). The GRN "From PO | Manual" mode toggle was removed; `?poId=` deep-link still locks PO mode.
 
@@ -1513,7 +1535,7 @@ and one `PUT /api/accounting/forecast` on Save (`:287`).
 
 | Frontend page | API route | Primary tables | Tests |
 |---|---|---|---|
-| `src/pages/leads/index.tsx` — `/leads` (`src/dashboard-routes.tsx:414`; sidebar "SALES & CUSTOMERS → Sales Pipeline"); 6-column kanban, drag-to-move, full CRM drawer, convert-to-customer (929) | `src/api/routes/sales-leads.ts` (437) — CRUD + `/:id/stage` + `/:id/convert` + `/lead-products` | runtime-created: `sales_leads` (`src/api/routes/sales-leads.ts:35`), `lead_products` (`src/api/routes/sales-leads.ts:63`); plus `customers` — a POTENTIAL row is minted with the lead (`src/api/routes/sales-leads.ts:144`) | `tests/sales-leads.test.mjs`, `tests/sales-pipeline-lead-detail.test.mjs`, `tests/lead-convert.test.mjs`, `tests/lead-catalog.test.mjs`, `tests/crm-followups.test.mjs` |
+| `src/pages/leads/index.tsx` — `/leads` (`src/dashboard-routes.tsx:414`; sidebar "SALES & CUSTOMERS → Sales Pipeline"); 6-column kanban, drag-to-move, full CRM drawer, convert-to-customer (929) | `src/api/routes/sales-leads.ts` (437) — CRUD + `/:id/stage` + `/:id/convert` + `/lead-products` | runtime-created: `sales_leads` (`src/api/routes/sales-leads.ts:35`), `lead_products` (`src/api/routes/sales-leads.ts:63`); plus `customers` — a POTENTIAL row is minted with the lead (`src/api/routes/sales-leads.ts:121`) | `tests/sales-leads.test.mjs`, `tests/sales-pipeline-lead-detail.test.mjs`, `tests/lead-convert.test.mjs`, `tests/lead-catalog.test.mjs`, `tests/crm-followups.test.mjs` |
 
 **Endpoints called, with line refs in `src/pages/leads/index.tsx`**
 
@@ -1544,7 +1566,7 @@ id** — those carry their own endpoints.
   `label` is display-only. Owner 2026-08-01 renamed New/Won/Lost → **Potential / Confirmed /
   Dropped** by editing labels alone — no migration. Don't "tidy" the keys.
 - **Convert PROMOTES, it does not create.** A `customers` row is minted as POTENTIAL when the
-  lead is entered (`sales-leads.ts:144`), and has been carrying SKU assignments, combos and
+  lead is entered (`sales-leads.ts:121`), and has been carrying SKU assignments, combos and
   quotations ever since. `ConvertLeadDialog.submit` (L557) therefore `PUT`s that existing
   `lead.customer_id` (L582–592) and only falls through to `POST /api/customers` (L594) for
   pre-change leads that have none. Minting a second customer here would strand everything
@@ -2150,7 +2172,7 @@ The wishlist feature is retired but its table is deliberately kept
 | DELETE `/api/sales-leads/lead-products/:id` | `src/api/routes/sales-leads.ts:427` | `customers:delete` | yes |
 
 A lead **is** a potential customer (owner 2026-08-01): POST mints a real `customers` row
-immediately via `createPotentialCustomerForLead` (`src/api/routes/sales-leads.ts:136`),
+immediately via `createPotentialCustomerForLead` (`src/api/routes/sales-leads.ts:233`),
 stamped `customer_stage = 'POTENTIAL'` with no creditor code and zero credit limit, and
 links it back onto `sales_leads.customer_id`. That insert is **best-effort on purpose**
 (`src/api/routes/sales-leads.ts:199`) — losing the typed-in lead because a customer insert
@@ -2210,7 +2232,7 @@ pricing engine (`src/api/routes/sales-leads.ts:56-60`).
   for everybody. ⬜ **Open, deliberately** — raised to the owner 2026-08-13 as a product
   decision, not touched by the security pass.
 - **A lead's customer row is minted org-blind.** `createPotentialCustomerForLead`
-  (`src/api/routes/sales-leads.ts:144-150`) does not list `orgId` in its INSERT, so the row
+  (`src/api/routes/sales-leads.ts:121-150`) does not list `orgId` in its INSERT, so the row
   takes the SQL default `'hookka'` from `migrations/0049_multi_tenant_skeleton.sql:32`
   regardless of who created it. Same shape as the write-side gap already recorded for
   consignments in `docs/BUG-CLASSES.md` C12 — see finding S3.
@@ -2262,7 +2284,7 @@ draws the top 3 confirmed samples with **no org predicate**, so one tenant's con
 customer PO can be injected verbatim into another tenant's OCR prompt.
 
 **S3 — `sales-leads.ts` mints customers into the wrong org.** `createPotentialCustomerForLead`
-(`src/api/routes/sales-leads.ts:144`) omits `orgId`, which defaults to `'hookka'`
+(`src/api/routes/sales-leads.ts:121`) omits `orgId`, which defaults to `'hookka'`
 (`migrations/0049_multi_tenant_skeleton.sql:32`). A lead created by a second tenant produces
 a customer account in tenant one. `POST /:id/convert`'s `customer_products` copy
 (`src/api/routes/sales-leads.ts:332`) has the same omission.

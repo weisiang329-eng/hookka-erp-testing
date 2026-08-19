@@ -576,6 +576,21 @@ app.get("/", async (c) => {
           computePriceIndex,
           "price-index",
           c,
+          // Serve-stale, and ONLY here.
+          //
+          // This snapshot is a SELECT * over ~720 sales orders and all their
+          // items, and `sales_orders` / `sales_order_items` bump on every SO
+          // write — so a plain cache-aside recomputes it synchronously on the
+          // request path. Measured 30s cold on the live dashboard.
+          //
+          // The same snapshot table also backs the Sales LIST, and that one
+          // must NOT serve stale: a salesperson creates an order, reloads, and
+          // handing them the previous copy means their own order is missing.
+          // A slow dashboard tile is the cheaper problem. Hence the flag lives
+          // on this narrow `price-index` read (which only resolves unit prices
+          // for a Pending-Delivery figure nobody watches for their own edits)
+          // and not on the `computeFullList` call further down.
+          { staleWhileRevalidate: true },
         ),
       );
     }

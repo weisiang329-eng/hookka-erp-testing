@@ -264,8 +264,19 @@ node scripts/gen-api-docs.mjs --check  # non-zero exit if API.md is out of date
 
 if (process.argv.includes("--check")) {
   const current = existsSync(OUT) ? readFileSync(OUT, "utf8") : "";
-  // Ignore the generation date when comparing.
-  const strip = (s) => s.replace(/\*\*Last generated: \d{4}-\d{2}-\d{2}\*\*/, "");
+  // Ignore the generation date when comparing, and normalise line endings.
+  //
+  // The EOL part is not cosmetic: this repo is checked out CRLF on Windows and
+  // LF in CI, while the generator always emits LF. Comparing raw bytes made
+  // --check report "stale" on every Windows machine seconds after a successful
+  // regeneration, while CI passed — so the local answer and the CI answer
+  // disagreed permanently, and the local one was always the false alarm. A gate
+  // that cries wolf on one platform is a gate people learn to ignore, which is
+  // worse than not having it. (Recorded as J15 in the 2026-08-19 docs audit.)
+  const strip = (s) =>
+    s
+      .replace(/\r\n/g, "\n")
+      .replace(/\*\*Last generated: \d{4}-\d{2}-\d{2}\*\*/, "");
   if (strip(current) !== strip(md)) {
     console.error("docs/API.md is stale — run: node scripts/gen-api-docs.mjs");
     process.exit(1);

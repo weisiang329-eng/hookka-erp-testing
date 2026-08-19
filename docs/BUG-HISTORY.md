@@ -34,6 +34,190 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-19-157 — the packing sticker printed the OLD delivery hub after the order's hub moved: 3 of the 5 handlers that move a hub never told `fg_units` `delivery-orders` `data-integrity` `production-orders` 🟢
+
+> Owner 2026-08-19, on a screenshot: 「为什么 sticker 出来的 hubs 和 view original 的那个看不到去了？」
+> He rated it an old, low-priority problem. It is, and the cause is worth writing down
+> anyway, because the guard that should have caught it **existed and passed**.
+
+**Why the sticker and the order can disagree.** The label prints
+`fg_units.customerHub` **as stored** — `POST /api/fg-units/generate/:poId` returns the rows
+verbatim, with no join back to the order. The fg-units LIST endpoint
+(`src/api/routes/fg-units.ts:596`) *does* compute a live `COALESCE(so.hubName, co.hubName)`,
+which is why nothing looks wrong on screen: **the divergence is only visible on the printed
+box.**
+
+**Root cause.** An order's hub can be moved from **five** handlers across two route files.
+Measured 2026-08-19, **three did not cascade** to `fg_units.customerHub`:
+
+| handler | cascaded? |
+|---|---|
+| `sales-orders` `POST /backfill-hub-by-state` | **no** |
+| `sales-orders` `PUT /:id` | yes |
+| `sales-orders` `PATCH /:id/hub` | **no** |
+| `consignment-orders` `PUT /:id` | **no** |
+| `consignment-orders` `PATCH /:id/hub` | yes |
+
+`PATCH /:id/hub` is the sharpest of the three: it faithfully cascades to **seven**
+downstream tables — production orders, DOs, invoices, credit notes, debit notes, service
+orders, the SO itself — and misses the one the warehouse reads off the box.
+
+**Why the existing guard passed.** `tests/hub-cascade-completeness.test.mjs` was written
+after BUG-2026-05-30-004/005/006, which all lived in `PATCH /:id/hub` — so it was scoped to
+**that handler**, and it enumerates snake_case hub-derived columns, which
+`fg_units.customerHub` is not. It proved one handler correct and said nothing about the
+field. **A guard scoped to the place the last bug happened will not find the next one.**
+
+**Fix.** All three handlers now carry the cascade, matching the two that already did —
+`WHERE soId = ? AND status NOT IN ('LOADED','DELIVERED','RETURNED')` for SO paths and the
+`poId IN (SELECT … consignmentOrderId = ?)` sub-select for the CO path. Shipped units are
+deliberately untouched: their sticker is already on the box. In
+`backfill-hub-by-state` the two statements are pushed as a pair, and the batch chunk size
+(50) is even, so a chunk boundary can never split an SO update from its cascade.
+
+**Verified.** `tests/hub-cascade-completeness.test.mjs` gained a guard scoped to the FIELD
+rather than to a handler: it walks every route in both files, finds each one that writes
+`hubName`, and requires an `fg_units.customerHub` update in the same handler. It also asserts
+it found **at least 5** such handlers, so a broken regex fails loudly instead of passing on
+zero — the same shape of silent-pass this entry is about. Proven RED by deleting each of the
+three new cascades in turn; the tree restores green. `tsc` strict: 0 errors.
+
+**Historical rows are NOT repaired by this.** Units stamped before the fix keep the old hub.
+A repair route already exists and is **dry-run by default**:
+`POST /api/fg-units/backfill-hub` (`fg-units.ts:796`) re-resolves each in-stock unit's hub
+from its order and reports `from -> to` counts; `?execute=1` writes. It is idempotent and
+skips shipped units. **UNMEASURED:** how many rows currently diverge — that needs a live
+query, and this session had no working DB credential.
+
+## BUG-2026-08-19-156 — a purchase invoice scanned by dragging a PDF in kept NO source document, by the same gate that lost the customer POs `procurement` `ui-frontend` `data-integrity` 🟢
+
+> **The purchasing-side twin of BUG-2026-08-19-155**, found by sweeping the class rather
+> than waiting for it to be reported. Same gate, same silence, different document.
+
+**Owner ruling 2026-06-30:** a scanned supplier document stays linked to the purchase
+invoice it produced — the PI's "View source document".
+
+**Root cause.** `src/components/scan-supplier-modal.tsx`, before:
+
+```js
+if (card.scanQueueRowId) {
+  const fileId = await uploadScanQueueRowAsSourceDoc(card.scanQueueRowId, …);
+  if (fileId) payload.sourceDocumentFileId = fileId;
+}
+```
+
+`scanQueueRowId` is set only on cards resumed from the background scan queue.
+`buildCard(upload.file.name, result.data, result.sampleId)` — the sync `/extract` path,
+i.e. dragging a PDF into the modal — left that argument at its `null` default. So a PI
+created that way silently linked nothing.
+
+**Two things made it invisible.** The gate is an `if` that does not fire, which leaves no
+trace; and the helper ended in a bare `catch {}` returning `null`, so a document that was
+never saved looked exactly like one that was. The caller drops `null` on the floor.
+
+**Why the card could not simply be read.** `PreviewCard` held only `fileName` — never the
+File — so there was nothing to upload even if the gate had been removed. The File existed
+one frame earlier (`upload.file`, right where `buildCard` is called) and was thrown away.
+
+**Fix.** `src/lib/scan-queue-client.ts` now exports `SourceDocOrigin`,
+`sourceDocOriginForCard()` and `uploadSourceDoc()` — the same shape as
+`src/lib/so-original.ts` on the sales side, deliberately, so the two read alike.
+`PreviewCard` gained `sourceFile`, `buildCard` takes it as its LAST parameter (the queue
+call sites pass `(…, it.id, idx)` positionally and had to keep working untouched), and the
+create path calls the upload ungated. The bare `catch {}` now logs.
+
+Note the trap in the other direction, which the tests pin: queue-resumed cards have **no**
+File, so "just use `card.sourceFile`" would have saved nothing for them instead — and a
+zero-byte File must lose to a usable queue row, or the PI gets an empty attachment that
+reports success.
+
+**Verified.** `tests/supplier-source-doc-every-path.test.mjs` — 9 tests, 8 behavioural
+against the real exported functions with a stubbed `fetch`. Proven RED against each fault
+before being trusted: restoring the gate, withholding the File from the card, and dropping
+the zero-byte check each turn the suite red; the tree restores green. `tsc` strict: 0 errors.
+
+**Not changed, and not a regression:** the GRN wizard in the same file has never saved a
+source document at all (`sourceDocumentFileId` appears only on the PI path). That is a
+design question for the owner, not a defect to fix silently.
+
+## BUG-2026-08-19-155 — every SO created by dragging a PDF into the scan modal silently kept NO copy of the customer's PO, for a month `sales-orders` `ui-frontend` `data-integrity` 🟢
+
+> Owner, 2026-08-19: 「新的 SO 也是没有 PO 就是顾客的 PO 记录 可以返回」 — and then, decisively:
+> 「**我之前修改过了的 可是发现还是没有那个附件**」. He had already had this fixed. It had been
+> merged on 2026-07-15 (`8563f509`). It had never once run.
+
+**Symptom.** The "View original" button never appears on an SO. It is gated on
+`(order.customerPOImageB64 || poOriginalUrl)` (`src/pages/sales/detail.tsx:1467`); with
+neither present it renders nothing at all — so the failure looked like a missing feature,
+not a missing file. Sampled on prod: **0 SOs carried an `/api/files` attachment.**
+
+**Root cause — two independent faults, both invisible to a reader.**
+
+```js
+// src/components/scan-po-modal.tsx, before
+if (data.data.id && row.scanQueueRowId) {          // fault 1
+  originalUploads.push(persistSoOriginal(data.data.id, row.scanQueueRowId, po.customerPO));
+}
+```
+
+1. **The gate is never true for the common case.** `scanQueueRowId` is set only on rows
+   *resumed from the background scan queue*. The sync `/extract` path — dragging a PDF
+   straight into the modal, which is how the POs actually arrive — constructs its rows with
+   `scanQueueRowId: null` (`scan-po-modal.tsx:760`). The `if` simply did not run.
+2. **The template-match fallback branch had no call at all.** A second SO-creation loop
+   exists for POs that Claude failed to parse; nobody added the line there.
+
+**Why a month passed.** Fault 1 is a *silent skip*. There is no error, no console line, no
+warning on the done step — an `if` that does not fire leaves no trace anywhere. The
+machinery for reporting a failed save already existed and was correct; it was simply never
+reached. **An unmet condition is not a caught error, and code that only reports the errors
+it catches will not tell you it did nothing.**
+
+**The shape, because it will recur.** The two scan entry points are COMPLEMENTARY, and each
+is missing exactly what the other has:
+
+| entry point | `file` | `scanQueueRowId` |
+|---|---|---|
+| direct upload (sync `/extract`) | the **real File** | `null` |
+| resumed from scan queue | a **zero-byte placeholder** (`scan-po-modal.tsx:1389`) | the row id |
+
+The old code asked for the queue id only, so it was a no-op for every operator who drags a
+file in. Note the trap in the other direction too: "just use `row.file`" would upload an
+**empty** attachment for queue rows and report success — worse, because it looks fixed.
+
+**Fix.** `src/lib/so-original.ts` (new). `originalSourceForRow()` asks the question once and
+takes whichever source is real — File if `size > 0`, else the queue id, else `null`; and
+`persistSoOriginal()` now takes that source, so a File is uploaded directly with no server
+round trip. Both create branches call it, ungated, and a `null` source returns
+`{ ok: false }` — which the existing done-step warning surfaces to the operator **while they
+still have the paper in hand**. The logic was moved OUT of the component deliberately: at
+~3,500 lines it cannot be unit-tested, and untestable is how this survived review.
+
+**Verified.** `tests/so-original-every-path.test.mjs` — 8 tests, 7 of them behavioural
+against the real functions with a stubbed `fetch`. Proven RED against each original fault
+before being trusted: restoring the queue-id gate, deleting the fallback call, and dropping
+the zero-byte check each turn the suite red; the tree restores green. `tsc` strict: 0 errors.
+
+**Deployed and verified live 2026-08-19.** `erp.hookka.com` serves the chunk carrying this
+fix byte-identically to the local build of `049d1f74` (sha256 `1b3e53cc…`), and the marker
+string `"no source document held"` appears **0 times** in the pre-fix source — so the code
+running in production is this code, not a cached older build.
+
+**Still UNVERIFIED:** no live SO has been created through the fixed modal yet, and this
+session had no working DB credential (`.dev.vars` is the rotated one, `28P01`; the Supabase
+REST key cannot see these tables). The proof that matters is the next scanned PO showing
+"View original" — that is an owner-side check, not a claim to make here.
+
+**Same class, NOT fixed — `src/components/scan-supplier-modal.tsx`.** The supplier scan
+gates its source-document upload the same way, `if (card.scanQueueRowId)` (~:2091), and
+`buildCard(upload.file.name, …)` at **:1755** and **:4405** (the file holds two copies of the
+component) leaves that argument at its `null` default for the direct-upload path. So a
+purchase invoice scanned by dragging a PDF in loses its source document too — owner rule
+2026-06-30, same failure, different document. It is **not** fixed here because
+`PreviewCard` keeps only `fileName`, never the File, so closing it means threading the File
+through two duplicated ~2,000-line components. Recorded rather than done: it is outside what
+was asked, and worth its own change.
+
 ## BUG-2026-08-13-154 — creating a supplier binding invented a 7-day lead time and an MOQ of 1, and `/planning/mrp` printed them under the supplier's name `procurement` `mrp` `data-integrity` 🟢
 
 > **The write-side half of BUG-2026-08-13-145.** That entry fixed the READ: `/planning/mrp`

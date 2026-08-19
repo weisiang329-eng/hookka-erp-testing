@@ -8,6 +8,19 @@
 > **Last verified: 2026-08-13** against `.github/workflows/backup.yml` (every step), `src/api/cron/daily-backup.ts:53-151`, `src/api/worker.ts:815` (`POST /api/internal/backup-prune`), `wrangler.toml` (`[triggers]` still commented out), and `ls scripts/`.
 > Corrected 2026-08-13: three load-bearing claims were false. (1) **There is no GitHub Actions artifact.** `backup.yml` contains zero `upload-artifact` steps, so the "off-vendor floor, 90-day artifact" this runbook leans on in three places does not exist. (2) Retention is no longer pruned by the Workers cron — that cron was never provisioned and never ran; `backup.yml` now calls `POST /api/internal/backup-prune` after each upload. (3) `scripts/verify-journal-hash-chain.mjs` does not exist, so drill step 6 cannot be run as written.
 
+> **Added 2026-08-19 — why the missing off-vendor copy has not simply been added.**
+> The gap is real: `backup.yml` dumps *from* Supabase and stores *in* Supabase, so a
+> lost or compromised Supabase account takes the database and every backup with it.
+> The obvious fix — an `upload-artifact` step — is **the dangerous one**: this
+> repository is **PUBLIC** (verified 2026-08-19), and workflow artifacts on a public
+> repo are downloadable by anyone, so it would publish the entire production database.
+> A real off-vendor copy needs a destination outside this repo (a second cloud
+> account), or the repo made private first — owner decisions A1/A2 in
+> [`OWNER-DECISIONS.md`](OWNER-DECISIONS.md). **Until one of those happens, the
+> absence is the safe state, not an oversight to close.** Recorded here because it
+> was written down nowhere: it looked exactly like a missed step, which is how a
+> deliberate constraint gets "fixed" by the next reader.
+
 **Status:** Phase C #7 quick-win scaffold landed 2026-04-25; rewritten to
 target Supabase Storage (was Cloudflare R2) on 2026-04-29 by the
 storage-supabase-migration. The cron trigger is still commented out in

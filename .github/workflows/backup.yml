@@ -7,6 +7,19 @@ name: Daily Postgres Backup -> Supabase Storage
 # cron, intentionally overlapping so we have BOTH formats per night
 # until WAL shipping replaces the daily floor.
 #
+# DO NOT "fix" the single-vendor risk by adding an upload-artifact step.
+# Dump and store are both Supabase, so this is NOT an off-vendor backup: lose
+# the Supabase account and the database and every copy of it go together. That
+# is a real gap and it is recorded as such in docs/DR-RUNBOOK.md.
+#
+# But the obvious fix is the dangerous one. THIS REPOSITORY IS PUBLIC
+# (verified 2026-08-19). Workflow artifacts on a public repo are downloadable
+# by anyone, so uploading a pg_dump would publish the entire production
+# database — customers, prices, payroll — to the open internet. An off-vendor
+# copy needs a destination that is not this repo: a second cloud account, or
+# the repo being made private first (owner decision A1/A2 in
+# docs/OWNER-DECISIONS.md). Until then, the absence is the safe state.
+#
 # Storage backend was Cloudflare R2 before the storage-supabase-
 # migration refactor; we collapsed onto Supabase Storage to stay on a
 # single vendor (Supabase Pro plan includes 100 GB storage + 250 GB

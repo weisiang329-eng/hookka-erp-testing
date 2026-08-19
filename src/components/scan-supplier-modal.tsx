@@ -78,7 +78,8 @@ import {
 } from "@/lib/party-alias-client";
 import {
   postScanQueueConsume,
-  uploadScanQueueRowAsSourceDoc,
+  uploadSourceDoc,
+  sourceDocOriginForCard,
 } from "@/lib/scan-queue-client";
 import { compressScanFile } from "@/lib/compress-scan-pdf";
 
@@ -1017,6 +1018,11 @@ type PreviewLine = {
 type PreviewCard = {
   id: string;
   fileName: string;
+  // The uploaded PDF itself, on the sync /extract path. Queue-resumed cards
+  // leave this null and are read back through `scanQueueRowId` instead — see
+  // `sourceDocOriginForCard`. Keeping only `fileName` is what made the source
+  // document unsaveable for direct uploads.
+  sourceFile?: File | null;
   // Background scan-queue row that produced this card. When set, a
   // successful Create-as-DRAFT bookkeeps (rowId, docIdx) in a client-side
   // consumed-pairs set; once EVERY doc that the row's rawJson contains is
@@ -1459,6 +1465,9 @@ function CreatePIWizard({
       sampleId: string | null,
       scanQueueRowId: string | null = null,
       scanQueueDocIdx: number = 0,
+      // LAST parameter on purpose: the queue call sites pass `(…, it.id, idx)`
+      // positionally and must keep working untouched.
+      sourceFile: File | null = null,
     ): PreviewCard => {
       // Fix B (owner 2026-06-30): auto-resolve supplier from OCR'd name with
       // a layered match (exact → normalised → contains). Owner ruling: if
@@ -1642,6 +1651,7 @@ function CreatePIWizard({
       return {
         id: `card-${makeUploadId()}`,
         fileName,
+        sourceFile,
         scanQueueRowId,
         scanQueueDocIdx,
         sampleId,
@@ -1752,7 +1762,11 @@ function CreatePIWizard({
       for (const { upload, result } of results) {
         if (result.kind === "ok") {
           nextProgress[upload.id] = "done";
-          newCards.push(buildCard(upload.file.name, result.data, result.sampleId));
+          // Hand the File over: this path has no queue row, so it is the ONLY
+          // way the supplier's document can be kept (owner ruling 2026-06-30).
+          newCards.push(
+            buildCard(upload.file.name, result.data, result.sampleId, null, 0, upload.file),
+          );
         } else {
           nextProgress[upload.id] = "failed";
           errs.push(`${upload.file.name}: ${result.error}`);
@@ -2086,14 +2100,15 @@ function CreatePIWizard({
           // auto-split parents, the chunk row carries ONLY its slice of
           // pages — the PI links to the right one. Best-effort: a failure
           // here just means no "View source document" link on the PI.
-          if (card.scanQueueRowId) {
-            const fileId = await uploadScanQueueRowAsSourceDoc(
-              card.scanQueueRowId,
-              "purchase-invoice-source",
-              card.scanQueueRowId,
-            );
-            if (fileId) payload.sourceDocumentFileId = fileId;
-          }
+          // Ungated: a direct upload has no queue row, and gating on one is
+          // exactly how the sales side lost a month of originals.
+          const sourceOrigin = sourceDocOriginForCard(card);
+          const fileId = await uploadSourceDoc(
+            sourceOrigin,
+            "purchase-invoice-source",
+            card.scanQueueRowId ?? card.id,
+          );
+          if (fileId) payload.sourceDocumentFileId = fileId;
           const res = await fetch("/api/purchase-invoices", {
             method: "POST",
             headers: { "content-type": "application/json" },

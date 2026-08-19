@@ -295,3 +295,85 @@ test("hub-cascade: schema parser still finds the known anchor tables", () => {
       "or these columns really were removed (highly unlikely).",
   );
 });
+
+// ---------------------------------------------------------------------------
+// BUG-2026-08-19-157 — the blind spot in the test above.
+//
+// Everything before this line checks ONE handler: PATCH /:id/hub. That is where
+// the earlier three bugs lived, so that is where the guard was pointed. But the
+// field can be moved from FIVE handlers across two route files, and the guard
+// never looked at the other four. Measured 2026-08-19, three of the five did not
+// cascade to `fg_units.customerHub`:
+//
+//   sales-orders  POST /backfill-hub-by-state   no cascade
+//   sales-orders  PATCH /:id/hub                no cascade  ← the guarded one
+//   consignment-orders  PUT /:id                no cascade
+//
+// PATCH /:id/hub is the sharpest of them: it faithfully cascades to SEVEN
+// downstream tables and misses the one the warehouse actually reads off the box.
+//
+// Why fg_units specifically. The packing sticker prints `fg_units.customerHub`
+// AS STORED — `POST /api/fg-units/generate/:poId` returns the rows verbatim with
+// no join back to the order. (The list endpoint at fg-units.ts:596 does compute
+// a live `COALESCE(so.hubName, co.hubName)`, which is why the divergence is
+// invisible on screen and shows up only on the printed label.) So an order whose
+// hub moves without this cascade prints the OLD hub on the box while the order
+// shows the new one — which is exactly what the owner reported on 2026-08-19.
+//
+// A test scoped to one handler proves that handler correct and says nothing
+// about the field. This one is scoped to the FIELD.
+// ---------------------------------------------------------------------------
+test("every handler that moves an order's hub also cascades to fg_units", () => {
+  const FILES = [
+    "src/api/routes/sales-orders.ts",
+    "src/api/routes/consignment-orders.ts",
+  ];
+
+  const offenders = [];
+  let handlersChecked = 0;
+
+  for (const f of FILES) {
+    const lines = readFileSync(f, "utf8").replace(/\r\n/g, "\n").split("\n");
+
+    // Handler boundaries: each `app.<verb>("<path>"` starts one, and runs to the
+    // next one (or EOF). Crude, but these files declare handlers top-level and
+    // never nest them.
+    const starts = [];
+    lines.forEach((l, i) => {
+      const m = l.match(/app\.(get|post|put|patch|delete)\(\s*"([^"]+)"/);
+      if (m) starts.push({ line: i, verb: m[1].toUpperCase(), path: m[2] });
+    });
+    assert.ok(starts.length > 5, `${f}: handler scan found only ${starts.length} routes — the parser is broken`);
+
+    for (let i = 0; i < starts.length; i++) {
+      const body = lines
+        .slice(starts[i].line, i + 1 < starts.length ? starts[i + 1].line : lines.length)
+        .join("\n");
+
+      const movesHub =
+        /UPDATE\s+(sales_orders|consignment_orders)[\s\S]{0,400}?hubName\s*=\s*\?/i.test(body);
+      if (!movesHub) continue;
+      handlersChecked++;
+
+      if (!/UPDATE\s+fg_units\s+SET\s+customerHub/i.test(body)) {
+        offenders.push(`${f} → ${starts[i].verb} ${starts[i].path}`);
+      }
+    }
+  }
+
+  // Guard the guard: if the regex stops matching, this test silently passes on
+  // zero handlers — the same shape of failure it exists to catch.
+  assert.ok(
+    handlersChecked >= 5,
+    `only ${handlersChecked} hub-moving handlers were found; expected at least 5. ` +
+      "The scan is broken, not the code — fix the parser before trusting a pass.",
+  );
+
+  assert.deepEqual(
+    offenders,
+    [],
+    "These handlers move an order's hub but never update fg_units.customerHub, " +
+      "so the packing sticker will keep printing the old hub:\n  " +
+      offenders.join("\n  "),
+  );
+});

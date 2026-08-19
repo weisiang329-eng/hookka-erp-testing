@@ -8,6 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { parsePOText, mapDeliveryHub, type ParsedPO, type POParseResult } from "@/lib/po-parser";
+import { persistSoOriginal, originalSourceForRow } from "@/lib/so-original";
 import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles, Star, Plus, Trash2 } from "lucide-react";
 import { ReusedScanBadge, CachedScanNotice } from "@/components/scan-cached-hint";
 import { postScanQueueConsume } from "@/lib/scan-queue-client";
@@ -310,47 +311,10 @@ type CreateSOResponse = {
 // calls it from the pickers, the pre-create hub gate and the create payload so
 // all three read one value.
 
-// Persist the source scan as the SO's permanent attachment (owner 2026-07-15:
-// every SO must keep its original PO on record). The client lost its hold on the
-// File after the background OCR queue, but the SERVER still holds the source
-// bytes in scan_queue until /consume nulls them — so fetch them back and copy to
-// a durable /api/files attachment keyed to the SO id (same resource the SO's
-// Files section reads). Best-effort; never blocks or fails the SO create.
-async function persistSoOriginal(
-  soId: string,
-  scanQueueRowId: string,
-  poNo: string | null,
-): Promise<{ ok: boolean; poNo: string }> {
-  const label = poNo || soId;
-  try {
-    const bres = await fetch(
-      `/api/scan-queue/${encodeURIComponent(scanQueueRowId)}/bytes`,
-    );
-    if (!bres.ok) throw new Error(`source bytes HTTP ${bres.status}`);
-    const blob = await bres.blob();
-    if (!blob.size) throw new Error("source bytes empty");
-    const type = blob.type || "application/pdf";
-    const ext = type.includes("pdf")
-      ? "pdf"
-      : type.includes("png")
-        ? "png"
-        : "jpg";
-    const file = new File([blob], `PO-original-${label}.${ext}`, { type });
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("resourceType", "SO");
-    fd.append("resourceId", soId);
-    const up = await fetch("/api/files", { method: "POST", body: fd });
-    if (!up.ok) throw new Error(`file upload HTTP ${up.status}`);
-    return { ok: true, poNo: label };
-  } catch (e) {
-    // Do NOT swallow — this exact silent-catch is how the original went
-    // unnoticed for a month. Surface it (console + a done-step warning) so a
-    // save failure is caught the same day, not by a customer complaint later.
-    console.error(`[scan] failed to persist original for ${label}:`, e);
-    return { ok: false, poNo: label };
-  }
-}
+// The SO-original logic lives in @/lib/so-original — see that file's header for
+// the bug it closes. It was extracted OUT of this component precisely because a
+// 3.5k-line component cannot be unit-tested, and the version that lived here
+// silently saved nothing for a month.
 
 // An uploaded PDF paired with a stable unique id. Two files can share a
 // name (e.g. both "PO.pdf" dragged from different folders), which used to
@@ -387,6 +351,9 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
   // every page of that file finishes, which reads as stuck (owner 2026-06-12).
   const [pageProgress, setPageProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
   const [parseResult, setParseResult] = useState<POParseResult | null>(null);
+  // Source PDF per template-matched PO. Deliberately a ref, not state: it never
+  // renders, and making it state would re-run the parse effect.
+  const fallbackSourceFiles = useRef(new Map<ParsedPO, File>());
   const [claudeRows, setClaudeRows] = useState<ClaudeScanRow[]>([]);
   const [usedClaude, setUsedClaude] = useState(false);
   const [selectedPOs, setSelectedPOs] = useState<Set<number>>(new Set());
@@ -786,10 +753,19 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         const allPOs: ParsedPO[] = [];
         const allErrors: string[] = [...claudeWarnings];
 
+        fallbackSourceFiles.current = new Map();
         for (const uf of claudeFailures) {
           const text = await extractPdfText(uf.file);
           const result = parsePOText(text);
-          if (result.success) allPOs.push(...result.purchaseOrders);
+          if (result.success) {
+            for (const po of result.purchaseOrders) {
+              allPOs.push(po);
+              // Keyed by object identity: these same objects go into
+              // parseResult and survive the .filter() into selectedFallback.
+              // ParsedPO carries no id of its own, and poNo is not unique.
+              fallbackSourceFiles.current.set(po, uf.file);
+            }
+          }
           if (result.errors.length > 0) {
             allErrors.push(`${uf.file.name}: ${result.errors.join(", ")}`);
           }
@@ -1177,9 +1153,13 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           });
           // Copy the source scan → durable SO attachment BEFORE the queue row is
           // consumed (below), which nulls the bytes. Best-effort.
-          if (data.data.id && row.scanQueueRowId) {
+          if (data.data.id) {
             originalUploads.push(
-              persistSoOriginal(data.data.id, row.scanQueueRowId, po.customerPO),
+              persistSoOriginal(
+                data.data.id,
+                originalSourceForRow(row),
+                po.customerPO,
+              ),
             );
           }
         } else {
@@ -1244,6 +1224,19 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             poNo: po.poNo,
             itemCount: po.items.length,
           });
+          // Same rule as the Claude branch above: every SO-creation path keeps
+          // its original. This branch had no call at all, so a template-matched
+          // PO silently produced an SO with nothing on record.
+          if (data.data.id) {
+            const src = fallbackSourceFiles.current.get(po);
+            originalUploads.push(
+              persistSoOriginal(
+                data.data.id,
+                src ? { kind: "file", file: src } : null,
+                po.poNo,
+              ),
+            );
+          }
         } else {
           errs.push(`${po.poNo}: ${data.error || "Failed to create SO"}`);
         }

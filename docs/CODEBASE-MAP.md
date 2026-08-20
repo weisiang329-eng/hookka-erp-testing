@@ -749,7 +749,8 @@ that proves those locks can actually go red.
 
 **Gotchas**
 - Backend planning logic lives in `src/api/lib` (NOT routes): planning-capacity.ts, planning-chain.ts, planning-scheduler.ts, lead-times.ts — change schedule/capacity math there, the routes are thin.
-- Phase-2 proposals: the chain engine takes an OPTIONAL `collect` callback (ChainInput/SchedulerInput) that emits per-(card, day) assignments — all pre-Phase-2 call sites pass none, so schedules stay byte-identical. Only POST /api/planning/proposals/approve writes job_cards.dueDate; generation is read-only. `schedule_proposals`/`plan_snapshots` are runtime self-apply tables (ensureProposalTables), NOT migration files.
+- Phase-2 proposals: the chain engine takes an OPTIONAL `collect` callback (ChainInput/SchedulerInput) that emits per-(card, day) assignments — all pre-Phase-2 call sites pass none, so schedules stay byte-identical. job_cards.dueDate is written ONLY through the shared lib `decideProposals` / `applyPendingProposals` (`src/api/lib/schedule-proposals.ts`) — callers: POST /api/planning/proposals/approve, the heartbeat auto-approve drain, and (owner ruling 2026-07-27) the chat tool `decide_schedule_proposals` which hard-requires the operator's explicit in-chat confirm (`confirmed:true`, `tests/assistant-schedule-decide.test.mjs`). Generation stays read-only. `schedule_proposals`/`plan_snapshots` are runtime self-apply tables (ensureProposalTables), NOT migration files.
+- Hookka AI chat (assistant.ts + lib/assistant-tools.ts) is READ-ONLY for business documents with ONE exception: the agent-workforce toolset (`agent_overview`/`agent_control`/`teach_agent` v1.9 + `list_schedule_proposals`/`decide_schedule_proposals` v2.0). BUG-2026-07-27-003: the SYSTEM_PROMPT's old blanket "STRICTLY READ-ONLY" clause predated the v1.9 tools, so the model refused every scheduling/teaching ask although the tools existed — when adding assistant capabilities, UPDATE THE PROMPT (module map + intent table + tool reference) in the same PR or the model will never use them.
 - planning-chain.ts + planning-scheduler.ts each contain ONE intentional NUL sentinel/separator string (written as the 6-char source escape backslash-u-0000) — never save it as a raw 0x00 byte (a raw NUL makes git/grep treat the file as binary).
 - Lead-time recalc (production-leadtimes.ts POST /recalc-all) walks production_orders + every job_cards row and re-derives wipKey — coupled to the shared deriveTopLevelWipKey formula; don't re-implement wip keys here.
 - All `dept/*` daily-schedule pages are config-only shells over the ONE shared renderer `_DepartmentSchedulePage.tsx`; layout/column changes belong in the shared file, not per-dept copies.
@@ -1989,7 +1990,7 @@ the chat to all staff on 2026-07-28; the code now allows any authenticated calle
 narrows the *tools* instead, in two independent places:
 
 1. Schema filter — non-super-admins are only offered `agent_overview`, `agent_control`,
-   `teach_agent` (set at `src/api/routes/assistant.ts:544`, applied at
+   `teach_agent` (set at `src/api/routes/assistant.ts:568`, applied at
    `src/api/routes/assistant.ts:738`).
 2. Dispatch guard — even a hallucinated tool name is refused at the dispatcher for a
    non-super-admin (`src/api/routes/assistant.ts:915`).

@@ -1173,7 +1173,7 @@ again.** Treat every entry here as a loaded gun that is still on the table.
 1. **`/backfill-fabcut-rm-issue` (`wip-fixes.ts:1843`) has NO `requirePermission` call** — it is the
    only handler in the family without one, and it is one of the handlers that moves raw-material
    **stock and money** (`rm_batches`, `raw_materials.balanceQty`, `cost_ledger` RM_ISSUE, via
-   `consumeRawMaterialsForPO` — `src/api/lib/po-cost-cascade.ts:671`). Any authenticated user of
+   `consumeRawMaterialsForPO` — `src/api/lib/po-cost-cascade.ts:803`). Any authenticated user of
    any role can fire it. It is *safe on re-run* (see below), but the missing gate is real: line
    1844 goes straight to `const dryRun = …` with no `denied` check above it.
 2. **Most endpoints default to LIVE WRITE — 49 of the 65.** The dominant idiom is
@@ -1214,7 +1214,7 @@ a no-op guard at `:1539` plus a PO selector that stops matching after the first 
 | Endpoint | Money/stock tables written | Default | Re-run safe? |
 |---|---|---|---|
 | `/historical-purchases-backfill` `procurement-backfills.ts:330` | `purchase_orders` :489, `purchase_order_items` :519, `grns` :541, `grn_items` :569, **`rm_batches`** :593, **`cost_ledger`** :611, **`raw_materials`** :630, **`purchase_invoices`** :641, `purchase_invoice_items` :686 | **no dry-run exists — always live** | only via ONE guard: `SELECT id FROM purchase_invoices WHERE piNo = ?` at :412. See gotchas |
-| `/backfill-fabcut-rm-issue` `wip-fixes.ts:1843` | `rm_batches`, `cost_ledger`, `raw_materials` (via `consumeRawMaterialsForPO`) | dry-run (`:1844` uses `!== "false"`) | **yes** — double-guarded (`NOT EXISTS` on the RM_ISSUE ledger row at :1864, plus the helper's own check at `po-cost-cascade.ts:681`) |
+| `/backfill-fabcut-rm-issue` `wip-fixes.ts:1843` | `rm_batches`, `cost_ledger`, `raw_materials` (via `consumeRawMaterialsForPO`) | dry-run (`:1844` uses `!== "false"`) | **yes** — double-guarded (`NOT EXISTS` on the RM_ISSUE ledger row at :1864, plus the helper's own check at `po-cost-cascade.ts:803`) |
 | `/refund-backfill-overconsume` `wip-fixes.ts:590` | `wip_items` :824 | **live** | **NO — double-credits** |
 | `/dedupe-wip-items` `wip-fixes.ts:886` | `wip_items` UPDATE :1091, DELETE :1095 | **live** | yes (absolute `stockQty = ?`; the `HAVING COUNT(*) > 1` driver returns nothing on run #2) |
 | `/zero-out-negative-wips` `wip-fixes.ts:1159` | `wip_items` :1206 (`SET stockQty = 0 WHERE stockQty < 0`) | **live** | yes (self-negating predicate) — but irreversibly destroys the negative balances that are the evidence of an upstream bug |
@@ -1294,7 +1294,7 @@ in that file). Also read-only despite its POST verb and `production-orders:updat
   the race — but that whole block is wrapped in `if (options.orgId)` at :2635. `processRow`
   (`src/api/routes/import-completion/_shared.ts:317`) passes `{ orgId, source: "BACKFILL" }` at
   :529 and `/cascade-upstream-completion` passes it at `completion-cascades.ts:642`, so both are
-  covered. `postJobCardLabor` (`src/api/lib/po-cost-cascade.ts:953`) is independently guarded on an
+  covered. `postJobCardLabor` (`src/api/lib/po-cost-cascade.ts:1104`) is independently guarded on an
   existing LABOR_POSTED row (:966). **If you add a new backfill that calls the WIP cascade, pass
   `orgId` or you silently get no guard at all.**
 - **`/cascade-leak-pass` (`completion-cascades.ts:683`) flips `job_cards` to COMPLETED and fires

@@ -34,6 +34,79 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-20-158 — the invoice price editor wrote RM 0 into every line the operator did not type into: 112 lines across 17 SENT invoices `invoices` `ui-frontend` `data-integrity` 🟢
+
+> Owner 2026-08-20: 「我edit了价格 然后没有edit的就被清空了」. He was exactly right, and it was
+> still happening while he asked — the most recent write was **08:40 that morning**.
+
+**Measured on prod** (500 invoices scanned, read-only): **17 invoices, 112 lines** priced at
+RM 0, **three reduced to a RM 0 total** (INV-2606-084, INV-2607-055, INV-2608-031). 14 of the
+17 were written that same day between 03:04 and 08:40. **None had taken a payment** — the only
+piece of luck here; no receipt, no reconciliation, no credit note.
+
+Every zeroed line carries `priceEdited = 1`, and exactly ONE code path writes that column
+(`invoices.ts`, the `priceEdits` branch of `PUT /:id`). So the client really did send them.
+
+**Root cause.** The invoice detail is served **stale-while-revalidate from localStorage**
+(`src/lib/cached-fetch.ts`), so `invoice.items` can **gain rows after** the price editor
+opened and seeded itself. Such a row has neither a draft nor a seed — and both fallbacks
+pointed the wrong way:
+
+```js
+const now = priceDraft[id] || ZERO;   // no draft -> the value is ZERO
+if (!was) return true;                // no seed  -> "the operator edited it"
+```
+
+Read together: **"the operator set this line to zero. Write it."** Two independent absences
+combining into a confident, wrong, money-changing assertion.
+
+**Why nobody saw it.** The table falls back to the STORED price when a line has no draft
+(`editingPrices && d`), so every row looked correct right up to the moment Save zeroed it.
+That is why the damage is patterned 16-of-18, 15-of-17, 10-of-13: the lines the operator typed
+into kept their values, every other line went to 0. An invoice where nothing was typed lost
+all of its lines.
+
+**And the test suite REQUIRED the defect.** `tests/invoice-price-buildup-rule.test.mjs`
+asserted:
+
+```js
+assert.match(body, /if \(!was\) return true/, "no seed means treat it as edited, not skipped");
+```
+
+The fault was not merely unnoticed — it was **protected**. Anyone who fixed it would have
+turned a test red and been told by a green-looking suite that they had broken the rule. It was
+a **source-shape** assertion (a regex against the component's text), which is exactly how a
+test comes to enshrine a wrong line: it can pin an implementation detail without being able to
+say whether the detail is right. Rewritten to forbid the line, with the history in place.
+
+**Fix — three layers.**
+1. The rule moved OUT of the 1,100-line component into
+   `src/lib/invoice-price-edit-payload.ts`, where a test can reach it. **No draft = UNKNOWN**,
+   never sent. A draft without a seed IS sent — over-correcting to "never write without a
+   seed" would silently drop what the operator typed.
+2. Typing into a line that has no draft now starts from what that line **actually charges**
+   rather than from zeros, so editing one component cannot drop the others.
+3. The server refuses an edit that prices a currently-charged line at RM 0 unless the client
+   flags the zero as **deliberate**. A free line is legitimate; a client that lost track of the
+   line is not, and the two arrived looking identical. It refuses the whole request — a partial
+   write leaves an invoice half-repriced with no record of which half.
+
+**Verified.** `tests/invoice-price-edit-no-implicit-zero.test.mjs` — 8 tests, 7 behavioural
+against the real exported rule. Proven RED against the original two lines (**they fail 6 of
+the 8**) and against removing either server guard. Full suite green, `tsc` strict + eslint
+clean.
+
+**The 112 lines are NOT repaired by this.** Upstream data is intact — the DO lines and the SO
+unit prices both survive, and yesterday's `so_item_id` backfill (BUG-2026-08-13-097) gives the
+per-line link — so they are recoverable. Rewriting money on 17 sent invoices is an owner
+decision and gets its own read-only dry-run first. **UNMEASURED:** the correct value for each
+of the 112 lines, until that dry-run runs.
+
+**Class.** This is the third instance today of one shape: **an absence read as a value.**
+BUG-2026-08-19-155 (no queue id → save nothing, silently), -156 (same, purchasing side),
+and this one — which is the dangerous member of the family, because the other two only failed
+to store a file. This one changed what a customer owes.
+
 ## BUG-2026-08-19-157 — the packing sticker printed the OLD delivery hub after the order's hub moved: 3 of the 5 handlers that move a hub never told `fg_units` `delivery-orders` `data-integrity` `production-orders` 🟢
 
 > Owner 2026-08-19, on a screenshot: 「为什么 sticker 出来的 hubs 和 view original 的那个看不到去了？」

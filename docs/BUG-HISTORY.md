@@ -115,6 +115,22 @@ still reads `item.unitPriceSen` until someone types: the charge is authoritative
 `invoice-line-price.ts`), and re-deriving it from a seed that may not reconcile is the
 "Base 0 … = RM 305" bug again.
 
+**Now fixed, as rule 6 (PR #351).** `priceComponentApplies()` in
+`src/lib/invoice-line-price.ts`: divan and total height are bedframe geometry — total height
+IS divan + gap + leg — and the PDF spec line has refused to print them on a sofa since the
+owner's ruling of **2026-05-29**. The price editor never learned that rule and asked every line
+for all five.
+
+Reading the existing rule rather than guessing changed the answer: a **Leg** price DOES apply
+to a sofa (the same PDF rule prints one), so it stays. Guessing hides three boxes; the rule
+hides two. That is why it went into the shared file as a rule instead of being coded inline a
+second time.
+
+The safety property is the one that matters: **a component holding money is shown regardless of
+category.** Hiding a non-zero value would hide part of the charge and leave a Unit price the
+visible boxes cannot account for — worse than one question too many. Proven RED against four
+wrong versions of the rule, including that one.
+
 **Answered while we were there** (owner's questions on the same screenshot): the five component
 boxes render for EVERY line regardless of category, which is why a sofa shows Divan / Leg /
 T.Height — meaningless for that product, always 0, whole charge in Base. Not a data fault; a

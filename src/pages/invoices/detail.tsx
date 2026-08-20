@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { useTimeout } from "@/lib/scheduler";
 import { buildPriceEditPayload } from "@/lib/invoice-price-edit-payload";
+import { priceComponentApplies } from "@/lib/invoice-line-price";
 import { humanizeError } from "@/lib/humanize-error";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { DocumentChainMap } from "@/components/ui/document-chain-map";
@@ -898,10 +899,28 @@ export default function InvoiceDetailPage() {
                           const current = p[item.id] ?? shownDraft;
                           return { ...p, [item.id]: { ...current, [k]: v } };
                         });
+                      // Rule 6: a component that means nothing for this
+                      // category, and holds nothing, is not a question worth
+                      // asking. A component holding MONEY is always shown —
+                      // hiding part of the charge would be worse than one
+                      // question too many.
                       const priceInput = (
                         label: string,
                         k: "base" | "divan" | "leg" | "special" | "totalHeight",
-                      ) => (
+                      ) =>
+                        !priceComponentApplies(k, ex?.itemCategory, sen(shownDraft[k])) ? (
+                          <div
+                            key={k}
+                            className="flex items-center justify-end gap-1.5 opacity-40"
+                          >
+                            <span className="text-[10px] text-[#9CA3AF] w-12 text-right">
+                              {label}
+                            </span>
+                            <span className="text-[10px] text-[#9CA3AF] italic w-[92px] text-center">
+                              n/a
+                            </span>
+                          </div>
+                        ) : (
                         <div className="flex items-center justify-end gap-1.5">
                           <span className="text-[10px] text-[#9CA3AF] w-12 text-right">
                             {label}

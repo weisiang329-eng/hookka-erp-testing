@@ -1007,10 +1007,18 @@ app.post("/", async (c) => {
 app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "payments", "read");
   if (denied) return denied;
+  // Tenant-scoped like every other read here. Without the org predicate this
+  // returned ANY tenant's payment to anyone who knew or guessed its id — and a
+  // payment id is not a secret: it appears in exports, in URLs, and in the
+  // allocation rows of documents the caller can legitimately see.
+  //
+  // A row belonging to someone else reads as 404, not 403: "not found" and
+  // "not yours" must be indistinguishable, or the endpoint becomes a way to
+  // confirm that a given id exists in another company's books.
   const row = await c.var.DB.prepare(
-    "SELECT * FROM payment_records WHERE id = ?",
+    "SELECT * FROM payment_records WHERE id = ? AND org_id = ?",
   )
-    .bind(c.req.param("id"))
+    .bind(c.req.param("id"), getOrgId(c))
     .first<PaymentRow>();
   if (!row) {
     return c.json({ success: false, error: "Payment not found" }, 404);

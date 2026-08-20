@@ -34,6 +34,113 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-20-158 — the invoice price editor wrote RM 0 into every line the operator did not type into: 112 lines across 17 SENT invoices `invoices` `ui-frontend` `data-integrity` 🟢
+
+> Owner 2026-08-20: 「我edit了价格 然后没有edit的就被清空了」. He was exactly right, and it was
+> still happening while he asked — the most recent write was **08:40 that morning**.
+
+**Measured on prod** (500 invoices scanned, read-only): **17 invoices, 112 lines** priced at
+RM 0, **three reduced to a RM 0 total** (INV-2606-084, INV-2607-055, INV-2608-031). 14 of the
+17 were written that same day between 03:04 and 08:40. **None had taken a payment** — the only
+piece of luck here; no receipt, no reconciliation, no credit note.
+
+Every zeroed line carries `priceEdited = 1`, and exactly ONE code path writes that column
+(`invoices.ts`, the `priceEdits` branch of `PUT /:id`). So the client really did send them.
+
+**Root cause.** The invoice detail is served **stale-while-revalidate from localStorage**
+(`src/lib/cached-fetch.ts`), so `invoice.items` can **gain rows after** the price editor
+opened and seeded itself. Such a row has neither a draft nor a seed — and both fallbacks
+pointed the wrong way:
+
+```js
+const now = priceDraft[id] || ZERO;   // no draft -> the value is ZERO
+if (!was) return true;                // no seed  -> "the operator edited it"
+```
+
+Read together: **"the operator set this line to zero. Write it."** Two independent absences
+combining into a confident, wrong, money-changing assertion.
+
+**Why nobody saw it.** The table falls back to the STORED price when a line has no draft
+(`editingPrices && d`), so every row looked correct right up to the moment Save zeroed it.
+That is why the damage is patterned 16-of-18, 15-of-17, 10-of-13: the lines the operator typed
+into kept their values, every other line went to 0. An invoice where nothing was typed lost
+all of its lines.
+
+**And the test suite REQUIRED the defect.** `tests/invoice-price-buildup-rule.test.mjs`
+asserted:
+
+```js
+assert.match(body, /if \(!was\) return true/, "no seed means treat it as edited, not skipped");
+```
+
+The fault was not merely unnoticed — it was **protected**. Anyone who fixed it would have
+turned a test red and been told by a green-looking suite that they had broken the rule. It was
+a **source-shape** assertion (a regex against the component's text), which is exactly how a
+test comes to enshrine a wrong line: it can pin an implementation detail without being able to
+say whether the detail is right. Rewritten to forbid the line, with the history in place.
+
+**Fix — three layers.**
+1. The rule moved OUT of the 1,100-line component into
+   `src/lib/invoice-price-edit-payload.ts`, where a test can reach it. **No draft = UNKNOWN**,
+   never sent. A draft without a seed IS sent — over-correcting to "never write without a
+   seed" would silently drop what the operator typed.
+2. Typing into a line that has no draft now starts from what that line **actually charges**
+   rather than from zeros, so editing one component cannot drop the others.
+3. The server refuses an edit that prices a currently-charged line at RM 0 unless the client
+   flags the zero as **deliberate**. A free line is legitimate; a client that lost track of the
+   line is not, and the two arrived looking identical. It refuses the whole request — a partial
+   write leaves an invoice half-repriced with no record of which half.
+
+**Verified.** `tests/invoice-price-edit-no-implicit-zero.test.mjs` — 8 tests, 7 behavioural
+against the real exported rule. Proven RED against the original two lines (**they fail 6 of
+the 8**) and against removing either server guard. Full suite green, `tsc` strict + eslint
+clean.
+
+**The 112 lines are NOT repaired by this.** Upstream data is intact — the DO lines and the SO
+unit prices both survive, and yesterday's `so_item_id` backfill (BUG-2026-08-13-097) gives the
+per-line link — so they are recoverable. Rewriting money on 17 sent invoices is an owner
+decision and gets its own read-only dry-run first. **UNMEASURED:** the correct value for each
+of the 112 lines, until that dry-run runs.
+
+**The DISPLAY half, fixed separately (PR #350).** The owner sent a screenshot of the editor
+asking why a row showed five empty component boxes next to `Unit RM 600.00`. Both numbers were
+"right" and the row was a lie: `value={d ? d[k] : "0"}` — with no draft the boxes showed a
+literal zero while the unit price came from the stored charge. **The boxes were never a
+statement about the line**; they described what the editor happened to be holding, and nothing
+said so. Fixing only the write path would have left that trap in place — the operator still
+reads five zeroes as fact, which is the same absence-shown-as-a-value that caused the loss. The
+boxes now derive from the line (`invoicePriceEditSeed`) when there is no draft, and the
+onChange starts from those same values, one helper for both. The row's **Unit** deliberately
+still reads `item.unitPriceSen` until someone types: the charge is authoritative (rule 1 of
+`invoice-line-price.ts`), and re-deriving it from a seed that may not reconcile is the
+"Base 0 … = RM 305" bug again.
+
+**Now fixed, as rule 6 (PR #351).** `priceComponentApplies()` in
+`src/lib/invoice-line-price.ts`: divan and total height are bedframe geometry — total height
+IS divan + gap + leg — and the PDF spec line has refused to print them on a sofa since the
+owner's ruling of **2026-05-29**. The price editor never learned that rule and asked every line
+for all five.
+
+Reading the existing rule rather than guessing changed the answer: a **Leg** price DOES apply
+to a sofa (the same PDF rule prints one), so it stays. Guessing hides three boxes; the rule
+hides two. That is why it went into the shared file as a rule instead of being coded inline a
+second time.
+
+The safety property is the one that matters: **a component holding money is shown regardless of
+category.** Hiding a non-zero value would hide part of the charge and leave a Unit price the
+visible boxes cannot account for — worse than one question too many. Proven RED against four
+wrong versions of the rule, including that one.
+
+**Answered while we were there** (owner's questions on the same screenshot): the five component
+boxes render for EVERY line regardless of category, which is why a sofa shows Divan / Leg /
+T.Height — meaningless for that product, always 0, whole charge in Base. Not a data fault; a
+screen that asks five questions when the line only has one.
+
+**Class.** This is the third instance today of one shape: **an absence read as a value.**
+BUG-2026-08-19-155 (no queue id → save nothing, silently), -156 (same, purchasing side),
+and this one — which is the dangerous member of the family, because the other two only failed
+to store a file. This one changed what a customer owes.
+
 ## BUG-2026-08-19-157 — the packing sticker printed the OLD delivery hub after the order's hub moved: 3 of the 5 handlers that move a hub never told `fg_units` `delivery-orders` `data-integrity` `production-orders` 🟢
 
 > Owner 2026-08-19, on a screenshot: 「为什么 sticker 出来的 hubs 和 view original 的那个看不到去了？」
@@ -4515,6 +4622,37 @@ normal-punch paths unchanged). Full attendance/payroll suite green.
 **Fix** (`src/lib/cached-fetch.ts`). Add a bounded automatic retry (2 attempts, jittered 200–550ms backoff) for transient statuses 502/503/504 inside `joinInflight`, before it throws. Every URL through this path is an idempotent GET (SWR reads — writes use raw `fetch()`), so a retry can never double-apply a mutation. The abort signal short-circuits the backoff so an unmount/url-change still cancels cleanly. Non-retriable statuses (4xx/500) still throw on the first try, preserving the blank-page guard that keeps last-known-good cached data.
 
 **Verified.** `npx tsc -p tsconfig.app.json --noEmit` clean; `npx eslint` clean; behavioral test `tests/cached-fetch-503-retry.test.mjs` (503×2→200 retries and resolves; persistent 503 stops after the cap; 404 not retried; 200 no retry); full pre-commit suite green. PR to follow. Deeper root cause (cold daily snapshot key + concurrent-load connection pressure) noted for a later server-side pass — the client retry makes the symptom invisible to users now.
+## BUG-2026-07-27-003 — chat assistant refused every agent/scheduling command: SYSTEM_PROMPT predated the v1.9 agent tools `assistant` `agents` 🟡 (fix on PR canary, merges after supervisor's live test)
+
+**Symptom:** Production supervisor asked Hookka AI to re-arrange the framing schedule and
+change due dates; it replied "I'm strictly read-only — I cannot change due dates" and told
+him to do it himself（owner: 「教导了他…那个agent不做？罢工？」）. Teaching it standing
+rules was refused the same way.
+
+**Root cause:** the capabilities ALREADY EXISTED — `assistant-tools.ts` v1.9 ships
+`agent_overview`, `agent_control` (incl. run_now task=proposals = regenerate the production
+due-date proposals) and `teach_agent` (the persistent teaching notebook, injected into every
+future agent run). But the SYSTEM_PROMPT in `assistant.ts` was never updated when v1.9
+landed: its blanket "You are STRICTLY READ-ONLY… say you can't" clause outranked everything,
+so the model refused before ever considering those tools, and none of them were listed in
+the prompt's module map / tool reference either.
+
+**Fix (phase 1 of owner ruling 2026-07-27 「聊天全部可以更改的」):**
+1. Prompt rewritten: read-only stays for BUSINESS DOCUMENTS; explicit agent-workforce
+   exception + a 4-step scheduling flow (regenerate → list → user's explicit yes → decide);
+   v1.9+v2.0 tools added to the module map, intent table, and full tool reference.
+2. New tools `list_schedule_proposals` + `decide_schedule_proposals` (SUPER_ADMIN, hard
+   `confirmed:true` consent contract — the tool errors politely unless the operator
+   explicitly approved the exact shown set in-conversation).
+3. Both chat decide + the Planning tab route now share ONE core: new
+   `decideProposals` in `src/api/lib/schedule-proposals.ts` (route refactored onto it,
+   responses byte-identical; WAITING-only dueDate writes + one rollbackable
+   plan_snapshots batch, Agent Console rollback works on chat approvals too).
+
+**Verified:** `tests/assistant-schedule-decide.test.mjs` (prompt doctrine + registry +
+consent guard + route delegation) green; typecheck + eslint clean; full suite via hook.
+Live: supervisor tests on the PR canary URL (same DB as prod — approvals are real) before
+the merge to main.
 
 ---
 

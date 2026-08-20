@@ -234,7 +234,11 @@ export type DataGridProps<T> = {
   // filtered+sorted rows so it honours the on-screen filter too.
   exportName?: string;
   exportSheetLabel?: string;
-  detailExport?: { label: string; build: (rows: T[]) => Aoa };
+  // `build` may be async. Every other module can map its rows synchronously
+  // because the list payload already carries the line items; invoices cannot —
+  // `GET /api/invoices` ships `items: []` per row, so the builder has to fetch
+  // them. That fetch is the whole reason invoices had no detail listing.
+  detailExport?: { label: string; build: (rows: T[]) => Aoa | Promise<Aoa> };
   // Fires whenever the global search text changes. Lets the parent react
   // to "user is searching" — e.g. switch a server-paginated fetch to a
   // whole-dataset fetch so the search covers every record, not just the
@@ -2934,11 +2938,20 @@ export function DataGrid<T extends Record<string, any>>({
                     const label = exportSheetLabel || exportName;
                     const listingAoa = (): Aoa =>
                       buildListingAoa(visibleColumns as unknown as ExportColumn<T>[], sortedData);
-                    const run = (aoa: Aoa, kind: string, ext: "xlsx" | "csv") => {
+                    const run = (
+                      aoa: Aoa | Promise<Aoa>,
+                      kind: string,
+                      ext: "xlsx" | "csv",
+                    ) => {
                       setShowExportMenu(false);
                       const fname = exportFilename(exportName, kind, ext, today);
-                      if (ext === "xlsx") void exportReportXlsx(fname, label, aoa);
-                      else exportReportCsv(fname, aoa);
+                      // An async builder must not write a half-built file: await
+                      // it, and let a failure surface rather than silently
+                      // exporting whatever came back.
+                      void Promise.resolve(aoa).then((rows) => {
+                        if (ext === "xlsx") return exportReportXlsx(fname, label, rows);
+                        exportReportCsv(fname, rows);
+                      });
                     };
                     const Item = ({ onClick, children }: { onClick: () => void; children: React.ReactNode }) => (
                       <button

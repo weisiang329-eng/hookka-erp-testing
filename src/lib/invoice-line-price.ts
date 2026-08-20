@@ -184,3 +184,39 @@ export function invoicePriceEditSeed(
     resolved: false,
   };
 }
+
+/** The five editable components of a line's charge. */
+export type PriceComponentKey =
+  | "base"
+  | "divan"
+  | "leg"
+  | "totalHeight"
+  | "special";
+
+/**
+ * Rule 6 — **does this component mean anything for this line?**
+ *
+ * Divan height and total height are BEDFRAME geometry: total height IS
+ * divan + gap + leg. They describe nothing on a sofa or an accessory, and the
+ * PDF spec line has refused to print them there since the owner's ruling of
+ * 2026-05-29 ("a stray value must not print on sofas"). The price editor never
+ * learned that rule and asked every line for all five, which is how a sofa came
+ * to be asked for a divan price. Note that a LEG price does apply to a sofa —
+ * the same PDF rule prints one — so it stays.
+ *
+ * **A component holding money is always shown, whatever the category says.**
+ * Hiding a non-zero value would hide part of the charge, which is a worse fault
+ * than asking one question too many: the operator would see a Unit price that
+ * the visible boxes cannot account for.
+ */
+export function priceComponentApplies(
+  key: PriceComponentKey,
+  itemCategory: string | null | undefined,
+  valueSen: number,
+): boolean {
+  if (key === "base" || key === "special") return true;
+  if ((Number(valueSen) || 0) > 0) return true;
+  const cat = (itemCategory || "").toUpperCase();
+  if (cat === "SOFA" || cat === "ACCESSORY") return key === "leg";
+  return true;
+}

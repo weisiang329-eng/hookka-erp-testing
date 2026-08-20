@@ -19,6 +19,7 @@ import {
   List,
   Download,
   Send,
+  Upload,
 } from "lucide-react";
 import type { Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
@@ -26,6 +27,8 @@ import { mutationWithData } from "@/lib/schemas/common";
 import { InvoiceSchema } from "@/lib/schemas/invoice";
 import { useToast } from "@/components/ui/toast";
 import { moneyFieldToSen, firstMoneyFieldError } from "@/lib/money-field";
+import { buildInvoiceDetailRows } from "@/lib/invoice-detail-export";
+import { InvoicePriceImportModal } from "@/components/invoice-price-import-modal";
 
 const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
 
@@ -54,6 +57,7 @@ const INVOICE_SEARCH_KEYS = [
 ];
 
 export default function InvoicesPage() {
+  const [showPriceImport, setShowPriceImport] = useState(false);
   const { toast } = useToast();
   const navigate = useNavigate();
 
@@ -653,11 +657,31 @@ export default function InvoicesPage() {
             Invoice management, billing, and payment tracking
           </p>
         </div>
-        <Button variant="primary" onClick={openCreate}>
-          <Plus className="h-4 w-4" />
-          New Invoice
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Sits next to Export on purpose: the export IS the template for the
+              import, and pairing them is how an operator reads that. */}
+          <Button variant="outline" onClick={() => setShowPriceImport(true)}>
+            <Upload className="h-4 w-4" />
+            Import Prices
+          </Button>
+          <Button variant="primary" onClick={openCreate}>
+            <Plus className="h-4 w-4" />
+            New Invoice
+          </Button>
+        </div>
       </div>
+
+      <InvoicePriceImportModal
+        open={showPriceImport}
+        onClose={() => setShowPriceImport(false)}
+        onApplied={() => {
+          // The grid holds a cached page; an import that moved totals must not
+          // leave the old ones on screen.
+          invalidateCachePrefix("/api/invoices");
+          refreshInvoices();
+          refreshInvStats();
+        }}
+      />
 
       {/* KPI Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
@@ -878,14 +902,17 @@ export default function InvoicesPage() {
                 initialSearch={gridSearch}
                 onSearchChange={setGridSearch}
                 alwaysSearchKeys={INVOICE_SEARCH_KEYS}
-                // WYSIWYG export of the current columns over the current rows.
-                // Listing only, deliberately: GET /api/invoices ships
-                // `items: []` on every row (the 2026-05-21 list-payload trim),
-                // so a per-line "Detail Listing" here would export a header
-                // and a page of blank line columns. It needs a per-invoice
-                // re-fetch, which is a feature, not this wiring.
+                // WYSIWYG export of the current columns over the current rows,
+                // plus the per-line Detail Listing below. That one needs a
+                // per-invoice re-fetch — GET /api/invoices ships `items: []` on
+                // every row (the 2026-05-21 list-payload trim) — which is why it
+                // did not exist until 2026-08-20.
                 exportName="invoices"
                 exportSheetLabel="Invoices"
+                detailExport={{
+                  label: "Detail Listing",
+                  build: (rows) => buildInvoiceDetailRows(rows),
+                }}
               />
 
               {/* Pagination footer */}

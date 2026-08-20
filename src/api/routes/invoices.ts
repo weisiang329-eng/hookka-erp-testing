@@ -46,6 +46,11 @@ import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { parseDebtorCode } from "../../lib/debtor";
 import { nextMonthDueDate } from "../../lib/terms";
 import { readGstRatePct } from "../lib/note-ledger";
+import {
+  planInvoicePriceImport,
+  type ImportRow,
+  type CurrentLine,
+} from "../../lib/invoice-price-import";
 import { ensureInvoicePoLinkColumn, readInvoiceItemPoLink } from "../lib/invoice-po-link";
 // BUG-2026-08-13-096 — the per-line link back to the SALES ORDER line, which is
 // what an SO<->invoice audit needs and what 98.5% of the book was missing.
@@ -1678,6 +1683,196 @@ function rowToNoteLink(r: NoteLinkRow) {
 // and the CHECK live in ensureDoPartialInvoiceColumns
 // (src/api/lib/do-partial-invoice.ts) so they can never be applied apart.
 
+// POST /api/invoices/import-line-prices        → DRY RUN, writes nothing
+// POST /api/invoices/import-line-prices?execute=1 → applies the plan
+//
+// The round trip for the per-line Detail Listing export: the operator edits the
+// price components in Excel and posts the rows back. The DECISION is made here,
+// never by the client — the same file posted twice must be judged against the
+// database as it stands each time.
+//
+// Dry-run is the default and there is no way to write without asking for it,
+// which is the shape SAP's LTMC ("Simulate Import"), NetSuite's CSV jobs and
+// Dynamics' staging tables all use. It is also the step whose absence let the
+// price editor zero 112 lines on 2026-08-20: it wrote the moment the button was
+// pressed, and nobody saw the plan.
+app.post("/import-line-prices", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+
+  const execute = c.req.query("execute") === "1";
+  const body = (await c.req.json().catch(() => null)) as { rows?: ImportRow[] } | null;
+  const rows = Array.isArray(body?.rows) ? (body!.rows as ImportRow[]) : null;
+  if (!rows) {
+    return c.json({ success: false, error: "Body must be { rows: [...] }." }, 400);
+  }
+  if (rows.length === 0) {
+    return c.json({ success: false, error: "The file has no rows." }, 400);
+  }
+  // A ceiling, so a mis-selected file cannot become a 10,000-row batch.
+  if (rows.length > 5000) {
+    return c.json(
+      { success: false, error: `${rows.length} rows is more than this import accepts (5000).` },
+      400,
+    );
+  }
+
+  // Load ONLY the lines the file mentions, with the invoice state each needs.
+  const ids = [...new Set(rows.map((r) => String(r.lineId ?? "").trim()).filter(Boolean))];
+  const current = new Map<string, CurrentLine>();
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const ph = chunk.map(() => "?").join(",");
+    const res = await c.var.DB.prepare(
+      `SELECT ii.id, ii.invoiceId, ii.quantity, ii.unitPriceSen, ii.discountSen,
+              ii.basePriceSen, ii.divanPriceSen, ii.legPriceSen,
+              ii.totalHeightPriceSen, ii.specialOrderPriceSen,
+              i.invoiceNo, i.status, i.paidAmount, i.customerId
+         FROM invoice_items ii
+         JOIN invoices i ON i.id = ii.invoiceId
+        WHERE ii.id IN (${ph})`,
+    )
+      .bind(...chunk)
+      .all<Record<string, unknown>>();
+    for (const r of res.results ?? []) {
+      const n = (v: unknown) => Number(v) || 0;
+      current.set(String(r.id), {
+        id: String(r.id),
+        invoiceId: String(r.invoiceId ?? ""),
+        invoiceNo: String(r.invoiceNo ?? ""),
+        invoiceStatus: String(r.status ?? ""),
+        invoicePaidSen: n(r.paidAmount),
+        quantity: n(r.quantity),
+        unitPriceSen: n(r.unitPriceSen),
+        basePriceSen: n(r.basePriceSen),
+        divanPriceSen: n(r.divanPriceSen),
+        legPriceSen: n(r.legPriceSen),
+        totalHeightPriceSen: n(r.totalHeightPriceSen),
+        specialOrderPriceSen: n(r.specialOrderPriceSen),
+        discountSen: n(r.discountSen),
+      });
+    }
+  }
+
+  const plan = planInvoicePriceImport(rows, current);
+
+  if (!execute) {
+    return c.json({
+      success: true,
+      mode: "dry-run",
+      rows: rows.length,
+      willChange: plan.changes.length,
+      unchanged: plan.untouched,
+      refused: plan.rejections.length,
+      makesFree: plan.changes.filter((ch) => ch.makesFree).length,
+      invoices: [...new Set(plan.changes.map((ch) => ch.invoiceNo))],
+      changes: plan.changes,
+      rejections: plan.rejections,
+    });
+  }
+
+  // ---- execute -----------------------------------------------------------
+  // Refuse the whole file if ANY row was refused. A half-applied import leaves
+  // an operator holding a spreadsheet that no longer describes anything, with
+  // no way to tell which half landed.
+  if (plan.rejections.length > 0) {
+    return c.json(
+      {
+        success: false,
+        error:
+          `${plan.rejections.length} row(s) cannot be applied, so none were. ` +
+          `Fix them (or delete those rows) and import again.`,
+        rejections: plan.rejections,
+      },
+      409,
+    );
+  }
+  if (plan.changes.length === 0) {
+    return c.json({ success: true, mode: "executed", applied: 0, invoices: [] });
+  }
+
+  const stmts: import("@cloudflare/workers-types").D1PreparedStatement[] = [];
+  for (const ch of plan.changes) {
+    const lineTotal = Math.max(0, ch.after.unit * (current.get(ch.lineId)?.quantity ?? 0) - ch.after.discount);
+    stmts.push(
+      c.var.DB.prepare(
+        `UPDATE invoice_items SET
+           basePriceSen = ?, divanPriceSen = ?, legPriceSen = ?,
+           totalHeightPriceSen = ?, specialOrderPriceSen = ?,
+           unitPriceSen = ?, discountSen = ?, totalSen = ?, priceEdited = 1
+         WHERE id = ?`,
+      ).bind(
+        ch.after.base,
+        ch.after.divan,
+        ch.after.leg,
+        ch.after.totalHeight,
+        ch.after.special,
+        ch.after.unit,
+        ch.after.discount,
+        lineTotal,
+        ch.lineId,
+      ),
+    );
+  }
+  for (let i = 0; i < stmts.length; i += 50) {
+    await c.var.DB.batch(stmts.slice(i, i + 50));
+  }
+
+  // Re-derive each touched invoice's totals FROM ITS OWN LINES rather than by
+  // adding deltas. A delta is a second source of truth and drifts; a re-read
+  // cannot.
+  const ratePct = await readGstRatePct(c.var.DB);
+  const touchedInvoices = [...new Set(plan.changes.map((ch) => ch.invoiceId))];
+  const after: Array<{ invoiceNo: string; subtotalSen: number; totalSen: number }> = [];
+  for (const invId of touchedInvoices) {
+    const sumRes = await c.var.DB.prepare(
+      `SELECT COALESCE(SUM(totalSen), 0) AS s FROM invoice_items WHERE invoiceId = ?`,
+    )
+      .bind(invId)
+      .first<{ s: number }>();
+    const subtotal = Number(sumRes?.s) || 0;
+    const tax = Math.max(0, Math.round((subtotal * ratePct) / 100));
+    const gross = subtotal + tax;
+
+    const prev = await c.var.DB.prepare(
+      `SELECT invoiceNo, totalSen, customerId FROM invoices WHERE id = ?`,
+    )
+      .bind(invId)
+      .first<{ invoiceNo: string; totalSen: number; customerId: string }>();
+    const grossDelta = gross - (Number(prev?.totalSen) || 0);
+
+    const post: import("@cloudflare/workers-types").D1PreparedStatement[] = [
+      c.var.DB.prepare(
+        "UPDATE invoices SET subtotalSen = ?, taxSen = ?, totalSen = ? WHERE id = ?",
+      ).bind(subtotal, tax, gross, invId),
+    ];
+    if (grossDelta !== 0 && prev?.customerId) {
+      post.push(
+        c.var.DB.prepare(
+          "UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen + ?) WHERE id = ?",
+        ).bind(grossDelta, prev.customerId),
+      );
+    }
+    const audit = await buildAuditStatement(c, {
+      resource: "invoices",
+      resourceId: invId,
+      action: "price-import",
+      before: { totalSen: Number(prev?.totalSen) || 0 },
+      after: { totalSen: gross, lines: plan.changes.filter((ch) => ch.invoiceId === invId).length },
+    });
+    if (audit) post.push(audit);
+    await c.var.DB.batch(post);
+    after.push({ invoiceNo: String(prev?.invoiceNo ?? ""), subtotalSen: subtotal, totalSen: gross });
+  }
+
+  return c.json({
+    success: true,
+    mode: "executed",
+    applied: plan.changes.length,
+    invoices: after,
+  });
+});
+
 app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — invoices:create.
   const denied = await requirePermission(c, "invoices", "create");
@@ -2575,12 +2770,24 @@ app.put("/:id", async (c) => {
       }
       const editById = new Map<
         string,
-        { base: number; divan: number; leg: number; special: number; totalHeight: number; discount: number }
+        {
+          base: number;
+          divan: number;
+          leg: number;
+          special: number;
+          totalHeight: number;
+          discount: number;
+          allowZero: boolean;
+        }
       >();
       for (const e of body.priceEdits as Array<Record<string, unknown>>) {
         const lid = String(e.id || "");
         if (!lid) continue;
         editById.set(lid, {
+          // Did the operator MEAN zero, or does the client simply not know what
+          // this line costs? Those are opposite things and the old payload could
+          // not tell them apart — see the guard below and BUG-2026-08-20-158.
+          allowZero: e.allowZero === true,
           base: Math.max(0, Math.round(Number(e.baseSen) || 0)),
           divan: Math.max(0, Math.round(Number(e.divanSen) || 0)),
           leg: Math.max(0, Math.round(Number(e.legSen) || 0)),
@@ -2613,6 +2820,25 @@ app.put("/:id", async (c) => {
             specialSen: ed.special,
             totalHeightSen: ed.totalHeight,
           });
+          // An edit that prices a line at NOTHING, on a line that currently
+          // charges something, is refused unless the client says the zero is
+          // deliberate. A free line is legitimate; a line the client had no
+          // values for is not, and the two arrived here looking identical.
+          // BUG-2026-08-20-158: 112 lines across 17 SENT invoices were zeroed
+          // by a client that had simply lost track of them, and nothing here
+          // objected. Refuse the whole request — a partial write would leave
+          // the invoice half-repriced with no record of which half.
+          if (unit === 0 && !ed.allowZero && (Number(r.unitPriceSen) || 0) > 0) {
+            return c.json(
+              {
+                success: false,
+                error:
+                  "Refused: this edit would price a charged line at RM 0 without saying so. Reopen the invoice and try again — if the line really is free, clear every component on it explicitly.",
+                line: r.id,
+              },
+              409,
+            );
+          }
           // Line total = max(0, unit × qty − discount).
           const lineTotal = Math.max(0, unit * q - ed.discount);
           newSubtotal += lineTotal;

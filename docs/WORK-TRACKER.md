@@ -1297,12 +1297,22 @@ tab. Left alone; only the screens that reproduce were touched.
    "Houzs SGR/Selangor" hub (needs owner's hub code/details + a 3PL SGR rate row, and
    diverges from history). Recommended: A. Still open from 07-22: DO default-hub fallback
    fix (20 mislabelled PG DOs).
-3. ⚪ **Chat assistant write access — owner ruling 2026-07-27 「聊天全部可以更改的，我现在的
-   人就是去做 training 的」** — assistant.ts is STRICTLY READ-ONLY today (L74). Build
-   chat-write in phases: Phase 1 = scheduling — chat drafts a schedule proposal → in-chat
-   confirm → approves through the EXISTING audited `/proposals/approve` path (writes
-   `job_cards.dueDate`), RBAC-scoped to the chatting user, rollback via Agent Console.
-   Feature ⇒ staging first. Phase-1 scope confirmed with owner before build.
+3. 🔨 **Chat assistant write access — Phase 1 BUILT, on PR canary for supervisor testing
+   (owner ruling 2026-07-27 「聊天全部可以更改的，我现在的人就是去做 training 的」).**
+   ROOT-CAUSE SURPRISE (BUG-2026-07-27-003): the v1.9 agent tools ALREADY existed in
+   `assistant-tools.ts` (`agent_overview` / `agent_control` run_now-proposals /
+   `teach_agent` = the persistent teaching notebook) but the SYSTEM_PROMPT predated them —
+   its blanket "STRICTLY READ-ONLY" clause made the model refuse every scheduling/teaching
+   ask. That IS the supervisor's 「罢工」. Phase 1 ships: prompt rewritten (agent-workforce
+   exception + 4-step consent flow + module map / intent table / tool reference entries) +
+   two new tools — `list_schedule_proposals` and `decide_schedule_proposals`
+   (SUPER_ADMIN + hard `confirmed:true` consent contract) — both reusing the NEW shared
+   lib core `decideProposals` (`lib/schedule-proposals.ts`; Planning route refactored onto
+   it, responses byte-identical). Pinned by `tests/assistant-schedule-decide.test.mjs`.
+   NOTE: staging branch is 80-behind/41-ahead of main — feature rides a PR CANARY preview
+   (`canary-<PR#>.hookka-erp-testing.pages.dev`, prod DB!) instead; merge to main only
+   after the supervisor's live test. Canary caveat: approving on canary writes REAL due
+   dates (same DB) — test with a small set.
 4. ❌ 「2024年的project数量对齐」 — mis-send, cancelled by owner (「发错了」).
 
 ## 2026-07-23 — ✅ Legacy invoice PO-link backfill (77 mislabeled printouts → 2 residual)

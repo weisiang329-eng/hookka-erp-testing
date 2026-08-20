@@ -175,20 +175,54 @@ test("Consignment Orders also offers the per-line detail listing", () => {
   assert.match(src, /detailExport=\{\{/);
 });
 
-test("lists whose payload has no line items offer Listing ONLY", () => {
+test("a list with no line items in its payload may only detail-export if it fetches them", () => {
   // Invoices and Purchase Invoices ship rows with no items[] (a deliberate
-  // list-payload trim / mapper). Offering a per-line export there would
-  // download a page of blank line columns and read as data loss.
+  // list-payload trim). Wiring a per-line export straight to those rows would
+  // download a page of blank line columns and read as data loss — that is the
+  // fault this guard exists to stop, and it still does.
+  //
+  // What it USED to assert was narrower and, by 2026-08-20, wrong: that these
+  // pages must have NO detailExport at all. The owner asked for exactly that
+  // export ("check details listing price"), and the real requirement was never
+  // "don't offer it" — it was "don't offer it without the fetch". A guard
+  // written as "this feature must not exist" cannot tell the difference between
+  // the feature being absent and the feature being done properly; it just
+  // blocks both. Same shape as the assertion that pinned BUG-2026-08-20-158 in
+  // place by requiring the defective line to stay.
+  //
+  // So the rule is now the real one: no detailExport, OR a builder that goes
+  // and gets the lines.
   for (const f of ["src/pages/invoices/index.tsx", "src/pages/procurement/pi.tsx"]) {
     const src = readFileSync(f, "utf8");
     assert.match(src, /exportName=/, `${f} should still offer Listing`);
-    assert.doesNotMatch(src, /detailExport=/, `${f} has no line items to detail`);
+    if (!/detailExport=/.test(src)) continue;
+    assert.match(
+      src,
+      /buildInvoiceDetailRows|DetailRows\(/,
+      `${f} offers a Detail Listing, so it must fetch the lines rather than ` +
+        `map the trimmed list rows`,
+    );
   }
-  // And the reason is real, not assumed: the routes say so.
+  // The premise stays checked: if the list mapper ever starts shipping items,
+  // the fetch becomes unnecessary and this whole rule can go.
   assert.match(
     readFileSync("src/api/routes/invoices.ts", "utf8"),
     /items: \[\]/,
     "the invoices list mapper must still be shipping empty items",
+  );
+});
+
+test("the invoice detail export fetches per invoice and paces itself", () => {
+  // The reason the export did not exist for three months. Each invoice costs
+  // two requests and this API aborts under load, so the builder must go one at
+  // a time with a gap — not fire them all and hand back a half-file.
+  const src = readFileSync("src/lib/invoice-detail-export.ts", "utf8");
+  assert.match(src, /DETAIL_EXPORT_GAP_MS/, "there must be a deliberate gap");
+  assert.match(src, /DETAIL_EXPORT_CAP/, "and a cap that asks before a long run");
+  assert.match(
+    src,
+    /EXPORT FAILED/,
+    "an invoice that cannot be read must be REPORTED in the file, never skipped",
   );
 });
 

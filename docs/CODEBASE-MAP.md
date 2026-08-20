@@ -713,6 +713,32 @@ that proves those locks can actually go red.
 - Hub deletions are EXPLICIT-ONLY (BUG-2026-07-27-002, `tests/hub-wipe-guard.test.mjs`): customers.ts PUT deletes only ids named in `body.deletedHubIds` and UPSERTs the rest — never reintroduce the replace-diff (it let stale-tab saves wipe hubs). Hub INSERT inherits the customer's org; hub state pickers include SGR (canonical Selangor, `malaysia-states.ts`); scan-PO create shows a confirm gate before creating hub-less SOs.
 - /api/files (files.ts) serves customer, product-doc and modular uploads with attachment disposition but `<img src=.../download>` still renders — shared endpoint, don't special-case per resourceType.
 - kv_config is a shared generic store (e.g. public_holidays consumed by payroll) — changing its shape can affect unrelated modules.
+- **Mail Center permissions are TWO independent layers, and confusing them is the mistake.**
+  (1) RBAC `mail-center:<action>` — what you may DO. The action names mislead: `create` is
+  SEND (it backs `POST /compose` and `POST /threads/:id/reply`, so it is the send switch);
+  `update` is star / mark-read / trash plus editing a label; `delete` deletes a LABEL, not
+  mail, and labels are a shared catalogue so one deletion hits everyone. (2) `mail_user_scope`
+  — which MAILBOXES you see: `personal` (own alias + `email_address_access` grants) /
+  `department` / `company`, defaulting to `personal` when the user has no row. **The table is
+  empty on prod and should stay that way** unless someone genuinely must cover a shared box;
+  widen one user at a time, never the default. Both layers are bypassed by SUPER_ADMIN by
+  design — there are seven of them on prod (owner's decision, 2026-08-19), so neither layer
+  constrains that group. Every read handler calls BOTH `requirePermission` and `getMailScope`:
+  a permission grant alone must never widen which mailboxes someone sees, and
+  `tests/mail-center-rbac.test.mjs` pins that. Configuration (`/addresses`, `/access`,
+  `/scope-level`, `/test-inject`) is `requireSuperAdmin`, never permission-gated.
+  **2026-08-19: the seed had granted all four actions to all twelve roles**, so every role
+  including `WORKER` could send from an @hookka.com address, and `READ_ONLY` — whose only
+  member is a person at a customer company — held 75 permissions covering payroll, payslips,
+  workers, users and accounting. Corrected by `scripts/fix-rbac-mail-and-readonly.mjs` (the
+  grant matrix lives in that file, report-only by default).
+- **The sidebar shows only what `GET /addresses` returned.** That endpoint is scoped, so an
+  absent mailbox means "not visible to you", NOT "does not exist" — the canonical
+  Support/Finance/HR injection (`CANONICAL_DEPT_MAILBOXES`) is therefore SUPER_ADMIN-only.
+  Before 2026-08-19 it ran for everyone and labelled the three "not set up", which told a
+  Sales user that Finance had no mailbox while `finance@hookka.com` held 1,039 threads.
+  Inbound mail has been LIVE since the MX cutover (prod received on 2026-08-19); any copy
+  claiming otherwise is stale.
 - Mail Center is GMAIL-STYLE with 3 localStorage view toggles (mail-prefs.ts, surfaced via the header "View" gear): density (compact single-line default ↔ comfortable old multi-line cards), reading-pane (split 3-pane default ↔ full-width list that opens /mail-center/:id), category-tabs (All/Primary/Notifications strip, default on). These ARE the owner's "可以开关" — we did NOT fork two full layouts. The category split is a CLIENT-SIDE heuristic (`classifyCategory` over counterpartyEmail: no-reply/system/alert/eservices/statement local-parts + known bank/payment domains → Notifications, else Primary) — NO backend columns, the threads API is unchanged (still GET /threads, 300-row cap). Both row densities share RowLead+RowActions so star/select/hover-actions can't drift. Don't re-add the old single-layout ThreadList; don't move the category heuristic server-side.
 
 **Start here:** For a customer-facing task open `src/pages/customers.tsx`; for users/RBAC/org/mailbox-scope open `src/pages/settings/Users.tsx`; for internal email open `src/pages/mail-center/index.tsx`.

@@ -26,6 +26,7 @@ import { mutationWithData } from "@/lib/schemas/common";
 import { InvoiceSchema } from "@/lib/schemas/invoice";
 import { useToast } from "@/components/ui/toast";
 import { moneyFieldToSen, firstMoneyFieldError } from "@/lib/money-field";
+import { buildInvoiceDetailRows } from "@/lib/invoice-detail-export";
 
 const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
 
@@ -878,14 +879,17 @@ export default function InvoicesPage() {
                 initialSearch={gridSearch}
                 onSearchChange={setGridSearch}
                 alwaysSearchKeys={INVOICE_SEARCH_KEYS}
-                // WYSIWYG export of the current columns over the current rows.
-                // Listing only, deliberately: GET /api/invoices ships
-                // `items: []` on every row (the 2026-05-21 list-payload trim),
-                // so a per-line "Detail Listing" here would export a header
-                // and a page of blank line columns. It needs a per-invoice
-                // re-fetch, which is a feature, not this wiring.
+                // WYSIWYG export of the current columns over the current rows,
+                // plus the per-line Detail Listing below. That one needs a
+                // per-invoice re-fetch — GET /api/invoices ships `items: []` on
+                // every row (the 2026-05-21 list-payload trim) — which is why it
+                // did not exist until 2026-08-20.
                 exportName="invoices"
                 exportSheetLabel="Invoices"
+                detailExport={{
+                  label: "Detail Listing",
+                  build: (rows) => buildInvoiceDetailRows(rows),
+                }}
               />
 
               {/* Pagination footer */}

@@ -31,7 +31,7 @@ as a Cloudflare Pages Function via `functions/api/[[route]].ts`. There is no
   route module) and is exempt from the rate limiter.
 
 **Counts at generation time:** 139 mounts, 136 route files in
-`src/api/routes/`, 937 top-level handler registrations discovered.
+`src/api/routes/`, 941 top-level handler registrations discovered.
 
 ## Scope and limits of this file
 
@@ -76,7 +76,7 @@ offsets pointing past the end of their own file.
 | `/api/customer-maintenance` | `src/api/routes/customer-maintenance.ts` | `POST /:customerId/copy-from-master` <sub>:30</sub> | gated |
 | `/api/customer-quotation` | `src/api/routes/customer-quotation.ts` | `GET /` <sub>:82</sub> | gated |
 | `/api/customer-crm` | `src/api/routes/customer-crm.ts` | `GET /contacts` <sub>:175</sub><br>`POST /contacts` <sub>:191</sub><br>`PUT /contacts/:id` <sub>:224</sub><br>`DELETE /contacts/:id` <sub>:252</sub><br>`GET /activities` <sub>:266</sub><br>`POST /activities` <sub>:285</sub><br>`DELETE /activities/:id` <sub>:322</sub><br>`GET /follow-ups` <sub>:336</sub><br>`GET /onboarding` <sub>:359</sub><br>`PUT /onboarding` <sub>:374</sub><br>`POST /send-quote` <sub>:425</sub> | gated |
-| `/api/sales-leads` | `src/api/routes/sales-leads.ts` | `GET /` <sub>:102</sub><br>`POST /` <sub>:162</sub><br>`PUT /:id` <sub>:235</sub><br>`PUT /:id/stage` <sub>:265</sub><br>`POST /:id/convert` <sub>:302</sub><br>`DELETE /:id` <sub>:366</sub><br>`GET /lead-products` <sub>:381</sub><br>`POST /lead-products` <sub>:396</sub><br>`DELETE /lead-products/:id` <sub>:434</sub> | gated |
+| `/api/sales-leads` | `src/api/routes/sales-leads.ts` | `GET /` <sub>:120</sub><br>`GET /industries` <sub>:194</sub><br>`POST /` <sub>:259</sub><br>`POST /import` <sub>:393</sub><br>`DELETE /import/:batch` <sub>:497</sub><br>`GET /batches` <sub>:534</sub><br>`PUT /:id` <sub>:552</sub><br>`PUT /:id/stage` <sub>:582</sub><br>`POST /:id/convert` <sub>:619</sub><br>`DELETE /:id` <sub>:683</sub><br>`GET /lead-products` <sub>:698</sub><br>`POST /lead-products` <sub>:713</sub><br>`DELETE /lead-products/:id` <sub>:751</sub> | gated |
 | `/api/sofa-combos` | `src/api/routes/sofa-combos.ts` | `GET /` <sub>:118</sub><br>`POST /` <sub>:213</sub><br>`POST /copy-from-master` <sub>:362</sub><br>`PUT /:id` <sub>:498</sub><br>`DELETE /:id` <sub>:635</sub> | gated |
 | `/api/organisations` | `src/api/routes/organisations.ts` | `GET /` <sub>:361</sub><br>`POST /` <sub>:417</sub><br>`PATCH /:id` <sub>:511</sub><br>`DELETE /:id` <sub>:619</sub><br>`PUT /` <sub>:646</sub> | gated |
 | `/api/sales-orders` | `src/api/routes/sales-orders.ts` | `GET /` <sub>:165</sub><br>`POST /check-customer-pos` <sub>:757</sub><br>`POST /backfill-hub-by-state` <sub>:819</sub><br>`GET /status-changes` <sub>:952</sub><br>`GET /stats` <sub>:984</sub><br>`GET /delivery-progress` <sub>:1113</sub><br>`GET /late-to-customer` <sub>:1160</sub><br>`GET /repair-components` <sub>:1195</sub><br>`GET /:id/edit-eligibility` <sub>:1280</sub><br>`POST /:id/override-edit-lock` <sub>:1394</sub><br>`POST /` <sub>:1608</sub><br>`POST /:id/confirm` <sub>:2389</sub><br>`GET /:ref/footprint` <sub>:2732</sub><br>`GET /:id` <sub>:2739</sub><br>`PUT /:id` <sub>:2991</sub><br>`PATCH /:id/hub` <sub>:4429</sub><br>`DELETE /:id` <sub>:5110</sub><br>`POST /copy-for-service-order` <sub>:5216</sub><br>`POST /batch-company` <sub>:5598</sub> | gated |

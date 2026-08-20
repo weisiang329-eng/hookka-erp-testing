@@ -17,7 +17,11 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import { requirePermission } from "../lib/rbac";
-import { ensureProposalTables, generateProposals } from "../lib/schedule-proposals";
+import {
+  ensureProposalTables,
+  generateProposals,
+  decideProposals,
+} from "../lib/schedule-proposals";
 import { isAgentPaused, recordAgentRun } from "../lib/agent-console";
 
 const app = new Hono<Env>();
@@ -163,85 +167,16 @@ app.post("/proposals/approve", async (c) => {
   if (!batch) return c.json({ success: false, error: "ids[] required" }, 400);
   const ids = batch.ids;
 
-  const db = c.var.DB;
-  await ensureProposalTables(db);
-  const nowIso = new Date().toISOString();
-  const decidedBy = actorId(c);
-
-  const applied: Array<{
-    proposalId: string;
-    jcId: string;
-    poId: string | null;
-    dept: string | null;
-    soRef: string | null;
-    from: string | null;
-    to: string;
-  }> = [];
-
-  for (const id of ids) {
-    const row = await db
-      .prepare("SELECT * FROM schedule_proposals WHERE id = ? AND status = 'PENDING'")
-      .bind(id)
-      .first<ProposalRow>();
-    if (!row) continue; // unknown / already decided — skip silently
-    // Apply ONLY to a still-open card; a card completed/cancelled since
-    // generation keeps its dates untouched.
-    await db
-      .prepare(
-        // Sent-lock (owner 2026-07-29): a card already SENT to the floor
-        // (distributedAt set) keeps its due date — mirrors the auto-approve
-        // drain + the generation-time guard.
-        `UPDATE job_cards SET dueDate = ?, updated_at = ?
-          WHERE id = ? AND status = 'WAITING'
-            AND (distributedAt IS NULL OR distributedAt = '')`,
-      )
-      .bind((row.proposedDue ?? row.proposed_due), nowIso, (row.jcId ?? row.jc_id))
-      .run();
-    await db
-      .prepare(
-        `UPDATE schedule_proposals
-            SET status = 'APPROVED', decided_at = ?, decided_by = ?
-          WHERE id = ?`,
-      )
-      .bind(nowIso, decidedBy, id)
-      .run();
-    applied.push({
-      proposalId: id,
-      jcId: (row.jcId ?? row.jc_id),
-      poId: (row.poId ?? row.po_id),
-      dept: row.dept,
-      soRef: (row.soRef ?? row.so_ref),
-      from: (row.currentDue ?? row.current_due),
-      to: (row.proposedDue ?? row.proposed_due),
-    });
-  }
-
-  // ONE snapshot row for the whole applied set (the audit trail of what the
-  // approved plan looked like).
-  if (applied.length > 0) {
-    await db
-      .prepare("INSERT INTO plan_snapshots (id, taken_at, date, payload) VALUES (?,?,?,?)")
-      .bind(
-        crypto.randomUUID(),
-        nowIso,
-        nowIso.slice(0, 10),
-        JSON.stringify({ kind: "PROPOSALS_APPLIED", decidedBy, applied }),
-      )
-      .run();
-  }
-
-  // `dropped` is the batch cap biting. Reporting it is the point: silently
-  // truncating made "select all -> Approve" look complete while leaving a
-  // backlog behind (the queue once reached 1,715). The caller re-sends.
-  return c.json({
-    success: true,
-    data: {
-      approved: applied.length,
-      skipped: ids.length - applied.length,
-      requested: batch.requested,
-      dropped: batch.dropped,
-    },
+  // Shared core (lib decideProposals) — also used by the chat assistant's
+  // decide_schedule_proposals tool (owner ruling 2026-07-27). Behaviour is
+  // the original route logic verbatim: unknown/decided ids skip silently,
+  // dueDate lands on still-WAITING cards only, ONE plan_snapshots batch row.
+  const r = await decideProposals(c.var.DB, {
+    action: "approve",
+    ids,
+    decidedBy: actorId(c),
   });
+  return c.json({ success: true, data: { approved: r.decided, skipped: r.skipped } });
 });
 
 // ── Reject ───────────────────────────────────────────────────────────────────
@@ -254,23 +189,12 @@ app.post("/proposals/reject", async (c) => {
   if (!batch) return c.json({ success: false, error: "ids[] required" }, 400);
   const ids = batch.ids;
 
-  const db = c.var.DB;
-  await ensureProposalTables(db);
-  const nowIso = new Date().toISOString();
-  const decidedBy = actorId(c);
-  const ph = ids.map(() => "?").join(",");
-  await db
-    .prepare(
-      `UPDATE schedule_proposals
-          SET status = 'REJECTED', decided_at = ?, decided_by = ?
-        WHERE status = 'PENDING' AND id IN (${ph})`,
-    )
-    .bind(nowIso, decidedBy, ...ids)
-    .run();
-  return c.json({
-    success: true,
-    data: { rejected: ids.length, requested: batch.requested, dropped: batch.dropped },
+  const r = await decideProposals(c.var.DB, {
+    action: "reject",
+    ids,
+    decidedBy: actorId(c),
   });
+  return c.json({ success: true, data: { rejected: r.decided } });
 });
 
 export default app;

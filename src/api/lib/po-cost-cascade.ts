@@ -668,14 +668,148 @@ function categoryDefaultSheet(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// RM-consumption mode gate + PREVIEW recorder
+// (owner 2026-07-29: 「你可以完善 … 等我说 ok 就正式扣料」)
+//
+// kv_config['rm_consumption_mode'] ∈ {"LIVE","PREVIEW"}.
+//
+// In PREVIEW, every consume trigger (FAB_CUT + FG completion) computes the
+// would-be consumption and records it to rm_consume_preview WITHOUT any
+// rm_batches / raw_materials / cost_ledger write — so a BOM can be validated
+// against real production before it moves real stock. `resolved = 0` rows are
+// the BOM gaps.
+//
+// THE DEFAULT IS "LIVE", AND THAT IS A CHANGE FROM HOW THIS WAS WRITTEN.
+//
+// The original (2026-07-29) defaulted to PREVIEW, fail-closed, because the BOMs
+// were half-finished and consuming against them would deduct nonsense. That was
+// right then. It is wrong now: measured on prod 2026-08-19, 384 of 385 BOM
+// templates carry components, 385 of 410 products have a BOM at all, and RM
+// consumption has been running normally — 2,150 RM_ISSUE entries since April,
+// 418 of them in the last 30 days.
+//
+// So merging the original default would STOP raw-material deduction on a system
+// where it is working. Fail-closed protects you from a bad state you are
+// already out of; here it would create the bad state. The default therefore
+// preserves today's behaviour, and PREVIEW becomes the thing you switch ON
+// deliberately — to dry-run a BOM change — rather than the thing you have to
+// remember to switch off.
+//
+// An unreadable kv_config still yields LIVE for the same reason: the safe
+// answer is "keep doing what the factory is already doing", not "silently stop
+// deducting stock and let someone discover it at month end".
+//
+// See docs/plans/2026-07-29-rm-consumption-gate.md.
+// ---------------------------------------------------------------------------
+export type RmConsumptionMode = "LIVE" | "PREVIEW";
+
+export async function getRmConsumptionMode(db: D1Database): Promise<RmConsumptionMode> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'rm_consumption_mode'")
+      .first<{ value: string }>();
+    if (!row) return "LIVE"; // no row = nobody has switched it — keep deducting
+    let v: unknown = row.value;
+    // kv-config PUT stringifies values (e.g. '"PREVIEW"'); tolerate a raw string too.
+    try {
+      const parsed = JSON.parse(row.value);
+      if (typeof parsed === "string") v = parsed;
+    } catch {
+      /* stored raw — use as-is */
+    }
+    // Only the exact string PREVIEW turns deduction off. Anything else — a typo,
+    // a stale value, a half-written config — leaves the factory deducting as it
+    // does today, because quietly stopping is the more expensive failure.
+    return v === "PREVIEW" ? "PREVIEW" : "LIVE";
+  } catch {
+    return "LIVE";
+  }
+}
+
+let rmConsumePreviewTableEnsured = false;
+async function ensureRmConsumePreviewTable(db: D1Database): Promise<void> {
+  if (rmConsumePreviewTableEnsured) return;
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS rm_consume_preview (
+         id TEXT PRIMARY KEY,
+         po_id TEXT NOT NULL,
+         po_no TEXT,
+         product_code TEXT,
+         material_id TEXT,
+         material_code TEXT,
+         material_name TEXT,
+         required_qty REAL,
+         resolved INTEGER,
+         computed_at TEXT
+       )`,
+    )
+    .run();
+  rmConsumePreviewTableEnsured = true;
+}
+
+// Compute what a PO WOULD consume and (re)write its rm_consume_preview rows.
+// No stock/ledger writes. `resolved = 0` rows are BOM gaps (a material line that
+// maps to no raw_materials row) — exactly what the owner needs to see while
+// completing BOMs. Repair-scope is intentionally NOT applied here: preview
+// validates the full authored BOM, not a scoped repair.
+export async function recordConsumePreview(
+  db: D1Database,
+  po: ProductionOrderRow,
+): Promise<{ shortages: { materialName: string; shortageQty: number }[]; lines: number; unresolved: number }> {
+  await ensureRmConsumePreviewTable(db);
+  const bomLines = await resolveBomMaterials(db, po);
+  const nowIso = new Date().toISOString();
+  // Refresh — a re-fired completion replaces the PO's prior preview.
+  await db.prepare("DELETE FROM rm_consume_preview WHERE po_id = ?").bind(po.id).run();
+  const shortages: { materialName: string; shortageQty: number }[] = [];
+  let unresolved = 0;
+  const stmts: D1PreparedStatement[] = [];
+  for (const line of bomLines) {
+    const required =
+      line.qtyPerUnit * (po.quantity || 0) * (1 + Math.max(0, line.wastePct || 0) / 100);
+    if (required <= 0) continue;
+    const rm = await resolveRmFromBom(db, line);
+    if (!rm) {
+      unresolved++;
+      shortages.push({ materialName: line.name, shortageQty: required });
+    }
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO rm_consume_preview
+             (id, po_id, po_no, product_code, material_id, material_code, material_name, required_qty, resolved, computed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          genLedgerId("rmp"),
+          po.id,
+          po.poNo ?? null,
+          po.productCode ?? null,
+          rm?.id ?? null,
+          rm?.itemCode ?? line.inventoryCode ?? line.code ?? null,
+          rm?.description ?? line.name ?? null,
+          required,
+          rm ? 1 : 0,
+          nowIso,
+        ),
+    );
+  }
+  if (stmts.length > 0) await db.batch(stmts);
+  return { shortages, lines: bomLines.length, unresolved };
+}
+
 export async function consumeRawMaterialsForPO(
   db: D1Database,
   poId: string,
+  opts?: { forceLive?: boolean },
 ): Promise<{
   skipped: boolean;
   materialCostSen: number;
   linesConsumed: number;
   shortages: { materialName: string; shortageQty: number }[];
+  preview?: boolean;
 }> {
   // Idempotency — already consumed?
   const existing = await db
@@ -698,6 +832,23 @@ export async function consumeRawMaterialsForPO(
     .first<ProductionOrderRow>();
   if (!po || !po.quantity || po.quantity <= 0) {
     return { skipped: false, materialCostSen: 0, linesConsumed: 0, shortages: [] };
+  }
+
+  // RM-consumption gate (owner 2026-07-29「等我说 ok 就正式扣料」). When
+  // kv_config['rm_consumption_mode'] = "PREVIEW", record what WOULD leave stock
+  // and return without any rm_batches / raw_materials / RM_ISSUE write. The
+  // default is LIVE — see the note on getRmConsumptionMode for why that is the
+  // opposite of how this was originally written.
+  const mode = opts?.forceLive ? "LIVE" : await getRmConsumptionMode(db);
+  if (mode !== "LIVE") {
+    const preview = await recordConsumePreview(db, po);
+    return {
+      skipped: false,
+      materialCostSen: 0,
+      linesConsumed: 0,
+      shortages: preview.shortages,
+      preview: true,
+    };
   }
 
   const bomLines = await resolveBomMaterials(db, po);

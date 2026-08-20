@@ -102,6 +102,24 @@ per-line link — so they are recoverable. Rewriting money on 17 sent invoices i
 decision and gets its own read-only dry-run first. **UNMEASURED:** the correct value for each
 of the 112 lines, until that dry-run runs.
 
+**The DISPLAY half, fixed separately (PR #350).** The owner sent a screenshot of the editor
+asking why a row showed five empty component boxes next to `Unit RM 600.00`. Both numbers were
+"right" and the row was a lie: `value={d ? d[k] : "0"}` — with no draft the boxes showed a
+literal zero while the unit price came from the stored charge. **The boxes were never a
+statement about the line**; they described what the editor happened to be holding, and nothing
+said so. Fixing only the write path would have left that trap in place — the operator still
+reads five zeroes as fact, which is the same absence-shown-as-a-value that caused the loss. The
+boxes now derive from the line (`invoicePriceEditSeed`) when there is no draft, and the
+onChange starts from those same values, one helper for both. The row's **Unit** deliberately
+still reads `item.unitPriceSen` until someone types: the charge is authoritative (rule 1 of
+`invoice-line-price.ts`), and re-deriving it from a seed that may not reconcile is the
+"Base 0 … = RM 305" bug again.
+
+**Answered while we were there** (owner's questions on the same screenshot): the five component
+boxes render for EVERY line regardless of category, which is why a sofa shows Divan / Leg /
+T.Height — meaningless for that product, always 0, whole charge in Base. Not a data fault; a
+screen that asks five questions when the line only has one.
+
 **Class.** This is the third instance today of one shape: **an absence read as a value.**
 BUG-2026-08-19-155 (no queue id → save nothing, silently), -156 (same, purchasing side),
 and this one — which is the dangerous member of the family, because the other two only failed

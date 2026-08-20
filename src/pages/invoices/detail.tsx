@@ -796,6 +796,11 @@ export default function InvoiceDetailPage() {
                       const ex = lineExtras[item.id];
                       const d = priceDraft[item.id];
                       const qty = Number(item.quantity) || 0;
+                      // NOTE: still keyed on `d`, deliberately. Before anyone
+                      // types, the row must show the CHARGE
+                      // (`item.unitPriceSen`), which is authoritative — not a
+                      // sum re-derived from a seed that may not reconcile.
+                      // Rule 1 of src/lib/invoice-line-price.ts.
                       const liveUnit =
                         editingPrices && d
                           ? invoiceLineUnitSen({
@@ -852,6 +857,28 @@ export default function InvoiceDetailPage() {
                             .filter(Boolean)
                             .join(" / ")
                         : "";
+                      // What the boxes must show. A line can exist without a
+                      // draft — the invoice is served stale-while-revalidate, so
+                      // `invoice.items` may gain rows after the editor seeded
+                      // itself. Showing "0" for those was the display half of
+                      // BUG-2026-08-20-158: five zeroes next to a "Unit RM 600.00"
+                      // on the same row, describing the editor's memory rather
+                      // than the line. Derive it from the line instead.
+                      const shownDraft =
+                        d ??
+                        (() => {
+                          const sd = invoicePriceEditSeed(
+                            lineExtras[item.id],
+                            Number(item.unitPriceSen) || 0,
+                          );
+                          return {
+                            base: rm(sd.baseSen),
+                            divan: rm(sd.divanSen),
+                            leg: rm(sd.legSen),
+                            special: rm(sd.specialSen),
+                            totalHeight: rm(sd.totalHeightSen),
+                          };
+                        })();
                       const setDraft = (
                         k: "base" | "divan" | "leg" | "special" | "totalHeight",
                         v: string,
@@ -866,21 +893,9 @@ export default function InvoiceDetailPage() {
                           // to write a line with no draft at all; this is the
                           // other half: once someone types, the rest of the line
                           // must still be true.)
-                          const current =
-                            p[item.id] ??
-                            (() => {
-                              const sd = invoicePriceEditSeed(
-                                lineExtras[item.id],
-                                Number(item.unitPriceSen) || 0,
-                              );
-                              return {
-                                base: rm(sd.baseSen),
-                                divan: rm(sd.divanSen),
-                                leg: rm(sd.legSen),
-                                special: rm(sd.specialSen),
-                                totalHeight: rm(sd.totalHeightSen),
-                              };
-                            })();
+                          // Same values the boxes are showing — typing must
+                          // start from what is on screen, never from zeros.
+                          const current = p[item.id] ?? shownDraft;
                           return { ...p, [item.id]: { ...current, [k]: v } };
                         });
                       const priceInput = (
@@ -895,7 +910,7 @@ export default function InvoiceDetailPage() {
                             type="number"
                             min="0"
                             step="0.01"
-                            value={d ? d[k] : "0"}
+                            value={shownDraft[k]}
                             onChange={(e) => setDraft(k, e.target.value)}
                             className="w-24 rounded border border-[#D8D2CC] px-2 py-1 text-right text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
                           />

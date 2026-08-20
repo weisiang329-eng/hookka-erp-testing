@@ -1,5 +1,16 @@
 # RM Consumption Gate + Per-Department Consumption
 
+> **Last verified: 2026-08-20** against `src/api/lib/po-cost-cascade.ts`
+> (`getRmConsumptionMode`, `recordConsumePreview`, the gate inside
+> `consumeRawMaterialsForPO`) and against prod. Phase 1 is now built, with ONE
+> deliberate change from what this plan says: **the default is LIVE, not
+> PREVIEW.** Measured on prod 2026-08-19 — 384 of 385 BOM templates carry
+> components and consumption has been running normally (2,150 RM_ISSUE entries
+> since April, 418 in the last 30 days), so the fail-closed default this plan
+> assumed would now STOP a working system rather than protect an incomplete one.
+> PREVIEW is switched on deliberately to dry-run a BOM change. Phase 2
+> (consumption following the BOM's per-process department) is still unbuilt.
+
 Owner directive (2026-07-29): 「你可以完善 … 因为我还没有完善我的 BOM，等我说 ok 就正式扣料」
 and 「扣料应该跟着 BOM 的 process 走啊」.
 

@@ -2575,12 +2575,24 @@ app.put("/:id", async (c) => {
       }
       const editById = new Map<
         string,
-        { base: number; divan: number; leg: number; special: number; totalHeight: number; discount: number }
+        {
+          base: number;
+          divan: number;
+          leg: number;
+          special: number;
+          totalHeight: number;
+          discount: number;
+          allowZero: boolean;
+        }
       >();
       for (const e of body.priceEdits as Array<Record<string, unknown>>) {
         const lid = String(e.id || "");
         if (!lid) continue;
         editById.set(lid, {
+          // Did the operator MEAN zero, or does the client simply not know what
+          // this line costs? Those are opposite things and the old payload could
+          // not tell them apart — see the guard below and BUG-2026-08-20-158.
+          allowZero: e.allowZero === true,
           base: Math.max(0, Math.round(Number(e.baseSen) || 0)),
           divan: Math.max(0, Math.round(Number(e.divanSen) || 0)),
           leg: Math.max(0, Math.round(Number(e.legSen) || 0)),
@@ -2613,6 +2625,25 @@ app.put("/:id", async (c) => {
             specialSen: ed.special,
             totalHeightSen: ed.totalHeight,
           });
+          // An edit that prices a line at NOTHING, on a line that currently
+          // charges something, is refused unless the client says the zero is
+          // deliberate. A free line is legitimate; a line the client had no
+          // values for is not, and the two arrived here looking identical.
+          // BUG-2026-08-20-158: 112 lines across 17 SENT invoices were zeroed
+          // by a client that had simply lost track of them, and nothing here
+          // objected. Refuse the whole request — a partial write would leave
+          // the invoice half-repriced with no record of which half.
+          if (unit === 0 && !ed.allowZero && (Number(r.unitPriceSen) || 0) > 0) {
+            return c.json(
+              {
+                success: false,
+                error:
+                  "Refused: this edit would price a charged line at RM 0 without saying so. Reopen the invoice and try again — if the line really is free, clear every component on it explicitly.",
+                line: r.id,
+              },
+              409,
+            );
+          }
           // Line total = max(0, unit × qty − discount).
           const lineTotal = Math.max(0, unit * q - ed.discount);
           newSubtotal += lineTotal;

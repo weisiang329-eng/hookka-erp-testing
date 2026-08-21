@@ -52,6 +52,7 @@ import {
 import type { RMBatch } from "../../types";
 import {
   expandMaterialQty,
+  expandCutSize,
   parseMaterialScaling,
   parseSofaSeatHeightInches,
   type ProductionDimensions,
@@ -240,8 +241,17 @@ function collectTreeMaterials(
       // dual-keyed so both camelCase (editor) and snake_case survive.
       const cutLenRaw = (row.cutLengthIn ?? row.cut_length_in) as unknown;
       const cutWidRaw = (row.cutWidthIn ?? row.cut_width_in) as unknown;
-      const cutLengthIn = Number(cutLenRaw) > 0 ? Number(cutLenRaw) : undefined;
-      const cutWidthIn = Number(cutWidRaw) > 0 ? Number(cutWidRaw) : undefined;
+      const cutLenBase = Number(cutLenRaw) > 0 ? Number(cutLenRaw) : undefined;
+      const cutWidBase = Number(cutWidRaw) > 0 ? Number(cutWidRaw) : undefined;
+      // A bigger order is a bigger PIECE, not more pieces (owner 2026-08-21).
+      // Slopes of zero — every BOM written before today — return the typed size
+      // unchanged, so this is a no-op for existing data.
+      const grownCut =
+        cutLenBase && cutWidBase
+          ? expandCutSize(cutLenBase, cutWidBase, scaling, dims)
+          : null;
+      const cutLengthIn = grownCut ? grownCut.lengthIn : cutLenBase;
+      const cutWidthIn = grownCut ? grownCut.widthIn : cutWidBase;
       // autoDetect lines may have empty code/name at authoring time — keep
       // them so the substitution step downstream can resolve them. The
       // (code || name) guard would otherwise drop them silently.
@@ -920,6 +930,8 @@ export async function consumeRawMaterialsForPO(
     // the line's cut size and the resolved RM's sheet size are present; any
     // gap falls back to the plain qtyPerUnit path (no regression). Guard
     // against a zero/absent sheet area (would otherwise divide by zero).
+    // line.cutLengthIn / cutWidthIn are already the EFFECTIVE size — grown
+    // against the order when the BOM asked for it (see where the line is built).
     if (rm && line.cutLengthIn && line.cutWidthIn) {
       // Per-SKU sheet size wins; else the category default (config, else the
       // hardcoded FILLER 8×4). Only FILLER-group materials get a default.

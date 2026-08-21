@@ -60,7 +60,12 @@ test("consumption deducts cutArea ÷ sheetArea, guarded, with a plain-qty fallba
   const src = read(CASCADE);
   const i = src.indexOf("FILLER (sponge) area-based consumption (owner 2026-07-30): a BOM line");
   assert.ok(i !== -1, "the area-ratio block must exist in the consume loop");
-  const block = src.slice(i, i + 1100);
+  // 1600, not 1100: the cut-growth work (2026-08-21) added comment lines
+  // between the anchor and the assertions below, and a fixed character window
+  // silently stopped covering them. A window measured in characters will do
+  // this again — widen it, or slice to the end of the block, but never let it
+  // pass by covering less.
+  const block = src.slice(i, i + 1600);
   // Fires when the line has a cut size (the sheet size comes from the RM or its
   // category default — resolved just below).
   assert.match(block, /if \(rm && line\.cutLengthIn && line\.cutWidthIn\)/);

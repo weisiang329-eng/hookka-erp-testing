@@ -1357,7 +1357,7 @@ in that file). Also read-only despite its POST verb and `production-orders:updat
   the race — but that whole block is wrapped in `if (options.orgId)` at :2635. `processRow`
   (`src/api/routes/import-completion/_shared.ts:317`) passes `{ orgId, source: "BACKFILL" }` at
   :529 and `/cascade-upstream-completion` passes it at `completion-cascades.ts:642`, so both are
-  covered. `postJobCardLabor` (`src/api/lib/po-cost-cascade.ts:1104`) is independently guarded on an
+  covered. `postJobCardLabor` (`src/api/lib/po-cost-cascade.ts:1116`) is independently guarded on an
   existing LABOR_POSTED row (:966). **If you add a new backfill that calls the WIP cascade, pass
   `orgId` or you silently get no guard at all.**
 - **`/cascade-leak-pass` (`completion-cascades.ts:683`) flips `job_cards` to COMPLETED and fires

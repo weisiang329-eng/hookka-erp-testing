@@ -30,9 +30,39 @@ Entries themselves stay newest-first.
 - `data-integrity` (4) — [BUG-2026-04-25-008](#bug-2026-04-25-008-stability-add-timeout-abort-propagation-to-fetchjson)
 - `auth-rbac` (3) — [BUG-2026-06-12-010](#bug-2026-06-12-010--any-admin-could-disable-or-delete-other-peoples-accounts-no-admin-tier-below-super-admin)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
-- `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+- `audit-logging` (2) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
 
 ---
+
+## BUG-2026-08-21-160 — a dropdown on the Inventory screen re-routes money between P&L accounts, and left no record that it had `accounting` `audit-logging` `data-integrity` 🟢
+
+> Found while answering what looked like a filing question — 「12 笔 B.FILLER 海绵要不要也并进 S.FILLER」 — and turned out to be an accounting one.
+
+**What `itemGroup` actually is.** It looks like a label on the raw-material form. It is the real AutoCount **stock-group code**, and four GL accounts hang off it:
+
+| | B.FILLER | S.FILLER |
+|---|---|---|
+| purchase | `703-0010` | `703-0020` |
+| stock | `330-2001` | `330-2002` |
+| opening / closing | `703-0001` / `703-9999` | `703-0002` / `703-9998` |
+
+Measured on prod the same day, both carrying real money: **703-0010 = RM 76,732.35 · 703-0020 = RM 92,768.43**.
+
+**The two halves of the routing disagree, and both surprise people.** The purchase account is decided when the invoice **posts** (`mapPurchaseLinesToAccounts`, `purchase-invoices.ts:170`, reads `raw_materials.item_group` as it stands at that moment), so already-posted journals keep the old account forever — moving a material **splits its own purchase history across two accounts**. The stock / opening / closing accounts are decided when the **report runs**, off the current group (`getStockMap`, `accounting.ts:5543`) — so those move **retroactively**, including for periods that already closed.
+
+**The defect.** `PUT /api/raw-materials/:id` wrote the new group and returned. No before-value, no actor, nothing. `updated_at` moved, and that was the entire trace. So "who moved this material, and when did its account change?" — a question nobody thinks to ask until a P&L comparison looks wrong — had no answer anywhere in the system. The bulk-import path was worse: it could re-group sixty materials in one request, and its pre-fetch selected only `id, itemCode`, so it could not have known a group changed even if it had wanted to record it.
+
+**How it surfaced.** I moved 11 sponges from `B.FILLER` to `S.FILLER` at 12:26 that morning on the owner's instruction (「全部都是sofa的海绵来的」). Six of them have purchase history — **RM 11,414.25 across 20 CONFIRMED (= posted) purchase invoices** — which now sits in `703-0010` while every future purchase of the same materials lands in `703-0020`. That is a defensible outcome and it may well be what he wants; what is not defensible is that nothing recorded it. I only knew which 11 they were because their `updated_at` happened to be one second apart.
+
+**Fix.** Both write paths now emit an audit event on a group change (`raw-materials.ts:533` single row, `:763` bulk), carrying old group, new group, **and the four accounts each resolves to** — snapshotted, because the owner's `coa_stock_map` override can be edited later and a bare group code is an archaeology problem six months on. The bulk pre-fetch now selects `itemGroup`, and emits **one** event for the whole sheet rather than one per row: a sheet that re-groups sixty materials is a single act by a single person, and sixty rows would bury it.
+
+New `src/api/lib/stock-group-accounts.ts` answers "which accounts does group G map to right now". It **owns no account codes** — the default maps stay with the code that posts and reports off them, and are imported — so there is no second copy to drift; a test asserts the file contains no `33x-xxxx` / `70x-xxxx` literal.
+
+**The precedence is pinned because the two readers disagree.** The purchase reader copies only `.purchase` across from the kv override, so a kv entry for another field does not shadow the built-in account. The stock reader **replaces the whole triple** — a kv row carrying only `stock` leaves opening and closing falling through to `rmDefault`, not to that group's built-in pair. `resolveGroupAccounts` mirrors both exactly; tidying either into the other would make the audit record disagree with the journal it describes.
+
+**Verified.** 12 tests (`tests/item-group-change-is-audited.test.mjs`), each guard proven red before green — removing the `itemGroup` column from the bulk pre-fetch fails, and deleting the single-row audit block fails. Full suite 4,336 pass / 0 fail. Prod figures above read live from `/api/accounting/trial-balance` and `/api/raw-materials`.
+
+**Class.** Same shape as BUG-2026-04-27-007 (audit-event write failures swallowed silently): a field that carries accounting meaning, edited through a screen that presents it as cosmetic. The generalisation worth keeping: **if a column feeds a GL account, changing it is a posting, and a posting leaves a record.**
 
 ## BUG-2026-08-21-159 — nobody but an admin could attach a document: `files` was never a registered RBAC resource `security` `ui-frontend` `data-integrity` 🟢
 

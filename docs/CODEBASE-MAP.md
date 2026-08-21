@@ -549,6 +549,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
 **Gotchas**
 - fabrics.ts is DEPRECATED: writes return HTTP 410 — all fabric mutation goes through `fabric-tracking.ts`. Don't add write logic to fabrics.ts.
 - raw-materials.ts has `_unlock-duplicate-codes` / `_relock-duplicate-codes` one-shot endpoints; the dup-code unique index is intentionally OFF (distinct items BO315-21/23, 9MM AA/AB) — don't relock without owner sign-off.
+- `raw_materials.itemGroup` is the AutoCount **stock-group code**, not a label: purchase / stock / opening / closing GL accounts hang off it (`src/api/lib/stock-group-accounts.ts`). Changing it re-routes future postings and re-attributes stock value retroactively, so both write paths (single update + bulk import) emit an audit event with the account delta — see BUG-2026-08-21-160.
 - fg-units.ts holds `backfill-dedupe-fg-units` + `backfill-hub` one-shot migration endpoints and an optional-Bearer public GET; COMPLETED/non-PENDING fg_units inviolate.
 - Stock writes go through stock_movements + stock_adjustments together — a reversal/adjustment must carry batch_no/unit_cost_sen (prior bug B3 dropped these). WIP idempotency guarded via wip_cascade_log only when callers pass orgId.
 - index.tsx renders three tabs off one activeTab state; FG/RM/WIP share the column-definition block (L708-1083). It has a local Product type differing from @/types Product — watch category typing under strict tsc.

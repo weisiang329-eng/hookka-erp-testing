@@ -1010,6 +1010,7 @@ function normaliseScaling(
 function MaterialScalingEditor({
   scaling,
   unit,
+  isCut = false,
   onChange,
 }: {
   // Accept legacy single-object or undefined at runtime even though the
@@ -1017,6 +1018,9 @@ function MaterialScalingEditor({
   // pre-array still flow through here; normaliseScaling handles them.
   scaling: MaterialScaling[] | MaterialScaling | undefined;
   unit: string;
+  /** A cut material (FILLER): offer the cut-growth inputs. Defaults false so a
+   *  caller that has no way to know simply does not show them. */
+  isCut?: boolean;
   onChange: (next: MaterialScaling[] | undefined) => void;
 }) {
   const rules = normaliseScaling(scaling);
@@ -1106,6 +1110,41 @@ function MaterialScalingEditor({
             title="Extra qty per 1 inch over base"
           />
           <span className="text-gray-400">{unit || "unit"}/inch over base</span>
+          {isCut && (
+            <>
+              {/* A cut material does not arrive in more pieces when the order
+                  grows — the same piece is cut bigger. Owner 2026-08-21:
+                  「通常是长度变而已」, so the two axes are separate and either may
+                  stay at 0. */}
+              <span className="text-[#B8601A]">· cut +</span>
+              <input
+                type="number" onFocus={(e) => e.currentTarget.select()}
+                value={Number.isFinite(rule.cutLengthPerUnit ?? 0) ? (rule.cutLengthPerUnit ?? 0) : 0}
+                step="0.1"
+                min="0"
+                placeholder="L"
+                onChange={(e) =>
+                  updateRule(idx, { cutLengthPerUnit: parseFloat(e.target.value) || 0 })
+                }
+                className="text-[10px] border border-[#E8B786] rounded px-1 py-0.5 w-12 bg-white"
+                title="Inches added to the cut LENGTH per 1 inch over base"
+              />
+              <span className="text-[#B8601A]">×</span>
+              <input
+                type="number" onFocus={(e) => e.currentTarget.select()}
+                value={Number.isFinite(rule.cutWidthPerUnit ?? 0) ? (rule.cutWidthPerUnit ?? 0) : 0}
+                step="0.1"
+                min="0"
+                placeholder="W"
+                onChange={(e) =>
+                  updateRule(idx, { cutWidthPerUnit: parseFloat(e.target.value) || 0 })
+                }
+                className="text-[10px] border border-[#E8B786] rounded px-1 py-0.5 w-12 bg-white"
+                title="Inches added to the cut WIDTH per 1 inch over base"
+              />
+              <span className="text-[#B8601A]">in/inch</span>
+            </>
+          )}
           <button
             type="button"
             onClick={() => removeRule(idx)}
@@ -2367,6 +2406,7 @@ function CreateBOMDialog({
                         <MaterialScalingEditor
                           scaling={m.scaling}
                           unit={m.unit || "PCS"}
+                          isCut={isFillerMaterial(m, rawMaterials)}
                           onChange={(s) => updateWIPMaterial(wi, mi, "scaling", s)}
                         />
                       </div>
@@ -2687,6 +2727,7 @@ function SubWIPTree({
                 <MaterialScalingEditor
                   scaling={m.scaling}
                   unit={m.unit || "PCS"}
+                  isCut={isFillerMaterial(m, rawMaterials)}
                   onChange={(s) => onUpdateMaterial(childPath, mi, "scaling", s)}
                 />
               </div>
@@ -3013,6 +3054,7 @@ function WipNodeDetail({
                 <MaterialScalingEditor
                   scaling={m.scaling}
                   unit={m.unit || "PCS"}
+                  isCut={isFillerMaterial(m, rawMaterials)}
                   onChange={(s) => onUpdateMaterial(wi, path, mi, "scaling", s)}
                 />
               </div>
@@ -3811,6 +3853,7 @@ function EditBOMDialog({
                       <MaterialScalingEditor
                         scaling={m.scaling}
                         unit={m.unit || "PCS"}
+                        isCut={isFillerMaterial(m, rawMaterials)}
                         onChange={(s) => updateL1Material(i, "scaling", s)}
                       />
                     </div>
@@ -4855,6 +4898,7 @@ function MasterTemplatesDialog({
                       <MaterialScalingEditor
                         scaling={m.scaling}
                         unit={m.unit || "PCS"}
+                        isCut={isFillerMaterial(m, rawMaterials)}
                         onChange={(s) => updateMaterialAtPath(wi, [], mi, "scaling", s)}
                       />
                     </div>

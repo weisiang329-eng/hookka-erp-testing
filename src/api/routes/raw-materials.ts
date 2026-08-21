@@ -33,6 +33,13 @@ import {
   isFabricGroup,
 } from "./_fabric-cascade";
 
+import { emitAudit } from "../lib/audit";
+import {
+  accountsForItemGroup,
+  accountDiff,
+  type StockGroupAccounts,
+} from "../lib/stock-group-accounts";
+
 const app = new Hono<Env>();
 
 // Duplicate item codes are intentionally allowed during the item-code
@@ -508,6 +515,44 @@ app.put("/:id", async (c) => {
       500,
     );
   }
+
+  // A group change is an ACCOUNTING change — leave a trace.
+  //
+  // `itemGroup` is the AutoCount stock-group code, and four GL accounts hang
+  // off it (see lib/stock-group-accounts.ts). Editing this dropdown re-routes
+  // a material's purchases to a different 70x account from the next posting
+  // on, and moves its stock value to a different 33x account in every report
+  // — including for periods that already closed.
+  //
+  // Until now that left NOTHING behind: the row's old group was overwritten
+  // and `updated_at` moved. "Who moved this material, and when did the
+  // account change?" is a question you only think to ask once the numbers
+  // look wrong, and by then the answer was gone.
+  //
+  // Audit failures are swallowed by emitAudit, so this cannot fail the edit.
+  if ((existing.itemGroup ?? "") !== (merged.itemGroup ?? "")) {
+    const [before, after] = await Promise.all([
+      accountsForItemGroup(c.var.DB, existing.itemGroup ?? ""),
+      accountsForItemGroup(c.var.DB, merged.itemGroup ?? ""),
+    ]);
+    await emitAudit(c, {
+      resource: "raw-materials",
+      resourceId: id,
+      action: "update",
+      before: {
+        itemCode: existing.itemCode,
+        itemGroup: existing.itemGroup,
+        accounts: before,
+      },
+      after: {
+        itemCode: merged.itemCode,
+        itemGroup: merged.itemGroup,
+        accounts: after,
+        accountsChanged: accountDiff(before, after),
+      },
+    });
+  }
+
   return c.json({ success: true, data: rowToApi(updated) });
 });
 
@@ -587,11 +632,18 @@ app.post("/bulk-import", async (c) => {
   }
 
   // Fetch existing itemCodes in one shot for the match test.
+  // itemGroup rides along so a bulk sheet cannot RE-GROUP materials
+  // silently — see the audit note on the single-row update.
   const existingRes = await c.var.DB.prepare(
-    "SELECT id, itemCode FROM raw_materials",
-  ).all<{ id: string; itemCode: string }>();
+    "SELECT id, itemCode, itemGroup FROM raw_materials",
+  ).all<{ id: string; itemCode: string; itemGroup: string | null }>();
   const codeToId = new Map<string, string>();
-  for (const r of existingRes.results ?? []) codeToId.set(r.itemCode, r.id);
+  const codeToGroup = new Map<string, string>();
+  for (const r of existingRes.results ?? []) {
+    codeToId.set(r.itemCode, r.id);
+    codeToGroup.set(r.itemCode, r.itemGroup ?? "");
+  }
+  const regrouped: { itemCode: string; from: string; to: string }[] = [];
 
   const nowIso = new Date().toISOString();
   const statements: D1PreparedStatement[] = [];
@@ -622,6 +674,10 @@ app.post("/bulk-import", async (c) => {
 
     const existingId = codeToId.get(itemCode);
     if (existingId) {
+      const priorGroup = codeToGroup.get(itemCode) ?? "";
+      if (priorGroup !== itemGroup) {
+        regrouped.push({ itemCode, from: priorGroup, to: itemGroup });
+      }
       // UPDATE — do NOT touch balanceQty (preserve current stock level).
       statements.push(
         c.var.DB.prepare(
@@ -698,6 +754,27 @@ app.post("/bulk-import", async (c) => {
 
   if (statements.length > 0) {
     await c.var.DB.batch(statements);
+  }
+
+  // One event for the whole sheet, not one per row: a bulk import that
+  // re-groups sixty materials is a single act by a single person, and sixty
+  // audit rows would bury it. The accounts are resolved once per DISTINCT
+  // group pair — a sheet touching two groups costs two lookups, not sixty.
+  if (regrouped.length > 0) {
+    const groups = [...new Set(regrouped.flatMap((r) => [r.from, r.to]))];
+    const accounts: Record<string, StockGroupAccounts> = {};
+    for (const g of groups) accounts[g] = await accountsForItemGroup(c.var.DB, g);
+    await emitAudit(c, {
+      resource: "raw-materials",
+      resourceId: "bulk-import",
+      action: "update",
+      source: "api",
+      after: {
+        regroupedCount: regrouped.length,
+        regrouped,
+        accountsByGroup: accounts,
+      },
+    });
   }
 
   return c.json({ success: true, data: { created, updated } });

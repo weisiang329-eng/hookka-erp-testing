@@ -33,6 +33,7 @@ import {
   type SofaComboHistoryRule,
 } from "./SofaComboHistoryDialog";
 import { OLD_SO_SAFE_BANNER } from "../products/MaintenanceConfigHistoryDialog";
+import { useSofaSeatHeights } from "@/lib/use-sofa-seat-heights";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,7 +45,8 @@ const FABRIC_TIERS: FabricTier[] = ["ANY", "PRICE_1", "PRICE_2", "PRICE_3"];
 // Seat-height set used elsewhere in the products / sales-order modules.
 // Hardcoded here — keeps the form deterministic and matches the pricesByHeight
 // JSON shape stored in the table.
-const SEAT_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
+// Follows Maintenance → Sofa → Sizes (owner 2026-08-21). See
+// src/lib/sofa-seat-heights.ts for why eight copies of this existed.
 
 // Storage shape changed mid-flight from string[] (single-variant exact match)
 // to string[][] (OR-groups: each inner array is "any-of", outer is "all-of").
@@ -368,6 +370,7 @@ function toComboRow(g: ComboGroup): ComboRow {
 // Main page
 // ---------------------------------------------------------------------------
 export default function SofaCombosPage() {
+  const seatHeights = useSofaSeatHeights();
   const { confirm } = useConfirm();
   const {
     data: rulesResp,
@@ -626,7 +629,7 @@ export default function SofaCombosPage() {
           </div>
         ),
     },
-    ...(["24", "28", "30", "32", "35"] as const).map<Column<ComboRow>>((h) => ({
+    ...seatHeights.map<Column<ComboRow>>((h) => ({
       key: `p${h}`,
       label: h,
       width: "76px",
@@ -1186,6 +1189,7 @@ function CreateComboDialog({
   onSaved: () => void;
   editingRule?: SofaComboRule | null;
 }) {
+  const SEAT_HEIGHTS = useSofaSeatHeights();
   const isEdit = !!editingRule;
 
   // Helpers to derive initial state from an editingRule.

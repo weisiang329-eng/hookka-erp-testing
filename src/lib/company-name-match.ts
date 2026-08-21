@@ -35,7 +35,7 @@ export function normalizeCompanyName(s: string | null | undefined): string {
     // "ADD-WOOD-TRADING-SDN-BHD" normalising to "…TRADINGSDN" (BHD stripped by
     // the next rule, SDN stranded), so the same company produced two different
     // alias keys (party-alias.test.mjs).
-    .replace(/\bSDN[\s.,\-]*BHD\.?\b/g, " ")
+    .replace(/\bSDN[\s.,-]*BHD\.?\b/g, " ")
     .replace(/\bBERHAD\b/g, " ")
     .replace(/\bBHD\.?\b/g, " ")
     .replace(/\bPLT\b/g, " ")

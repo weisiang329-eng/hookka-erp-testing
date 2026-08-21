@@ -22,6 +22,7 @@ import { Input } from "@/components/ui/input";
 import { humanizeError } from "@/lib/humanize-error";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
+import { useSofaSeatHeights } from "@/lib/use-sofa-seat-heights";
 
 export type SofaComboHistoryFabricTier = "ANY" | "PRICE_1" | "PRICE_2" | "PRICE_3";
 export type SofaComboHistorySizes = string[] | string[][];
@@ -40,7 +41,7 @@ export type SofaComboHistoryRule = {
   createdBy: string | null;
 };
 
-const SEAT_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
+// Follows Maintenance → Sofa → Sizes (owner 2026-08-21).
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
@@ -90,6 +91,7 @@ export function SofaComboHistoryDialog({
   onClose: () => void;
   refresh: () => void;
 }) {
+  const SEAT_HEIGHTS = useSofaSeatHeights();
   // Top-of-group canonical row — the Active one if it exists, otherwise
   // the newest Pending. Used for the dialog header + form pre-fill.
   const { confirm } = useConfirm();

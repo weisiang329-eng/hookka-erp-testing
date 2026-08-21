@@ -73,6 +73,7 @@ import { optionPacksSeparately } from "@/lib/leg-packing";
 // One money parser. NOTE: Unit M3 and Fabric Usage on this page are NOT money
 // (cubic metres / metres) and deliberately keep `parseFloat`.
 import { moneyFieldToSen } from "@/lib/money-field";
+import { FALLBACK_SOFA_SEAT_HEIGHTS } from "@/lib/sofa-seat-heights";
 
 // ---------- Types matching mock-data ----------
 // Sofa fabric price tier — values mirror fabric_tracking.priceTier verbatim
@@ -1011,7 +1012,7 @@ const DEFAULT_MAINTENANCE_CONFIG: MaintenanceConfig = {
     { value: "5537 Backrest", priceSen: 0 },
     { value: "Separate Backrest Packing", priceSen: 0 },
   ],
-  sofaSizes: ["24", "26", "28", "30", "32", "35"],
+  sofaSizes: FALLBACK_SOFA_SEAT_HEIGHTS,
   sofaCompartments: DEFAULT_SOFA_COMPARTMENTS,
 };
 

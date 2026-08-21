@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "../../worker";
 import { requirePermission } from "../../lib/rbac";
 import { getOrgId } from "../../lib/tenant";
-import { PRICE_BASELINE_DATE, type BaselineCandidate, type PoRow, MODEL_MAP_HOUZS, priceFor, HEIGHTS_TO_FILL, SOFA_TARGET_BASES, type SoiRow, type SoRow } from "./_shared";
+import { PRICE_BASELINE_DATE, type BaselineCandidate, MODEL_MAP_HOUZS, priceFor, HEIGHTS_TO_FILL, SOFA_TARGET_BASES, type SoiRow, type SoRow } from "./_shared";
 
 const app = new Hono<Env>();
 

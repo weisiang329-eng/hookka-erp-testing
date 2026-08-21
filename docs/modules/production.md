@@ -20,7 +20,7 @@ Owns the shop floor: a **dept-tabbed WIP board** (one production_order per confi
   - `/production/tracker` → redirect to `/planning?tab=tracker` (`src/dashboard-routes.tsx`). The Master Tracker lives as a TAB of the Planning page; the standalone `production/tracker.tsx` was deleted 2026-08-13 — unreachable since the route became a redirect, imported nowhere. **`PlanningPage` does not read `?tab=` yet** (`activeTab` is local state), so this redirect and the Production page's own "Master Tracker" button both land on Capacity Overview.
   - `/production/scan` → `src/pages/production/scan.tsx` (shop-floor dept scan) · `/production/fg-scan` → `src/pages/production/fg-scan.tsx`
   - `/production/wip-times` → `src/pages/production/wip-times.tsx` (per-dept minute rates)
-  - `/bom` → `src/pages/bom.tsx:6136` (`BOMManagementPage`) · `/cnc-templates` → `src/pages/cnc-templates.tsx`
+  - `/bom` → `src/pages/bom.tsx:6201` (`BOMManagementPage`) · `/cnc-templates` → `src/pages/cnc-templates.tsx`
 - API routes
   - PO / job-card / WIP / scan **handlers** → `src/api/routes/production-orders.ts` (3903 lines); every shared
     function lives in `src/api/routes/production-orders/_helpers.ts` (5799). Mounted `worker.ts:1233`.
@@ -52,8 +52,8 @@ Owns the shop floor: a **dept-tabbed WIP board** (one production_order per confi
 | `ProductionPage` | `src/pages/production/index.tsx:548` | WIP board; every column/row branches on `activeTab` |
 | `filteredOrders` (memo) | `src/pages/production/index.tsx:2825` | Dept-narrow + overdue-set grid filter |
 | `loadFgStickers` / `packingStickerUrl` | `src/pages/production/index.tsx:5506 / 5465` | FG sticker set (immediate paint → /p/ token upgrade) |
-| `BOMManagementPage` | `src/pages/bom.tsx:6136` | BOM page shell (tabs, list) |
-| `EditBOMDialog` / `MasterTemplatesDialog` | `src/pages/bom.tsx:2963 / 3893` | L1+WIP editor / master variants |
+| `BOMManagementPage` | `src/pages/bom.tsx:6201` | BOM page shell (tabs, list) |
+| `EditBOMDialog` / `MasterTemplatesDialog` | `src/pages/bom.tsx:3028 / 3958` | L1+WIP editor / master variants |
 | `rowToPO` | `production-orders/_helpers.ts:905` | PO row → API shape (dual-keyed reads) |
 | `applyWipInventoryChange` | `production-orders/_helpers.ts:2574` | WIP inventory change; idempotent ONLY when `orgId` passed |
 | `recomputePoStatusAndProgress` | `production-orders/_helpers.ts:4133` | Single source of truth for PO status/progress |

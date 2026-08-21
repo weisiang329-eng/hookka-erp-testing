@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { AlertTriangle, Loader2, Plus, Trash2, X } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 import { OLD_SO_SAFE_BANNER } from "./MaintenanceConfigHistoryDialog";
+import { useSofaSeatHeights } from "@/lib/use-sofa-seat-heights";
 
 type SeatHeightTier = {
   height: string;
@@ -84,7 +85,8 @@ export function MasterPriceHistoryDialog({
   // Sofa price matrix: 5 heights × 3 fabric tiers. Stored here as RM-string
   // inputs (so blank = "no price for this cell" instead of "RM 0"). Save
   // builds the sparse seatHeightPrices array from the non-blank cells.
-  const SOFA_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
+  // Follows Maintenance → Sofa → Sizes (owner 2026-08-21).
+  const SOFA_HEIGHTS = useSofaSeatHeights();
   const SOFA_TIERS = ["PRICE_1", "PRICE_2", "PRICE_3"] as const;
   type SofaTier = (typeof SOFA_TIERS)[number];
   type SofaHeight = (typeof SOFA_HEIGHTS)[number];

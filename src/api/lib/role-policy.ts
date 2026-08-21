@@ -46,6 +46,12 @@ export type RolePolicy = Record<string, Actions>;
  */
 const OPEN = ["*"];
 const R = ["read"];
+/**
+ * Attach and view, but never remove. Used for `files`: an attachment is
+ * evidence — the scanned customer PO, the supplier's invoice — and deleting
+ * evidence is not part of anyone's daily work.
+ */
+const CREATE_READ = ["create", "read"];
 
 /**
  * Modules that are money.
@@ -122,6 +128,14 @@ export const ALL_RESOURCES = [
   "workers", "attendance", "leaves", "payroll", "payslips",
   // Comms & system
   "announcements", "mail-center", "notifications", "settings", "users",
+  // Attachments. Registered 2026-08-21, and its ABSENCE is the whole story of
+  // BUG-2026-08-21-159: `allExcept()` can only grant what is listed here, so a
+  // resource missing from this array is DENIED to every coded role no matter
+  // how broad that role's policy reads. `/api/files` has gated on
+  // `files:create` since it shipped, which meant the scanned customer PO and
+  // the supplier invoice's source document could not be saved by anyone except
+  // an admin — for over a month, silently, because the client swallowed the 403.
+  "files",
 ];
 
 /**
@@ -133,7 +147,10 @@ export const ALL_RESOURCES = [
  * that genuinely needs it lists `users` explicitly, at the actions it needs.
  * (Caught by the test, not by review: the first cut of OFFICE had it.)
  */
-const NEVER_WILDCARD = ["users"];
+// `files` joins it for a different reason than `users`: not because a wildcard
+// there is dangerous to the org chart, but because DELETE is. Everyone gets
+// create+read explicitly below; removal stays with an admin.
+const NEVER_WILDCARD = ["users", "files"];
 
 function allExcept(excluded: string[]): RolePolicy {
   const out: RolePolicy = {};
@@ -165,6 +182,14 @@ const EVERYONE: RolePolicy = {
   "mail-center": OPEN,
   notifications: OPEN,
   settings: OPEN,
+  // Every role attaches documents somewhere — a scanned PO on a sales order, a
+  // supplier's invoice on a purchase invoice, a photo on a service case. It
+  // lives in the shared base rather than being repeated per role because the
+  // alternative is exactly what went wrong: one role quietly missing it, and
+  // the failure arriving as a 403 the client swallowed.
+  //
+  // DELETE is deliberately absent. Removing an attachment removes evidence.
+  files: CREATE_READ,
 };
 
 /** A role's own grants on top of the shared base. */

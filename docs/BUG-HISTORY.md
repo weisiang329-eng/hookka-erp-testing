@@ -34,6 +34,59 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-21-159 — nobody but an admin could attach a document: `files` was never a registered RBAC resource `security` `ui-frontend` `data-integrity` 🟢
+
+> Owner, after four separate fixes to "View original" had failed: 「fix了那么多次了」.
+> He was right. **The reason none of them worked was never in the code any of them touched.**
+
+**Root cause.** `POST /api/files` has gated on `files:create` since it shipped. `files` was
+**never listed in `ALL_RESOURCES`** (`src/api/lib/role-policy.ts`) — and `allExcept()` can
+only grant what that array contains. Measured:
+
+```
+OFFICE  files:create = DENIED   (66 perms)
+QA      files:create = DENIED   (23 perms)
+SALES   files:create = DENIED   (28 perms)
+```
+
+Only SUPER_ADMIN / ADMIN, on the legacy `*:*` wildcard, could attach anything. **The
+operators who scan the POs are OFFICE.** Every save 403'd, and the client swallowed it.
+
+**Why four fixes missed it.**
+
+| date | commit | what happened |
+|---|---|---|
+| 2026-05-06 | `a633b157` | the scanned page rode along on the SO row itself as `customerPOImageB64` — no upload, no permission. **Worked.** |
+| ~2 months | | fine, exactly as the owner remembered |
+| 2026-06-30 | `912db32b` | the OCR-queue rewrite gave queue rows a **zero-byte placeholder File**, so nothing rendered and the field went null. The commit says so in a comment — "Original PDF lives in the queue table only" — and nothing ever read it back |
+| 2026-07-15 | `8563f509` | re-fixed by uploading a durable attachment through `/api/files`: **a route the operators cannot reach** |
+| 2026-08-20 | PR #336 / #350 | my two fixes — which rows get sent, and making a failed save visible. Real defects, both CLIENT-side. The wall was on the server and I never reached it |
+
+**Measured on prod 2026-08-21:** 370 scanned SO documents in `po_scan_samples`, **zero** SO
+attachments in `files`. The same wall hits the supplier scan — owner: 「PI 也是全部OCR都是」.
+
+**How I nearly got it wrong again.** I probed `GET /api/scan-po/samples/by-po/<PO>` for three
+recent SOs, got 404 on all three, and almost concluded they had been typed by hand rather than
+scanned. Checking 25 POs gave 25 × 404 — against an OCR dashboard showing 370 documents. The
+lookup key simply is not `customerPOId`. **A 404 from a probe you have not validated is not
+evidence of absence.**
+
+**Fix.** `files` registered; granted **create + read** in the shared `EVERYONE` base rather
+than per role — the alternative is exactly what went wrong, one role quietly missing it.
+DELETE withheld: an attachment is evidence. Hence `files` in `NEVER_WILDCARD`, for a
+different reason than `users`.
+
+**The guard that matters** (`tests/rbac-files-attachable.test.mjs`): *every resource any route
+gates on must appear in `ALL_RESOURCES`.* A resource missing from that array is not a narrower
+permission — it is an **unreachable feature**, failing as a 403 raised far from the code that
+caused it. It would have failed for the whole of the last two months. Proven RED against three
+faults, including the real one.
+
+**Also recorded:** an SO carries no record of how it was created. The scan modal sends
+`source: "PO_SCAN_CLAUDE"` and the backend neither stores nor reads it, so nothing in the data
+distinguishes a scanned order from a hand-typed one — which is why "is it fixed?" could not be
+answered from the database at any point in this story. Worth adding.
+
 ## BUG-2026-08-20-158 — the invoice price editor wrote RM 0 into every line the operator did not type into: 112 lines across 17 SENT invoices `invoices` `ui-frontend` `data-integrity` 🟢
 
 > Owner 2026-08-20: 「我edit了价格 然后没有edit的就被清空了」. He was exactly right, and it was

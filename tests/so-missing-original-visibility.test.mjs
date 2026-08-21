@@ -120,3 +120,18 @@ test('the probe would have caught the bug it exists for', () => {
     'OFFICE scans the customer POs — without files:create the original is lost silently',
   );
 });
+
+test('the row cap is REPORTED, never silent', () => {
+  // The first live call hit it exactly: 1000 rows back, no flag, reading as
+  // "that is all of them". Orders predate the feature entirely before
+  // 2026-07-16, so the unfiltered call is mostly history that never had a
+  // document to lose — which is precisely when a silent cap misleads.
+  const block = SO.slice(
+    SO.indexOf('app.get("/missing-original"'),
+    SO.indexOf('app.get("/late-to-customer"'),
+  );
+  assert.match(block, /LIMIT \$\{LIMIT \+ 1\}/, 'fetch one past the cap to detect it');
+  assert.match(block, /truncated = all\.length > LIMIT/);
+  assert.match(block, /truncated,/, 'the flag must reach the response');
+  assert.match(block, /narrow with \?since=YYYY-MM-DD/, 'and say what to do about it');
+});

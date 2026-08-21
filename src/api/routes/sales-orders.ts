@@ -1217,7 +1217,11 @@ app.get("/missing-original", async (c) => {
     sql += " AND so.createdAt >= ?";
     binds.push(since);
   }
-  sql += " ORDER BY so.createdAt DESC LIMIT 1000";
+  // Capped, and the cap is REPORTED. Silent truncation is how a list like
+  // this lies: 1000 rows back with no flag reads as "that is all of them",
+  // and the first call (no ?since) hit the cap exactly.
+  const LIMIT = 1000;
+  sql += ` ORDER BY so.createdAt DESC LIMIT ${LIMIT + 1}`;
 
   const res = await c.var.DB.prepare(sql)
     .bind(...binds)
@@ -1229,7 +1233,9 @@ app.get("/missing-original", async (c) => {
       status: string | null;
       createdAt: string | null;
     }>();
-  const rows = res.results ?? [];
+  const all = res.results ?? [];
+  const truncated = all.length > LIMIT;
+  const rows = truncated ? all.slice(0, LIMIT) : all;
 
   // Grouped by day, because that is how the break showed itself: a clean edge
   // on one date reads as a regression, a scatter reads as operator habit.
@@ -1241,7 +1247,18 @@ app.get("/missing-original", async (c) => {
 
   return c.json({
     success: true,
-    data: { count: rows.length, byDay, orders: rows },
+    data: {
+      count: rows.length,
+      truncated,
+      // Orders predate the feature entirely before 2026-07-16, so an
+      // unfiltered call is mostly history that never had a document to lose.
+      // `?since=` is what makes the answer actionable.
+      note: truncated
+        ? `More than ${LIMIT} orders have no original; narrow with ?since=YYYY-MM-DD.`
+        : undefined,
+      byDay,
+      orders: rows,
+    },
   });
 });
 

@@ -636,7 +636,7 @@ app.post("/backfill-invoice-prices-from-so", async (c) => {
         `SELECT deliveryOrderId, productionOrderId, productCode
            FROM delivery_order_items
           WHERE deliveryOrderId IN (${doIds.map(() => "?").join(",")})
-          ORDER BY rowid`,
+          ORDER BY id`,
       )
       .bind(...doIds)
       .all<{
@@ -649,7 +649,7 @@ app.post("/backfill-invoice-prices-from-so", async (c) => {
         `SELECT id, invoiceId, productCode, quantity, unitPriceSen, priceEdited
            FROM invoice_items
           WHERE invoiceId IN (${invIds.map(() => "?").join(",")})
-          ORDER BY rowid`,
+          ORDER BY id`,
       )
       .bind(...invIds)
       .all<{
@@ -682,29 +682,37 @@ app.post("/backfill-invoice-prices-from-so", async (c) => {
     const doItems = doByOrder.get(inv.deliveryOrderId) ?? [];
     const liItems = liByInvoice.get(inv.id) ?? [];
 
-    // Match by (productCode, nth occurrence), not raw position: the invoice
-    // and the delivery order carry the same goods but not always in the same
-    // order, and a position match silently mispriced whole invoices.
+    // Pair by PRODUCT CODE, and refuse when the pairing is ambiguous.
+    //
+    // The first version paired by "nth occurrence of this code", which needs a
+    // reliable line order on both sides. There is none: `invoice_items` has no
+    // line number, and the original `ORDER BY rowid` is a SQLite pseudo-column
+    // that does not exist on Postgres at all — the endpoint 500'd the moment a
+    // single invoice entered the scope.
+    //
+    // Ordering by `id` would have run, and been a guess: two lines of the same
+    // product on one invoice can come from different sales orders at different
+    // prices, and nothing says which line is which. So when a code appears more
+    // than once, every delivery counterpart must resolve to the SAME build-up —
+    // then the pairing cannot matter. If they disagree, those lines are
+    // refused and named, exactly like a contested sales-order line.
     const pool = new Map<string, Array<{ productionOrderId: string | null }>>();
     for (const d of doItems) {
       const k = String(d.productCode ?? "");
       pool.set(k, [...(pool.get(k) ?? []), d]);
     }
-    const used = new Map<string, number>();
     const edits: Edit[] = [];
 
     for (const li of liItems) {
       const code = String(li.productCode ?? "");
-      const n = used.get(code) ?? 0;
-      used.set(code, n + 1);
       const zero = (Number(li.unitPriceSen) || 0) === 0;
       const handSet = Number(li.priceEdited) === 1;
       if (handSet && !zero) {
         leftAloneHandSet++;
         continue;
       }
-      const di = (pool.get(code) ?? [])[n];
-      if (!di) {
+      const counterparts = pool.get(code) ?? [];
+      if (counterparts.length === 0) {
         unresolved.push({
           invoiceNo: inv.invoiceNo,
           product: code,
@@ -712,8 +720,25 @@ app.post("/backfill-invoice-prices-from-so", async (c) => {
         });
         continue;
       }
-      const po = poById.get(String(di.productionOrderId ?? ""));
-      if (!po) {
+      const builds: Build[] = [];
+      let missingPo = false;
+      for (const di of counterparts) {
+        const po = poById.get(String(di.productionOrderId ?? ""));
+        if (!po) {
+          missingPo = true;
+          break;
+        }
+        const one =
+          settle(full.get(`${po.so}|${po.code}|${po.size}|${po.fab}`)) ??
+          settle(byCode.get(`${po.so}|${po.code}`));
+        if (!one) {
+          missingPo = false;
+          builds.length = 0;
+          break;
+        }
+        builds.push(one);
+      }
+      if (missingPo) {
         unresolved.push({
           invoiceNo: inv.invoiceNo,
           product: code,
@@ -721,14 +746,15 @@ app.post("/backfill-invoice-prices-from-so", async (c) => {
         });
         continue;
       }
-      const b =
-        settle(full.get(`${po.so}|${po.code}|${po.size}|${po.fab}`)) ??
-        settle(byCode.get(`${po.so}|${po.code}`));
+      const b = settle(builds);
       if (!b) {
         unresolved.push({
           invoiceNo: inv.invoiceNo,
           product: code,
-          why: "sales-order line missing or contested",
+          why:
+            builds.length > 1
+              ? "same product on this invoice resolves to different prices — cannot tell which line is which"
+              : "sales-order line missing or contested",
         });
         continue;
       }

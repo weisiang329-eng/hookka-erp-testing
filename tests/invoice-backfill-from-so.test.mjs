@@ -85,12 +85,28 @@ test('the full key is tried before the looser one', () => {
   assert.ok(order > 0 && loose > order, 'salesOrder|code|size|fabric must win first');
 });
 
-test('lines match the delivery order by nth occurrence, not by position', () => {
-  // A position match silently mispriced whole invoices when the two documents
-  // listed the same goods in a different order.
-  assert.match(H, /const n = used\.get\(code\) \?\? 0;/);
-  assert.match(H, /used\.set\(code, n \+ 1\);/);
-  assert.match(H, /\(pool\.get\(code\) \?\? \[\]\)\[n\]/);
+test('rowid is gone — it does not exist on Postgres', () => {
+  // The endpoint 500'd the moment a single invoice entered the scope, and the
+  // cause was ORDER BY rowid: a SQLite pseudo-column. Small scopes "passed"
+  // only because they returned early on zero invoices.
+  // The comment explaining the bug is allowed to name it; the SQL is not.
+  const sqlOnly = H.replace(/\/\/.*$/gm, '');
+  assert.equal(/rowid/.test(sqlOnly), false, 'no SQLite pseudo-column may survive in code');
+  assert.match(H, /ORDER BY id`/, 'ordered by a column that exists');
+});
+
+test('pairing does not depend on line ORDER, because no reliable order exists', () => {
+  // invoice_items has no line number. Ordering by id would have RUN and been a
+  // guess: two lines of the same product on one invoice can come from
+  // different sales orders at different prices, and nothing says which is
+  // which. So every delivery counterpart must agree, or the lines are refused.
+  assert.equal(/used\.get\(code\)/.test(H), false, 'the nth-occurrence counter is gone');
+  assert.match(H, /const counterparts = pool\.get\(code\) \?\? \[\];/);
+  assert.match(H, /const b = settle\(builds\);/);
+  assert.match(
+    H,
+    /same product on this invoice resolves to different prices — cannot tell which line is which/,
+  );
 });
 
 test('every line it declines is named, with a reason', () => {

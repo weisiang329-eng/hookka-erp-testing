@@ -714,6 +714,10 @@ app.post("/recompute-so-sofa-prices", async (c) => {
 
   const db = c.var.DB;
   const dryRun = c.req.query("dryRun") === "true";
+  const sampleLimit = Math.min(
+    500,
+    Math.max(1, Number(c.req.query("samples")) || 10),
+  );
   const statusFilter = (c.req.query("statuses") || "").trim()
     ? c.req.query("statuses")!.split(",").map(s => s.trim()).filter(Boolean)
     : ["IN_PRODUCTION", "READY_TO_SHIP", "CONFIRMED", "DRAFT"];
@@ -1269,7 +1273,11 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   if (dryRun) {
     return c.json({
       success: true, dryRun: true, scope: statusFilter, appliedScope, summary,
-      sampleChanges: willChange.slice(0, 10).map(p => ({
+      // Ten rows is a taste, not a decision. `?samples=N` returns up to 500
+      // so the person approving a repricing run can read the WHOLE list —
+      // and `samplesTruncated` says plainly when it could not.
+      samplesTruncated: willChange.length > sampleLimit,
+      sampleChanges: willChange.slice(0, sampleLimit).map(p => ({
         so: p.companySOId, cust: p.customerName, status: p.status,
         product: p.productCode, sz: p.sizeCode, fab: p.fabricCode, tier: p.fabricTier,
         oldBase: p.oldBaseRM, newBase: p.newBaseRM,

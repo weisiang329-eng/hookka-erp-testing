@@ -4,6 +4,24 @@ import { requirePermission } from "../../lib/rbac";
 import { getOrgId } from "../../lib/tenant";
 import { PRICE_BASELINE_DATE, type BaselineCandidate, MODEL_MAP_HOUZS, priceFor, HEIGHTS_TO_FILL, SOFA_TARGET_BASES, type SoiRow, type SoRow } from "./_shared";
 
+
+// A row's effectiveFrom alone does not identify the winner: a same-day
+// correction shares the date with the row it supersedes. Sort by date, then
+// by created_at DESC — the same order resolveCustomerPriceAsOf uses, so the
+// repricer and the order screens can never price the same data differently.
+// Rows without created_at (master product_prices) sort stably among themselves.
+type DatedPriceRow = {
+  basePriceSen: number | null;
+  seatHeightPrices: string | null;
+  effectiveFrom: string;
+  createdAt?: string | null;
+};
+function newestFirst(a: DatedPriceRow, b: DatedPriceRow): number {
+  const byDate = b.effectiveFrom.localeCompare(a.effectiveFrom);
+  if (byDate !== 0) return byDate;
+  return String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? ""));
+}
+
 const app = new Hono<Env>();
 
 
@@ -778,14 +796,21 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     const [customerId, productId] = k.split("|");
     const cpRes = await db
       .prepare(
-        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom
+        // created_at is the TIE-BREAK, not decoration: two price rows can
+        // share an effectiveFrom (a same-day correction supersedes the
+        // morning's row), and without it which one wins is whatever order
+        // Postgres happens to return. resolveCustomerPriceAsOf — the
+        // resolver the ORDER SCREENS use — already breaks the tie this way;
+        // this one did not, so the same data could price two ways.
+        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom,
+                cpp.created_at AS "createdAt"
            FROM customer_products cp
            JOIN customer_product_prices cpp ON cpp.customerProductId = cp.id
           WHERE cp.customerId = ? AND cp.productId = ?
-          ORDER BY cpp.effectiveFrom DESC`,
+          ORDER BY cpp.effectiveFrom DESC, cpp.created_at DESC`,
       )
       .bind(customerId, productId)
-      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>();
+      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string; createdAt?: string | null }>();
     cpHistMap.set(k, cpRes.results ?? []);
   }
 
@@ -807,12 +832,12 @@ app.post("/recompute-so-sofa-prices", async (c) => {
 
   type SeatHeightEntry = { height: string; priceSen: number; tier?: string };
   function pickActive(
-    rows: Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>,
+    rows: DatedPriceRow[],
     asOf: string,
   ): { basePriceSen: number; entries: SeatHeightEntry[] } | null {
     const usable = rows
       .filter((r) => r.effectiveFrom <= asOf && r.basePriceSen != null)
-      .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+      .sort(newestFirst);
     const r = usable[0];
     if (!r) return null;
     let entries: SeatHeightEntry[] = [];
@@ -1300,14 +1325,21 @@ app.post("/recompute-co-sofa-prices", async (c) => {
     const [customerId, productId] = k.split("|");
     const cpRes = await db
       .prepare(
-        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom
+        // created_at is the TIE-BREAK, not decoration: two price rows can
+        // share an effectiveFrom (a same-day correction supersedes the
+        // morning's row), and without it which one wins is whatever order
+        // Postgres happens to return. resolveCustomerPriceAsOf — the
+        // resolver the ORDER SCREENS use — already breaks the tie this way;
+        // this one did not, so the same data could price two ways.
+        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom,
+                cpp.created_at AS "createdAt"
            FROM customer_products cp
            JOIN customer_product_prices cpp ON cpp.customerProductId = cp.id
           WHERE cp.customerId = ? AND cp.productId = ?
-          ORDER BY cpp.effectiveFrom DESC`,
+          ORDER BY cpp.effectiveFrom DESC, cpp.created_at DESC`,
       )
       .bind(customerId, productId)
-      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>();
+      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string; createdAt?: string | null }>();
     cpHistMap.set(k, cpRes.results ?? []);
   }
   const productIds = Array.from(new Set(items.map(it => it.productId).filter((p): p is string => !!p)));
@@ -1326,8 +1358,8 @@ app.post("/recompute-co-sofa-prices", async (c) => {
   }
 
   type SeatHeightEntry = { height: string; priceSen: number; tier?: string };
-  function pickActive(rows: Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>, asOf: string) {
-    const usable = rows.filter((r) => r.effectiveFrom <= asOf && r.basePriceSen != null).sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+  function pickActive(rows: DatedPriceRow[], asOf: string) {
+    const usable = rows.filter((r) => r.effectiveFrom <= asOf && r.basePriceSen != null).sort(newestFirst);
     const r = usable[0];
     if (!r) return null;
     let entries: SeatHeightEntry[] = [];

@@ -439,4 +439,397 @@ app.post("/refresh-so-surcharges", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /backfill-invoice-prices-from-so
+//
+// Re-derive invoice line prices from the sales-order lines they were built
+// from, for invoices in a date window. Run it AFTER the sales-order passes.
+//
+// ## It does not touch the ledger itself — it calls the edit that does
+//
+// Restating a SENT invoice means reversing its GL posting and re-posting the
+// new one on the same hash chain, then collapsing the original legs. That is
+// ~200 lines inside the invoice PUT. Copying it here was the obvious move and
+// the wrong one: this same session found ONE dropped surcharge term living in
+// six hand-written copies, and a tokenizer written twice that disagreed with
+// itself. So this endpoint builds the `priceEdits` payload and SELF-CALLS
+// `PUT /api/invoices/:id` — the same endpoint the Edit button uses —
+// forwarding the caller's session cookie and CSRF header. The owner's
+// instruction, satisfied literally: 「记得要用 edit 的功能走正常普通流程」.
+//
+// (Self-calling is an established pattern here: the scan queue's processBatch
+// re-enters /api/scan-po/extract the same way.)
+//
+// ## Which lines it will and will not move
+//
+//   priceEdited = 0              derived by the system → re-derive
+//   priceEdited = 1, unit > 0    a person set this price → LEAVE IT ALONE
+//   priceEdited = 1, unit == 0   the BUG-2026-08-20-158 damage: editing one
+//                                line wrote RM 0 into every line the operator
+//                                had not typed into. The goods were delivered
+//                                and were never free, so a zero here is not a
+//                                decision — it is the hole that bug left.
+//                                Re-derive. (90 such lines, RM 58k, measured
+//                                2026-08-24.)
+//
+// A line whose sales-order line cannot be identified UNIQUELY is skipped and
+// named. Same discipline as resolveSoItemId: count claimants, refuse when
+// contested — a wrong identity makes a bad number look authoritative.
+// ---------------------------------------------------------------------------
+app.post("/backfill-invoice-prices-from-so", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const scope = readScope(c);
+  if ("error" in scope) return c.json({ success: false, error: scope.error }, 400);
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 25));
+
+  const invRes = await db
+    .prepare(
+      `SELECT id, invoiceNo, status, invoiceDate, deliveryOrderId, customerId,
+              customerName, totalSen
+         FROM invoices
+        WHERE (orgId = ? OR orgId IS NULL)
+          AND status IN ('SENT','DRAFT')
+          AND deliveryOrderId IS NOT NULL AND deliveryOrderId != ''`,
+    )
+    .bind(orgId)
+    .all<{
+      id: string;
+      invoiceNo: string;
+      status: string;
+      invoiceDate: string | null;
+      deliveryOrderId: string;
+      customerId: string | null;
+      customerName: string | null;
+      totalSen: number;
+    }>();
+  let invoices = invRes.results ?? [];
+  const dateOf = (i: { invoiceDate: string | null }) =>
+    String(i.invoiceDate ?? "").slice(0, 10);
+  if (scope.from) invoices = invoices.filter((i) => dateOf(i) >= scope.from);
+  if (scope.to) invoices = invoices.filter((i) => dateOf(i) <= scope.to);
+  if (scope.customerIds.length) {
+    const want = new Set(scope.customerIds);
+    invoices = invoices.filter((i) => i.customerId && want.has(i.customerId));
+  }
+
+  const appliedScope = {
+    from: scope.from || null,
+    to: scope.to || null,
+    customerIds: scope.customerIds.length ? scope.customerIds : null,
+    statuses: ["SENT", "DRAFT"],
+    invoicesInScope: invoices.length,
+  };
+  if (invoices.length === 0) {
+    return c.json({ success: true, dryRun: scope.dryRun, appliedScope, plan: [] });
+  }
+
+  // ---- sales-order line index, refusing contested keys -------------------
+  const soiRes = await db
+    .prepare(
+      `SELECT soi.salesOrderId, soi.productCode, soi.sizeCode, soi.fabricCode,
+              soi.basePriceSen, soi.divanPriceSen, soi.legPriceSen,
+              soi.totalHeightPriceSen, soi.specialOrderPriceSen,
+              soi.discountSen, soi.unitPriceSen
+         FROM sales_order_items soi
+         JOIN sales_orders so ON so.id = soi.salesOrderId
+        WHERE (so.orgId = ? OR so.orgId IS NULL)`,
+    )
+    .bind(orgId)
+    .all<Record<string, unknown>>();
+
+  type Build = {
+    base: number;
+    divan: number;
+    leg: number;
+    totalHeight: number;
+    special: number;
+    discount: number;
+    unit: number;
+  };
+  const sig = (b: Build) =>
+    `${b.base}|${b.divan}|${b.leg}|${b.totalHeight}|${b.special}|${b.discount}`;
+  const full = new Map<string, Build[]>();
+  const byCode = new Map<string, Build[]>();
+  for (const r of soiRes.results ?? []) {
+    const b: Build = {
+      base: Number(r.basePriceSen) || 0,
+      divan: Number(r.divanPriceSen) || 0,
+      leg: Number(r.legPriceSen) || 0,
+      totalHeight: Number(r.totalHeightPriceSen) || 0,
+      special: Number(r.specialOrderPriceSen) || 0,
+      discount: Number(r.discountSen) || 0,
+      unit: Number(r.unitPriceSen) || 0,
+    };
+    const so = String(r.salesOrderId ?? "");
+    const code = String(r.productCode ?? "");
+    const size = String(r.sizeCode ?? "").trim();
+    const fab = String(r.fabricCode ?? "").trim();
+    const fk = `${so}|${code}|${size}|${fab}`;
+    full.set(fk, [...(full.get(fk) ?? []), b]);
+    const ck = `${so}|${code}`;
+    byCode.set(ck, [...(byCode.get(ck) ?? []), b]);
+  }
+  const settle = (arr: Build[] | undefined): Build | null => {
+    if (!arr || arr.length === 0) return null;
+    const uniq = new Set(arr.map(sig));
+    return uniq.size === 1 ? arr[0] : null;
+  };
+
+  const poRes = await db
+    .prepare(
+      `SELECT id, salesOrderId, productCode, sizeCode, fabricCode
+         FROM production_orders WHERE (orgId = ? OR orgId IS NULL)`,
+    )
+    .bind(orgId)
+    .all<Record<string, unknown>>();
+  const poById = new Map<
+    string,
+    { so: string; code: string; size: string; fab: string }
+  >();
+  for (const p of poRes.results ?? []) {
+    poById.set(String(p.id ?? ""), {
+      so: String(p.salesOrderId ?? ""),
+      code: String(p.productCode ?? ""),
+      size: String(p.sizeCode ?? "").trim(),
+      fab: String(p.fabricCode ?? "").trim(),
+    });
+  }
+
+  type Edit = {
+    id: string;
+    product: string;
+    qty: number;
+    oldUnitRM: number;
+    newUnitRM: number;
+    wasZero: boolean;
+    baseSen: number;
+    divanSen: number;
+    legSen: number;
+    totalHeightSen: number;
+    specialSen: number;
+    discountSen: number;
+  };
+  const plan: Array<{
+    id: string;
+    invoiceNo: string;
+    status: string;
+    customer: string | null;
+    edits: Edit[];
+    deltaRM: number;
+  }> = [];
+  const unresolved: Array<{ invoiceNo: string; product: string; why: string }> = [];
+  let leftAloneHandSet = 0;
+  let alreadyCorrect = 0;
+
+  for (const inv of invoices) {
+    const [doRes, liRes] = await Promise.all([
+      db
+        .prepare(
+          `SELECT productionOrderId, productCode FROM delivery_order_items
+            WHERE deliveryOrderId = ? ORDER BY rowid`,
+        )
+        .bind(inv.deliveryOrderId)
+        .all<{ productionOrderId: string | null; productCode: string | null }>(),
+      db
+        .prepare(
+          `SELECT id, productCode, quantity, unitPriceSen, priceEdited
+             FROM invoice_items WHERE invoiceId = ? ORDER BY rowid`,
+        )
+        .bind(inv.id)
+        .all<{
+          id: string;
+          productCode: string | null;
+          quantity: number;
+          unitPriceSen: number;
+          priceEdited: number | null;
+        }>(),
+    ]);
+    const doItems = doRes.results ?? [];
+    const liItems = liRes.results ?? [];
+
+    // Match by (productCode, nth occurrence), not raw position: the invoice
+    // and the delivery order carry the same goods but not always in the same
+    // order, and a position match silently mispriced whole invoices.
+    const pool = new Map<string, Array<{ productionOrderId: string | null }>>();
+    for (const d of doItems) {
+      const k = String(d.productCode ?? "");
+      pool.set(k, [...(pool.get(k) ?? []), d]);
+    }
+    const used = new Map<string, number>();
+    const edits: Edit[] = [];
+
+    for (const li of liItems) {
+      const code = String(li.productCode ?? "");
+      const n = used.get(code) ?? 0;
+      used.set(code, n + 1);
+      const zero = (Number(li.unitPriceSen) || 0) === 0;
+      const handSet = Number(li.priceEdited) === 1;
+      if (handSet && !zero) {
+        leftAloneHandSet++;
+        continue;
+      }
+      const di = (pool.get(code) ?? [])[n];
+      if (!di) {
+        unresolved.push({
+          invoiceNo: inv.invoiceNo,
+          product: code,
+          why: "no matching delivery line",
+        });
+        continue;
+      }
+      const po = poById.get(String(di.productionOrderId ?? ""));
+      if (!po) {
+        unresolved.push({
+          invoiceNo: inv.invoiceNo,
+          product: code,
+          why: "delivery line has no production order",
+        });
+        continue;
+      }
+      const b =
+        settle(full.get(`${po.so}|${po.code}|${po.size}|${po.fab}`)) ??
+        settle(byCode.get(`${po.so}|${po.code}`));
+      if (!b) {
+        unresolved.push({
+          invoiceNo: inv.invoiceNo,
+          product: code,
+          why: "sales-order line missing or contested",
+        });
+        continue;
+      }
+      const oldUnit = Number(li.unitPriceSen) || 0;
+      if (b.unit === oldUnit) {
+        alreadyCorrect++;
+        continue;
+      }
+      edits.push({
+        id: li.id,
+        product: code,
+        qty: Number(li.quantity) || 0,
+        oldUnitRM: oldUnit / 100,
+        newUnitRM: b.unit / 100,
+        wasZero: zero,
+        baseSen: b.base,
+        divanSen: b.divan,
+        legSen: b.leg,
+        totalHeightSen: b.totalHeight,
+        specialSen: b.special,
+        discountSen: b.discount,
+      });
+    }
+    if (edits.length > 0) {
+      plan.push({
+        id: inv.id,
+        invoiceNo: inv.invoiceNo,
+        status: inv.status,
+        customer: inv.customerName,
+        edits,
+        deltaRM:
+          Math.round(
+            edits.reduce(
+              (s, e) => s + (e.newUnitRM - e.oldUnitRM) * e.qty * 100,
+              0,
+            ),
+          ) / 100,
+      });
+    }
+  }
+
+  const summary = {
+    invoicesToEdit: plan.length,
+    linesToEdit: plan.reduce((s, p) => s + p.edits.length, 0),
+    zeroLinesRestored: plan.reduce(
+      (s, p) => s + p.edits.filter((e) => e.wasZero).length,
+      0,
+    ),
+    handSetLinesLeftAlone: leftAloneHandSet,
+    alreadyCorrect,
+    unresolvedLines: unresolved.length,
+    netRM: Math.round(plan.reduce((s, p) => s + p.deltaRM, 0) * 100) / 100,
+  };
+
+  if (scope.dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      appliedScope,
+      summary,
+      samplesTruncated: plan.length > scope.sampleLimit,
+      plan: plan.slice(0, scope.sampleLimit),
+      unresolved: unresolved.slice(0, scope.sampleLimit),
+    });
+  }
+
+  // ---- apply, through the invoice's own edit endpoint --------------------
+  const cookie = c.req.header("cookie") ?? "";
+  const csrf = c.req.header("x-csrf-token") ?? "";
+  const origin = new URL(c.req.url).origin;
+  const applied: Array<{
+    invoiceNo: string;
+    ok: boolean;
+    status: number;
+    lines: number;
+    error?: string;
+  }> = [];
+  const batch = plan.slice(0, limit);
+  for (const p of batch) {
+    const res = await fetch(`${origin}/api/invoices/${p.id}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        cookie,
+        "x-csrf-token": csrf,
+      },
+      body: JSON.stringify({
+        priceEdits: p.edits.map((e) => ({
+          id: e.id,
+          baseSen: e.baseSen,
+          divanSen: e.divanSen,
+          legSen: e.legSen,
+          totalHeightSen: e.totalHeightSen,
+          specialSen: e.specialSen,
+          discountSen: e.discountSen,
+          // Nothing here is a deliberate zero — the zero-restore lines are
+          // exactly the ones a bug wrote 0 into. Leaving this false keeps the
+          // endpoint's own zero-guard protecting the case it exists for.
+          allowZero: false,
+        })),
+      }),
+    });
+    let error: string | undefined;
+    if (!res.ok) {
+      try {
+        const j = (await res.json()) as { error?: string };
+        error = j?.error;
+      } catch {
+        error = `HTTP ${res.status}`;
+      }
+    }
+    applied.push({
+      invoiceNo: p.invoiceNo,
+      ok: res.ok,
+      status: res.status,
+      lines: p.edits.length,
+      error,
+    });
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    appliedScope,
+    summary,
+    // Idempotent: a second run re-derives and finds nothing left to do, so a
+    // partial run is simply RE-RUN rather than resumed from a cursor.
+    processed: applied.length,
+    remaining: Math.max(0, plan.length - applied.length),
+    ok: applied.filter((a) => a.ok).length,
+    failed: applied.filter((a) => !a.ok),
+    applied: applied.slice(0, scope.sampleLimit),
+  });
+});
+
 export default app;

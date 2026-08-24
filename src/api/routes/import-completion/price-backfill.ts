@@ -158,7 +158,7 @@ app.post("/refresh-so-surcharges", async (c) => {
     .prepare(
       `SELECT id, salesOrderId, productCode, quantity, gapInches,
               divanHeightInches, divanPriceSen, legHeightInches, legPriceSen,
-              specialOrder, specialOrderPriceSen, totalHeightPriceSen,
+              specialOrder, specialOrderPriceSen, totalHeightPriceSen, customSpecials,
               basePriceSen, unitPriceSen, lineTotalSen, discountSen
          FROM sales_order_items
         WHERE salesOrderId IN (${ids.map(() => "?").join(",")})`,
@@ -180,6 +180,13 @@ app.post("/refresh-so-surcharges", async (c) => {
     newLineRM: number;
   };
   const changes: Change[] = [];
+  const unresolved: Array<{
+    so: string | null;
+    product: string | null;
+    field: string;
+    keptRM: number;
+    why: string;
+  }> = [];
   const writes: Array<{
     itemId: string;
     divan: number;
@@ -210,10 +217,42 @@ app.post("/refresh-so-surcharges", async (c) => {
       heights.legHeights,
       false,
     );
+    // A special the current list does not name is UNKNOWN, not free. The first
+    // run of this endpoint proved why: it would have wiped RM 9,670 of
+    // special-order charges to zero across 27 lines, because `priceOfSen`
+    // returns 0 for a token it cannot find and the line's own `customSpecials`
+    // were never passed in. That is this repo's oldest bug shape — an absence
+    // read as a value — and it had reappeared in the code written to fix
+    // surcharges.
+    //
+    // So the rule is: derive only where the derivation is CONFIDENT. If any
+    // token on the line is not priced by the config and not covered by a
+    // custom special, the stored figure stands and the line is reported as
+    // unresolved.
+    let customSpecials: Array<{ surchargeSen?: number }> | null = null;
+    try {
+      const rawCs = it.customSpecials;
+      const parsed = typeof rawCs === "string" ? JSON.parse(rawCs || "null") : rawCs;
+      if (Array.isArray(parsed)) customSpecials = parsed;
+    } catch {
+      /* malformed — treat as absent, which the confidence check then catches */
+    }
     const special = resolveSpecialOrderPriceSen(
-      { specialOrder: it.specialOrder as string | null },
+      {
+        specialOrder: it.specialOrder as string | null,
+        customSpecials,
+      },
       specials,
     );
+    const specialTokens = String(it.specialOrder ?? "")
+      .split(/[,+]/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const specialConfident =
+      specialTokens.length === 0 ||
+      specialTokens.every((t) =>
+        (specials ?? []).some((e) => e && e.value === t),
+      );
     const totalHeight = resolveTotalHeightPriceSen(
       undefined,
       it.gapInches as number | string | null,
@@ -227,11 +266,51 @@ app.post("/refresh-so-surcharges", async (c) => {
     const curLeg = Number(it.legPriceSen) || 0;
     const curSpecial = Number(it.specialOrderPriceSen) || 0;
     const curTh = Number(it.totalHeightPriceSen) || 0;
+    // Same rule for the height surcharges: a height the list does not price is
+    // unknown. `resolveHeightPriceSen` returns 0 for it, which would silently
+    // remove a charge that was correct when the order was taken.
+    const priced = (
+      list: Array<{ value: string; priceSen: number }> | null,
+      raw: unknown,
+    ) => {
+      const v = String(raw ?? "").replace(/"/g, "").trim();
+      if (!v) return true; // no height on the line — 0 is the right answer
+      return (list ?? []).some(
+        (e) => String(e.value).replace(/"/g, "").trim() === v,
+      );
+    };
+    const divanConfident = priced(heights.divanHeights, it.divanHeightInches);
+    const legConfident = priced(heights.legHeights, it.legHeightInches);
+
     const moved: Array<[string, number, number]> = [];
-    if (divan !== curDivan) moved.push(["divan", curDivan, divan]);
-    if (leg !== curLeg) moved.push(["leg", curLeg, leg]);
-    if (special !== curSpecial) moved.push(["special", curSpecial, special]);
-    if (totalHeight !== curTh) moved.push(["totalHeight", curTh, totalHeight]);
+    const unsure: string[] = [];
+    if (divan !== curDivan) {
+      if (divanConfident) moved.push(["divan", curDivan, divan]);
+      else unsure.push("divan");
+    }
+    if (leg !== curLeg) {
+      if (legConfident) moved.push(["leg", curLeg, leg]);
+      else unsure.push("leg");
+    }
+    if (special !== curSpecial) {
+      if (specialConfident) moved.push(["special", curSpecial, special]);
+      else unsure.push("special");
+    }
+    // totalHeight derives from gap+divan+leg against its own list; the same
+    // confidence rule applies to the SUM, so it rides on both height lookups.
+    if (totalHeight !== curTh) {
+      if (divanConfident && legConfident) moved.push(["totalHeight", curTh, totalHeight]);
+      else unsure.push("totalHeight");
+    }
+    for (const f of unsure) {
+      unresolved.push({
+        so: so.companySOId,
+        product: (it.productCode as string) ?? null,
+        field: f,
+        keptRM: (f === "divan" ? curDivan : f === "leg" ? curLeg : f === "special" ? curSpecial : curTh) / 100,
+        why: "not priced by the current list — left as it was",
+      });
+    }
     if (moved.length === 0) continue;
 
     const base = Number(it.basePriceSen) || 0;
@@ -285,6 +364,7 @@ app.post("/refresh-so-surcharges", async (c) => {
     linesTouched: writes.length,
     fieldChanges: changes.length,
     netLineDiffRM: Math.round(netSen) / 100,
+    leftAloneNotPricedByList: unresolved.length,
   };
   if (scope.dryRun) {
     return c.json({
@@ -294,6 +374,7 @@ app.post("/refresh-so-surcharges", async (c) => {
       summary,
       samplesTruncated: changes.length > scope.sampleLimit,
       changes: changes.slice(0, scope.sampleLimit),
+      unresolved: unresolved.slice(0, scope.sampleLimit),
     });
   }
 

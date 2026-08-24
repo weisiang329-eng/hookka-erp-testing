@@ -51,6 +51,8 @@ Fix: derive only where the derivation is CONFIDENT. Every token on the line must
 
 Regression: `tests/refresh-so-surcharges.test.mjs` (15 tests).
 
+**Follow-up, same endpoint, same shape (2026-08-25).** The confidence check itself was written as a SECOND COPY of the tokenizer — splitting on `/[,+]/` while the canonical `parseSpecialOrderTokens` splits on `/[;,]/` and drops `OTHER: …` free-text notes. The live data uses semicolons, so **28 lines whose specials were perfectly well known** were filed as "not priced by the list" and left untouched. It now calls the canonical parser, and "known" is decided by the STATIC catalog (`specialOrderOptions`) because `priceOfSen` returns 0 for any name absent from it regardless of the config. Writing the parser twice is the same mistake that put six copies of a dropped surcharge term in this repo — third time in two days.
+
 ## BUG-2026-08-24-165 — the repricer would have billed customers for free repairs, and multiplied one line by nine `pricing` `sales-orders` `data-integrity` 🟢
 
 🟢 Fixed. Both found by READING the dry run before the July/August backfill ran, and neither would have raised an error if written.

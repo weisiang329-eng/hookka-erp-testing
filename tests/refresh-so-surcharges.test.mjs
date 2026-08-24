@@ -110,6 +110,7 @@ test('a special the list does not name is UNKNOWN, never zero', () => {
   // reappearing inside the code written to FIX surcharges.
   assert.match(HANDLER, /const specialConfident =/);
   assert.match(HANDLER, /specialTokens\.every\(/);
+  assert.match(HANDLER, /KNOWN_SPECIAL_NAMES\.has\(t\)/, 'the STATIC catalog decides what is priceable');
   assert.match(HANDLER, /if \(specialConfident\) moved\.push\(\["special"/);
 });
 
@@ -142,4 +143,28 @@ test('what it declined to touch is REPORTED, not swallowed', () => {
   assert.match(HANDLER, /unresolved: unresolved\.slice/);
   assert.match(HANDLER, /not priced by the current list — left as it was/);
   assert.match(HANDLER, /keptRM/, 'and it says what was kept');
+});
+
+test('it tokenises with the CANONICAL parser, not a second copy', () => {
+  // The first version split on /[,+]/ while the real parser splits on /[;,]/
+  // and drops `OTHER: ...` free-text notes. Result: 28 lines whose specials
+  // were perfectly well known got filed as "not priced by the list" and left
+  // untouched. Writing the parser twice is the mistake that put six copies of
+  // a dropped surcharge term in this repo.
+  assert.match(HANDLER, /parseSpecialOrderTokens\(it\.specialOrder as string \| null\)/);
+  assert.equal(
+    /\.split\(\/\[,\+\]\//.test(HANDLER),
+    false,
+    'no hand-rolled split may survive',
+  );
+});
+
+test('the tokenizer contract this relies on, executed', async () => {
+  const { parseSpecialOrderTokens } = await import('../src/lib/special-order-surcharge.ts');
+  // Semicolons are the separator the live data actually uses.
+  assert.deepEqual(parseSpecialOrderTokens('Nylon Fabric; EXTEND_5_'), ['Nylon Fabric', 'EXTEND_5_']);
+  // Free-text notes are NOT priceable options and must not make a line unsure.
+  assert.deepEqual(parseSpecialOrderTokens('Right Drawer; OTHER: 1 DRAWER RIGHT BOTTOM'), ['Right Drawer']);
+  assert.deepEqual(parseSpecialOrderTokens('OTHER: FULL COVER'), []);
+  assert.deepEqual(parseSpecialOrderTokens(''), []);
 });

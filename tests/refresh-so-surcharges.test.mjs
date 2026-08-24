@@ -100,3 +100,46 @@ test('order totals are rebuilt from the lines, not patched by a delta', () => {
   assert.match(HANDLER, /SELECT COALESCE\(SUM\(lineTotalSen\), 0\) AS sub/);
   assert.match(HANDLER, /UPDATE sales_orders SET subtotalSen = \?, totalSen = \?/);
 });
+
+// --- an absence is not a value ------------------------------------------
+test('a special the list does not name is UNKNOWN, never zero', () => {
+  // The first live dry run of this endpoint would have wiped RM 9,670 of
+  // special-order charges to zero across 27 lines: `priceOfSen` returns 0 for
+  // a token it cannot find, and the line's own `customSpecials` were never
+  // passed in. This repo's oldest bug shape — an absence read as a value —
+  // reappearing inside the code written to FIX surcharges.
+  assert.match(HANDLER, /const specialConfident =/);
+  assert.match(HANDLER, /specialTokens\.every\(/);
+  assert.match(HANDLER, /if \(specialConfident\) moved\.push\(\["special"/);
+});
+
+test("the line's own customSpecials are read and passed", () => {
+  assert.match(HANDLER, /customSpecials,/, 'selected from the row');
+  assert.match(
+    HANDLER,
+    /specialOrder: it\.specialOrder as string \| null,\s+customSpecials,/,
+    'and handed to the resolver',
+  );
+  assert.match(HANDLER, /JSON\.parse\(rawCs \|\| "null"\)/);
+});
+
+test('a height the list does not price is left alone too', () => {
+  assert.match(HANDLER, /const divanConfident = priced\(heights\.divanHeights/);
+  assert.match(HANDLER, /const legConfident = priced\(heights\.legHeights/);
+  // No height on the line genuinely means 0 — that case must stay derivable.
+  assert.match(HANDLER, /if \(!v\) return true;/);
+});
+
+test('total height rides on BOTH height lookups', () => {
+  // It derives from gap + divan + leg, so it is only as confident as they are.
+  assert.match(HANDLER, /if \(divanConfident && legConfident\) moved\.push\(\["totalHeight"/);
+});
+
+test('what it declined to touch is REPORTED, not swallowed', () => {
+  // Silence here would read as "nothing else needed changing", which is the
+  // opposite of the truth.
+  assert.match(HANDLER, /leftAloneNotPricedByList: unresolved\.length/);
+  assert.match(HANDLER, /unresolved: unresolved\.slice/);
+  assert.match(HANDLER, /not priced by the current list — left as it was/);
+  assert.match(HANDLER, /keptRM/, 'and it says what was kept');
+});

@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-24-166 — the surcharge backfill would have wiped RM 9,670 of special-order charges to zero `pricing` `sales-orders` `data-integrity` 🟢
+
+🟢 Fixed before it wrote anything. Caught by reading the FIRST dry run of an endpoint written that same hour — and the defect was in that new endpoint, not in older code.
+
+`/refresh-so-surcharges` re-derives a line's divan / leg / total-height / special-order charges from the owner's current lists. Its first live dry run reported **37 lines, net −RM 9,555** where an independent check had found only 8 lines needing correction. The breakdown said why: **27 lines going special-order → RM 0**, RM 9,670 of charges about to be deleted.
+
+Two causes, one shape:
+
+1. `priceOfSen` returns **0** for a token it cannot find in the config. A special the current list does not name is UNKNOWN, not free — but the derivation treated the two identically.
+2. The endpoint never passed the line's own **`customSpecials`** (per-line owner-defined surcharges, stored as JSON on the row), so anything priced there derived to nothing.
+
+This is the repo's oldest documented bug shape — **an absence read as a value** — reappearing inside code written to *fix* surcharges. Worth stating plainly: the author had just spent the session catching the same shape in five other places.
+
+Fix: derive only where the derivation is CONFIDENT. Every token on the line must be priced by the config (or covered by a custom special); every height must appear in its list. Where it is not, **the stored figure stands** and the line is reported under `unresolved` with what was kept and why — silence there would read as "nothing else needed changing", which is the opposite of the truth. Total-height rides on both height lookups, since it derives from gap + divan + leg.
+
+Regression: `tests/refresh-so-surcharges.test.mjs` (15 tests).
+
 ## BUG-2026-08-24-165 — the repricer would have billed customers for free repairs, and multiplied one line by nine `pricing` `sales-orders` `data-integrity` 🟢
 
 🟢 Fixed. Both found by READING the dry run before the July/August backfill ran, and neither would have raised an error if written.

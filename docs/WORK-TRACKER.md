@@ -14,6 +14,20 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-24 — 🔵 Forecast/dashboard 开放非生产部门 key 工资，按人工映射表分段 · main（推送后验 prod）
+
+Owner 发现 forecast 只有 8 个生产部门能 key（种子来自 payslips），部门主档其实有 14 个
+（Warehouse/Repair/Maint/Shortfall/R&D 等 Non-prod）。Owner 拍板口径：**按人工映射表分段**
+——dept 行归到它映射科目的 P&L 段（生产→DIRECT_LABOUR；WAREHOUSING/MAINT→FACTORY_OVERHEAD；
+办公/R&D→staff cost）。改动：`/labor/departments` 改读部门主档∪payslips 并带
+`{account,bucket}` + `mappedAccounts`；forecast 页 dept 行分三个区（DIRECT LABOUR /
+OVERHEAD SALARIES / NON-PRODUCTION SALARIES — BY DEPARTMENT），supersede 扩展到映射表
+全部科目（cell 显 — 、区头合计同口径）；dashboard forecast 切片按 bucket 归段、
+超越集同规则、`DASH_PAYLOAD_V` v9。纯函数 `labourMappedAccounts`（salary-dept.ts，含测试）。
+上一批（8/11 的 Interest + v8 部门表格）已确认随 8/21 部署上线。
+
+---
+
 ## 2026-08-14 — 🔵 Four owner-decided report/metric items (branch `fix/on-time-delivery-and-decisions`, **NOT deployed, NOT merged**)
 
 All four decisions were MADE by the owner before the work started; this branch implements

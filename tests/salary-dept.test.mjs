@@ -29,6 +29,18 @@ test("blank department lands in (unassigned); bad periods are dropped", () => {
   assert.equal(out.size, 1);
 });
 
+test("labourMappedAccounts collects dept accounts + fallback + statutory, deduped sorted", () => {
+  assert.deepEqual(
+    m.labourMappedAccounts({
+      fallback: "750-0010",
+      byDept: { MAINTENANCE: "780-0030", WAREHOUSING: "780-0000", OFFICE: "900-S002", DUP: "780-0030" },
+      epf: "750-0020", socso: "750-0030", eis: "750-0040",
+    }),
+    ["750-0010", "750-0020", "750-0030", "750-0040", "780-0000", "780-0030", "900-S002"],
+  );
+  assert.deepEqual(m.labourMappedAccounts({}), []);
+});
+
 test("supersede rule: any dept: key disables labour-account entries for that month", () => {
   assert.equal(m.monthHasDeptForecast({ "dept:FAB_CUT": { bp: 500 } }), true);
   assert.equal(m.monthHasDeptForecast({ "750-0010": { bp: 500 } }), false);

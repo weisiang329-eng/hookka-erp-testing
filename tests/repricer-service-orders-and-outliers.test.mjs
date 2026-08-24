@@ -50,6 +50,19 @@ test('service orders are dropped, in both truthy shapes', () => {
   );
 });
 
+test('there is NO flag to include them — it is a rule, not a scope choice', () => {
+  // Owner 2026-08-24: 「service order是根据当初开的价格 0就是0 有amount就是有
+  // amount」. A repair was quoted at a number, the customer was told that
+  // number, and a price-list change months later does not reach back. A switch
+  // here would be a way to break that by accident.
+  assert.equal(
+    /includeServiceOrders/.test(SO_ENDPOINT),
+    false,
+    'no opt-in may exist for repricing service orders',
+  );
+  assert.match(SO_ENDPOINT, /0就是0/, 'the rule is quoted where the filter lives');
+});
+
 test('and the count is reported, not silently swallowed', () => {
   // "205 lines will change" means something different if 33 were dropped on
   // the way there.

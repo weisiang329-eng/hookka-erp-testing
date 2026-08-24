@@ -763,12 +763,19 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     .all<SoRow>();
   let sos = soRes.results ?? [];
 
-  // A SERVICE ORDER is priced at exactly what the operator typed — 0 means 0
-  // (free / goodwill repair). Every write path says so; this repricer had
-  // never heard of them. The 2026-08-24 dry run put 33 service-order lines in
-  // the plan worth +RM 15,674.50, NINETEEN of them currently at RM 0. Running
-  // it would have billed customers for free repairs. (Same trap as the
-  // SV-2606-001 RM 730 incident the SO write path still carries a note about.)
+  // A SERVICE ORDER keeps the price it was ISSUED at. Owner, 2026-08-24, in
+  // as few words as the rule needs:
+  //
+  //   「service order是根据当初开的价格 0就是0 有amount就是有amount」
+  //
+  // So it is not a scope choice and there is no flag for it: a repair was
+  // quoted at a number (sometimes zero, for goodwill), the customer was told
+  // that number, and a price-list change months later does not reach back and
+  // alter what was agreed. Every write path already says the same thing; this
+  // repricer had never heard of them. The dry run that day put 33
+  // service-order lines in the plan worth +RM 15,674.50, NINETEEN of them
+  // currently at RM 0 — it would have billed customers for repairs that were
+  // given away. (Same trap as the SV-2606-001 RM 730 incident.)
   const serviceOrdersExcluded = sos.filter(
     (so) => so.isServiceOrder === true || (so.isServiceOrder as unknown) === 1,
   ).length;

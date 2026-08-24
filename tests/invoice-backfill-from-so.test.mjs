@@ -123,3 +123,24 @@ test('re-running is the resume strategy, and it says so', () => {
   assert.match(H, /Idempotent/);
   assert.match(H, /RE-RUN rather than resumed from a cursor/);
 });
+
+test('the plan is built in a bounded number of queries, not two per invoice', () => {
+  // The first version ran 2 x 167 = 334 sequential round-trips inside one
+  // request and the worker died — a 500 with no message, which reads like a
+  // logic bug rather than what it was: too many trips.
+  assert.match(H, /WHERE deliveryOrderId IN \(\$\{doIds\.map/);
+  assert.match(H, /WHERE invoiceId IN \(\$\{invIds\.map/);
+  assert.equal(
+    /WHERE deliveryOrderId = \?/.test(H),
+    false,
+    'no per-invoice delivery-line query may return',
+  );
+  assert.equal(
+    /WHERE invoiceId = \?/.test(H),
+    false,
+    'no per-invoice line query may return',
+  );
+  // And the loop reads from the maps, not from the database.
+  assert.match(H, /const doItems = doByOrder\.get\(inv\.deliveryOrderId\) \?\? \[\];/);
+  assert.match(H, /const liItems = liByInvoice\.get\(inv\.id\) \?\? \[\];/);
+});

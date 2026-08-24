@@ -624,31 +624,63 @@ app.post("/backfill-invoice-prices-from-so", async (c) => {
   let leftAloneHandSet = 0;
   let alreadyCorrect = 0;
 
+  // Two queries for the whole batch, not two PER INVOICE. The first version
+  // ran 2 x 167 = 334 sequential round-trips inside one request and the worker
+  // simply died — a 500 with no message, which reads like a bug in the logic
+  // rather than what it was: too many trips.
+  const doIds = [...new Set(invoices.map((i) => i.deliveryOrderId))];
+  const invIds = invoices.map((i) => i.id);
+  const [allDoRes, allLiRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT deliveryOrderId, productionOrderId, productCode
+           FROM delivery_order_items
+          WHERE deliveryOrderId IN (${doIds.map(() => "?").join(",")})
+          ORDER BY rowid`,
+      )
+      .bind(...doIds)
+      .all<{
+        deliveryOrderId: string;
+        productionOrderId: string | null;
+        productCode: string | null;
+      }>(),
+    db
+      .prepare(
+        `SELECT id, invoiceId, productCode, quantity, unitPriceSen, priceEdited
+           FROM invoice_items
+          WHERE invoiceId IN (${invIds.map(() => "?").join(",")})
+          ORDER BY rowid`,
+      )
+      .bind(...invIds)
+      .all<{
+        id: string;
+        invoiceId: string;
+        productCode: string | null;
+        quantity: number;
+        unitPriceSen: number;
+        priceEdited: number | null;
+      }>(),
+  ]);
+  const doByOrder = new Map<string, Array<{ productionOrderId: string | null; productCode: string | null }>>();
+  for (const d of allDoRes.results ?? []) {
+    const k = String(d.deliveryOrderId ?? "");
+    doByOrder.set(k, [...(doByOrder.get(k) ?? []), d]);
+  }
+  const liByInvoice = new Map<string, Array<{
+    id: string;
+    productCode: string | null;
+    quantity: number;
+    unitPriceSen: number;
+    priceEdited: number | null;
+  }>>();
+  for (const l of allLiRes.results ?? []) {
+    const k = String(l.invoiceId ?? "");
+    liByInvoice.set(k, [...(liByInvoice.get(k) ?? []), l]);
+  }
+
   for (const inv of invoices) {
-    const [doRes, liRes] = await Promise.all([
-      db
-        .prepare(
-          `SELECT productionOrderId, productCode FROM delivery_order_items
-            WHERE deliveryOrderId = ? ORDER BY rowid`,
-        )
-        .bind(inv.deliveryOrderId)
-        .all<{ productionOrderId: string | null; productCode: string | null }>(),
-      db
-        .prepare(
-          `SELECT id, productCode, quantity, unitPriceSen, priceEdited
-             FROM invoice_items WHERE invoiceId = ? ORDER BY rowid`,
-        )
-        .bind(inv.id)
-        .all<{
-          id: string;
-          productCode: string | null;
-          quantity: number;
-          unitPriceSen: number;
-          priceEdited: number | null;
-        }>(),
-    ]);
-    const doItems = doRes.results ?? [];
-    const liItems = liRes.results ?? [];
+    const doItems = doByOrder.get(inv.deliveryOrderId) ?? [];
+    const liItems = liByInvoice.get(inv.id) ?? [];
 
     // Match by (productCode, nth occurrence), not raw position: the invoice
     // and the delivery order carry the same goods but not always in the same

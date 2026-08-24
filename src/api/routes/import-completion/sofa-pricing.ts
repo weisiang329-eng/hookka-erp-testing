@@ -2,6 +2,10 @@ import { Hono } from "hono";
 import type { Env } from "../../worker";
 import { requirePermission } from "../../lib/rbac";
 import { getOrgId } from "../../lib/tenant";
+import {
+  calculateUnitPrice,
+  calculateLineTotalWithDiscount,
+} from "../../../lib/pricing";
 import { PRICE_BASELINE_DATE, type BaselineCandidate, MODEL_MAP_HOUZS, priceFor, HEIGHTS_TO_FILL, SOFA_TARGET_BASES, type SoiRow, type SoRow } from "./_shared";
 
 
@@ -768,6 +772,7 @@ app.post("/recompute-so-sofa-prices", async (c) => {
       `SELECT id, salesOrderId, productId, productCode, itemCategory, sizeCode,
               fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
               legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
+              totalHeightPriceSen, discountSen,
               basePriceSen, unitPriceSen, lineTotalSen
          FROM sales_order_items
         WHERE itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
@@ -926,8 +931,24 @@ app.post("/recompute-so-sofa-prices", async (c) => {
       // encodes the size (e.g. "1003-(Q)"). No tier lookup needed.
       priceSen = active.basePriceSen;
     }
-    const newUnit = priceSen + it.legPriceSen + it.divanPriceSen + it.specialOrderPriceSen;
-    const newLine = newUnit * it.quantity;
+    // The CANONICAL build-up, not a hand-rolled sum. This line read
+    // `priceSen + leg + divan + special` and silently dropped
+    // totalHeightPriceSen — which every write path includes (measured on prod
+    // 2026-08-24: 11 of 11 live lines carrying one have
+    // unitPriceSen = base + leg + divan + special + totalHeight). Repricing a
+    // bedframe with a height surcharge REMOVED the surcharge.
+    const newUnit = calculateUnitPrice({
+      basePriceSen: priceSen,
+      divanPriceSen: it.divanPriceSen,
+      legPriceSen: it.legPriceSen,
+      totalHeightPriceSen: it.totalHeightPriceSen ?? 0,
+      specialOrderPriceSen: it.specialOrderPriceSen,
+    });
+    const newLine = calculateLineTotalWithDiscount(
+      newUnit,
+      it.quantity,
+      it.discountSen ?? 0,
+    );
     plan.newBaseRM = priceSen / 100;
     plan.newUnitRM = newUnit / 100;
     plan.newLineRM = newLine / 100;
@@ -1106,8 +1127,13 @@ app.post("/recompute-so-sofa-prices", async (c) => {
           const it = items.find(i => i.id === p.itemId)!;
           const oldLineSen = (p.newLineRM ?? 0) * 100;
           const adjustedLineSen = Math.floor(oldLineSen * ratio);
+          // Same omission lived here too — the combo residual rebuilt the unit
+          // price from its own sum of surcharges, also without totalHeight.
           const surchargesPerUnit =
-            it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+            it.divanPriceSen +
+            it.legPriceSen +
+            (it.totalHeightPriceSen ?? 0) +
+            it.specialOrderPriceSen;
           const adjustedUnitSen = Math.max(
             0, Math.round(adjustedLineSen / Math.max(1, it.quantity)),
           );
@@ -1127,13 +1153,22 @@ app.post("/recompute-so-sofa-prices", async (c) => {
             (a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0),
           )[0];
           const it = items.find(i => i.id === target.itemId)!;
+          // Same omission lived here too — the combo residual rebuilt the unit
+          // price from its own sum of surcharges, also without totalHeight.
           const surchargesPerUnit =
-            it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+            it.divanPriceSen +
+            it.legPriceSen +
+            (it.totalHeightPriceSen ?? 0) +
+            it.specialOrderPriceSen;
           const cur = (target.newBaseRM ?? 0) * 100;
           const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
           const newBase = Math.max(0, adj);
           const newUnit = newBase + surchargesPerUnit;
-          const newLine = newUnit * it.quantity;
+          const newLine = calculateLineTotalWithDiscount(
+            newUnit,
+            it.quantity,
+            it.discountSen ?? 0,
+          );
           target.newBaseRM = newBase / 100;
           target.newUnitRM = newUnit / 100;
           target.newLineRM = newLine / 100;
@@ -1299,6 +1334,7 @@ app.post("/recompute-co-sofa-prices", async (c) => {
       `SELECT id, consignmentOrderId AS salesOrderId, productId, productCode, itemCategory, sizeCode,
               fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
               legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
+              totalHeightPriceSen, discountSen,
               basePriceSen, unitPriceSen, lineTotalSen
          FROM consignment_order_items
         WHERE itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
@@ -1417,8 +1453,24 @@ app.post("/recompute-co-sofa-prices", async (c) => {
     } else {
       priceSen = active.basePriceSen;
     }
-    const newUnit = priceSen + it.legPriceSen + it.divanPriceSen + it.specialOrderPriceSen;
-    const newLine = newUnit * it.quantity;
+    // The CANONICAL build-up, not a hand-rolled sum. This line read
+    // `priceSen + leg + divan + special` and silently dropped
+    // totalHeightPriceSen — which every write path includes (measured on prod
+    // 2026-08-24: 11 of 11 live lines carrying one have
+    // unitPriceSen = base + leg + divan + special + totalHeight). Repricing a
+    // bedframe with a height surcharge REMOVED the surcharge.
+    const newUnit = calculateUnitPrice({
+      basePriceSen: priceSen,
+      divanPriceSen: it.divanPriceSen,
+      legPriceSen: it.legPriceSen,
+      totalHeightPriceSen: it.totalHeightPriceSen ?? 0,
+      specialOrderPriceSen: it.specialOrderPriceSen,
+    });
+    const newLine = calculateLineTotalWithDiscount(
+      newUnit,
+      it.quantity,
+      it.discountSen ?? 0,
+    );
     plan.newBaseRM = priceSen / 100;
     plan.newUnitRM = newUnit / 100;
     plan.newLineRM = newLine / 100;
@@ -1530,7 +1582,15 @@ app.post("/recompute-co-sofa-prices", async (c) => {
           const it = items.find(i => i.id === p.itemId)!;
           const oldLineSen = (p.newLineRM ?? 0) * 100;
           const adjustedLineSen = Math.floor(oldLineSen * ratio);
-          const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+          // Same omission, two more copies. The CANONICAL combo engine
+          // (lib/sofa-combo.ts) already carries totalHeightPriceSen — and
+          // lib/sofa-combo-pass.ts still holds the comment from the last time
+          // this exact term was found hardcoded to 0. Third instance.
+          const surchargesPerUnit =
+            it.divanPriceSen +
+            it.legPriceSen +
+            (it.totalHeightPriceSen ?? 0) +
+            it.specialOrderPriceSen;
           const adjustedUnitSen = Math.max(0, Math.round(adjustedLineSen / Math.max(1, it.quantity)));
           const newBaseSen = Math.max(0, adjustedUnitSen - surchargesPerUnit);
           const newUnitSen = newBaseSen + surchargesPerUnit;
@@ -1542,12 +1602,24 @@ app.post("/recompute-co-sofa-prices", async (c) => {
         if (residualSen !== 0 && adjusted.length > 0) {
           const target = adjusted.slice().sort((a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0))[0];
           const it = items.find(i => i.id === target.itemId)!;
-          const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+          // Same omission, two more copies. The CANONICAL combo engine
+          // (lib/sofa-combo.ts) already carries totalHeightPriceSen — and
+          // lib/sofa-combo-pass.ts still holds the comment from the last time
+          // this exact term was found hardcoded to 0. Third instance.
+          const surchargesPerUnit =
+            it.divanPriceSen +
+            it.legPriceSen +
+            (it.totalHeightPriceSen ?? 0) +
+            it.specialOrderPriceSen;
           const cur = (target.newBaseRM ?? 0) * 100;
           const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
           const newBase = Math.max(0, adj);
           const newUnit = newBase + surchargesPerUnit;
-          const newLine = newUnit * it.quantity;
+          const newLine = calculateLineTotalWithDiscount(
+            newUnit,
+            it.quantity,
+            it.discountSen ?? 0,
+          );
           target.newBaseRM = newBase / 100; target.newUnitRM = newUnit / 100; target.newLineRM = newLine / 100;
         }
         comboMatches++;

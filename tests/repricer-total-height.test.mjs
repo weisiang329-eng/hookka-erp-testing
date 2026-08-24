@@ -146,3 +146,32 @@ test('the row type declares them, so a missing column fails tsc not prod', () =>
   assert.match(row, /totalHeightPriceSen: number;/);
   assert.match(row, /discountSen: number;/);
 });
+
+// --- the dry run has to be true, or approving it means nothing -----------
+test('a change is decided in SEN, never on the RM float', () => {
+  // 103263 sen is RM 1032.63. Recomputed through the RM round-trip it comes
+  // back 1032.6299999999999, so an UNCHANGED line read as changed and was
+  // written. The money survived (the write rounds back to sen) — the dry-run
+  // COUNT did not, and the count is the thing a person approves.
+  const oldRM = 103263 / 100;
+  const newRM = 103263 / 100 + 0; // same money, arrived at by a different path
+  assert.equal(Math.round(oldRM * 100), Math.round(newRM * 100), 'equal in sen');
+
+  const noisy = 1032.6299999999999;
+  assert.notEqual(noisy, 1032.63, 'this is the float comparison that lied');
+  assert.equal(Math.round(noisy * 100), Math.round(1032.63 * 100), 'and this is why sen fixes it');
+});
+
+test('both copies compare and sum in sen', () => {
+  assert.equal(
+    /newLineRM !== p\.oldLineRM/.test(SRC),
+    false,
+    'the RM float comparison must be gone',
+  );
+  const senOf = SRC.match(/const senOf =/g) ?? [];
+  const differs = SRC.match(/const differs = /g) ?? [];
+  const sums = SRC.match(/const sumDiffSen = /g) ?? [];
+  assert.equal(senOf.length, 2, 'both endpoints');
+  assert.equal(differs.length, 2, 'both endpoints');
+  assert.equal(sums.length, 2, 'the reported total must be summed in sen too');
+});

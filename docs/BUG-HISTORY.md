@@ -34,6 +34,16 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-24-163 — the repricer's dry run counted unchanged lines as changes `pricing` `data-integrity` 🟢
+
+🟢 Fixed. The change test was `p.newLineRM !== p.oldLineRM` — a comparison of MONEY IN FLOATS, against the repo's standing rule that money is integer sen. Both fields are `sen / 100`, so a line whose price did not move could still read as moved: 103263 sen is RM 1032.63, and the recomputed path returns `1032.6299999999999`.
+
+The money itself was never wrong — the write rounds back with `Math.round(RM * 100)`, so the stored sen is exact. What was wrong is the **dry run**, and the dry run is the artefact a person approves before ~500 orders are rewritten. On the live scope it reported **351 changed lines**; an unknown share of those were lines that do not change at all, and each one still took an UPDATE.
+
+Fix: compare and sum in sen (`senOf` + `differs`), in both the SO and CO copies. Regression in `tests/repricer-total-height.test.mjs`, including the exact float that lied.
+
+Found in the same session as -161 and -162, all three in the path being prepared for the July/August price backfill.
+
 ## BUG-2026-08-24-162 — the repricer dropped the total-height surcharge, in six places `pricing` `sales-orders` `data-integrity` 🟢
 
 > Owner, briefing the July/August price backfill: 「确保 BedFrame 包含 D1 price、leg price、**total height price**、special order price，再加上 Sofa 等等，全部都要有。你看一下，确保了解它的源代码是怎么计算 costing 的。」 He named the term that was missing.

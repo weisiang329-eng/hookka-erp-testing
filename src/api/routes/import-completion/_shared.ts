@@ -1721,6 +1721,9 @@ export type SoiRow = {
 };
 export type SoRow = {
   id: string;
+  // Priced at exactly what the operator typed — 0 means a free repair. Never
+  // repriced; see the filter in sofa-pricing.ts.
+  isServiceOrder?: boolean | number | null;
   companySOId: string | null;
   customerId: string | null;
   customerName: string | null;

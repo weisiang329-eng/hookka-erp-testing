@@ -34,6 +34,16 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-24-165 — the repricer would have billed customers for free repairs, and multiplied one line by nine `pricing` `sales-orders` `data-integrity` 🟢
+
+🟢 Fixed. Both found by READING the dry run before the July/August backfill ran, and neither would have raised an error if written.
+
+**Service orders.** An `SV-` document is priced at exactly what the operator typed — 0 means 0, a free or goodwill repair. Every write path says so (the SO handler still carries a note about the SV-2606-001 RM 730 incident); this repricer had never heard of them. The 2026-08-24 dry run put **33 service-order lines** in the plan worth **+RM 15,674.50**, **19 of them currently at RM 0**. That was 76% of the run's headline total. The query now selects `isServiceOrder`, drops those orders, and reports how many it dropped — "205 lines will change" means something different if 33 were quietly dropped on the way.
+
+**Combo residual outliers.** The residual exists to make a matched SET total the agreed combo price. On **SO-2608-234** it put **RM 8,258 on a 5536-CNR** whose list price is RM 900 in the master, RM 900 for the customer, with no price history at all — every source agreed on 900 and the plan still said 8,258. A line whose post-combo base leaves its own list price by more than 3× (either direction — a collapse is as suspect as a multiplication) is now SKIPPED with a reason naming both numbers, and its new price is cleared so it cannot be written by accident. SO-2608-234 needs a human: the combo rule that matched it is worth checking.
+
+Both are the same lesson: a dry run is only worth reading if what it cannot justify appears as a SKIP with a reason rather than as a number. Regression: `tests/repricer-service-orders-and-outliers.test.mjs`, including the ratio rule executed against the real 900 → 8,258 case.
+
 ## BUG-2026-08-24-164 — the repricer had no scope but status, so "July and August" meant the whole book `pricing` `sales-orders` 🟢
 
 🟢 Fixed. `/recompute-so-sofa-prices` filtered on status and nothing else. Asked to backfill July and August it would have rewritten **every order in the book** — 1,231 orders live on 2026-08-24, against the ~500 the owner had actually decided on, including other customers and other months.

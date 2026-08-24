@@ -1179,10 +1179,22 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   }
 
   // Summary stats
-  const willChange = plans.filter(p => p.newLineRM != null && p.newLineRM !== p.oldLineRM);
-  const noChange = plans.filter(p => p.newLineRM != null && p.newLineRM === p.oldLineRM);
+  // Compare in SEN, not in RM. These fields are `sen / 100` floats, so an
+  // unchanged line can read as changed: 103263/100 recomputes to
+  // 1032.6299999999999, which !== 1032.63. The write already rounds back to
+  // sen, so the money was never wrong — but the DRY RUN was, and the dry run
+  // is what a person approves. (Repo rule: money is integer sen.)
+  const senOf = (rm: number | null | undefined) => Math.round((rm ?? 0) * 100);
+  const differs = (p: ChangePlan) =>
+    p.newLineRM != null && senOf(p.newLineRM) !== senOf(p.oldLineRM);
+  const willChange = plans.filter(differs);
+  const noChange = plans.filter(p => p.newLineRM != null && !differs(p));
   const skipped = plans.filter(p => p.skipReason);
-  const sumDiff = willChange.reduce((s, p) => s + ((p.newLineRM ?? 0) - p.oldLineRM), 0);
+  const sumDiffSen = willChange.reduce(
+    (acc, p) => acc + (senOf(p.newLineRM) - senOf(p.oldLineRM)),
+    0,
+  );
+  const sumDiff = sumDiffSen / 100;
   const summary = {
     soCount: sos.length,
     sofaItemsConsidered: items.length,
@@ -1627,10 +1639,22 @@ app.post("/recompute-co-sofa-prices", async (c) => {
     }
   }
 
-  const willChange = plans.filter(p => p.newLineRM != null && p.newLineRM !== p.oldLineRM);
-  const noChange = plans.filter(p => p.newLineRM != null && p.newLineRM === p.oldLineRM);
+  // Compare in SEN, not in RM. These fields are `sen / 100` floats, so an
+  // unchanged line can read as changed: 103263/100 recomputes to
+  // 1032.6299999999999, which !== 1032.63. The write already rounds back to
+  // sen, so the money was never wrong — but the DRY RUN was, and the dry run
+  // is what a person approves. (Repo rule: money is integer sen.)
+  const senOf = (rm: number | null | undefined) => Math.round((rm ?? 0) * 100);
+  const differs = (p: ChangePlan2) =>
+    p.newLineRM != null && senOf(p.newLineRM) !== senOf(p.oldLineRM);
+  const willChange = plans.filter(differs);
+  const noChange = plans.filter(p => p.newLineRM != null && !differs(p));
   const skipped = plans.filter(p => p.skipReason);
-  const sumDiff = willChange.reduce((s, p) => s + ((p.newLineRM ?? 0) - p.oldLineRM), 0);
+  const sumDiffSen = willChange.reduce(
+    (acc, p) => acc + (senOf(p.newLineRM) - senOf(p.oldLineRM)),
+    0,
+  );
+  const sumDiff = sumDiffSen / 100;
   const summary = {
     coCount: cos.length, itemsConsidered: items.length, willChange: willChange.length,
     noChange: noChange.length, skipped: skipped.length,

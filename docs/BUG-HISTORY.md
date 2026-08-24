@@ -44,6 +44,8 @@ A malformed date is a 400, not a silent full-scope run — ignoring `?from=2026-
 
 Every response now echoes `appliedScope` (statuses, from, to, customerIds, includePaid, paidOrdersExcluded), including the empty-scope early return: "0 orders" and "0 orders matching a filter you did not mean" are otherwise indistinguishable. Regression: `tests/repricer-scope-filters.test.mjs`.
 
+**Follow-up the same day:** the dry run also capped its change list at 10 rows with no indication that it had. Ten rows is a taste, not a decision, and this list is what a person approves before ~500 orders are rewritten — `?samples=N` now returns up to 500 and `samplesTruncated` says plainly when the list was cut.
+
 ## BUG-2026-08-24-163 — the repricer's dry run counted unchanged lines as changes `pricing` `data-integrity` 🟢
 
 🟢 Fixed. The change test was `p.newLineRM !== p.oldLineRM` — a comparison of MONEY IN FLOATS, against the repo's standing rule that money is integer sen. Both fields are `sen / 100`, so a line whose price did not move could still read as moved: 103263 sen is RM 1032.63, and the recomputed path returns `1032.6299999999999`.

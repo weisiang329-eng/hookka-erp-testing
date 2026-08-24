@@ -755,13 +755,26 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   const soRes = await db
     .prepare(
       `SELECT id, companySOId, customerId, customerName, status,
-              companySODate, created_at AS createdAt
+              companySODate, isServiceOrder, created_at AS createdAt
          FROM sales_orders
         WHERE status IN (${soPlaceholders})`,
     )
     .bind(...statusFilter)
     .all<SoRow>();
   let sos = soRes.results ?? [];
+
+  // A SERVICE ORDER is priced at exactly what the operator typed — 0 means 0
+  // (free / goodwill repair). Every write path says so; this repricer had
+  // never heard of them. The 2026-08-24 dry run put 33 service-order lines in
+  // the plan worth +RM 15,674.50, NINETEEN of them currently at RM 0. Running
+  // it would have billed customers for free repairs. (Same trap as the
+  // SV-2606-001 RM 730 incident the SO write path still carries a note about.)
+  const serviceOrdersExcluded = sos.filter(
+    (so) => so.isServiceOrder === true || (so.isServiceOrder as unknown) === 1,
+  ).length;
+  sos = sos.filter(
+    (so) => !(so.isServiceOrder === true || (so.isServiceOrder as unknown) === 1),
+  );
 
   // ---- Scope filters (2026-08-24) -------------------------------------
   //
@@ -813,6 +826,7 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   }
 
   const appliedScope = {
+    serviceOrdersExcluded,
     statuses: statusFilter,
     from: fromDate || null,
     to: toDate || null,
@@ -945,6 +959,8 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     newUnitRM: number | null;
     oldLineRM: number;
     newLineRM: number | null;
+    /** What the price list gave, before the combo pass redistributed. */
+    listBaseRM?: number | null;
     skipReason?: string;
   };
   const plans: ChangePlan[] = [];
@@ -1011,6 +1027,9 @@ app.post("/recompute-so-sofa-prices", async (c) => {
       it.quantity,
       it.discountSen ?? 0,
     );
+    // The price the LIST gives, kept beside the plan so the combo pass cannot
+    // move a line without leaving the original visible.
+    plan.listBaseRM = priceSen / 100;
     plan.newBaseRM = priceSen / 100;
     plan.newUnitRM = newUnit / 100;
     plan.newLineRM = newLine / 100;
@@ -1246,6 +1265,29 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   // 1032.6299999999999, which !== 1032.63. The write already rounds back to
   // sen, so the money was never wrong — but the DRY RUN was, and the dry run
   // is what a person approves. (Repo rule: money is integer sen.)
+  // A combo residual exists to make a matched SET total the agreed price. It
+  // must never turn one line into a different order of magnitude — on
+  // 2026-08-24 it put RM 8,258 on a 5536-CNR whose list price is RM 900 (master
+  // 900, customer 900, no history: every source agreed, and the plan still said
+  // 8,258). One line, silently, on an order that already exists.
+  //
+  // So: a line whose post-combo base leaves its own list price by more than
+  // 3x is REPORTED, not written. A real combo discount moves a line DOWN or
+  // slightly up as the residual lands; it does not multiply it.
+  const RESIDUAL_SANITY_MULTIPLE = 3;
+  for (const p of plans) {
+    if (p.skipReason || p.newBaseRM == null || !p.listBaseRM) continue;
+    const ratio = p.newBaseRM / p.listBaseRM;
+    if (ratio > RESIDUAL_SANITY_MULTIPLE || ratio < 1 / RESIDUAL_SANITY_MULTIPLE) {
+      p.skipReason =
+        `combo residual outlier — list ${p.listBaseRM.toFixed(2)}, ` +
+        `computed ${p.newBaseRM.toFixed(2)} (${ratio.toFixed(1)}x); needs review`;
+      p.newBaseRM = null;
+      p.newUnitRM = null;
+      p.newLineRM = null;
+    }
+  }
+
   const senOf = (rm: number | null | undefined) => Math.round((rm ?? 0) * 100);
   const differs = (p: ChangePlan) =>
     p.newLineRM != null && senOf(p.newLineRM) !== senOf(p.oldLineRM);

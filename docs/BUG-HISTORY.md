@@ -34,6 +34,35 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-24-162 — the repricer dropped the total-height surcharge, in six places `pricing` `sales-orders` `data-integrity` 🟢
+
+> Owner, briefing the July/August price backfill: 「确保 BedFrame 包含 D1 price、leg price、**total height price**、special order price，再加上 Sofa 等等，全部都要有。你看一下，确保了解它的源代码是怎么计算 costing 的。」 He named the term that was missing.
+
+**Root cause.** `/api/import/recompute-so-sofa-prices` and its consignment twin built the unit price by hand — `priceSen + legPriceSen + divanPriceSen + specialOrderPriceSen` — while every WRITE path builds it through `calculateUnitPrice` (`src/lib/pricing.ts:38`), which also carries `totalHeightPriceSen`. Measured on prod the same day: of the live July/August lines carrying a height surcharge, **11 of 11** have `unitPriceSen = base + leg + divan + special + totalHeight`.
+
+So repricing a bedframe with a height surcharge **silently removed it** — a LOWER price on an order already sent to a customer, with nothing in the output naming the missing term. A 26" total height at RM 80 × 3 units is RM 240 off one line. Two of the surcharge sums also fed the combo residual, where the missing term would have been redistributed into the base and made each line's build-up stop adding up.
+
+**Six sites, not two.** SO repricer and CO repricer, each with a main pass and **two** combo-residual passes. The first sweep fixed four; the new guard went red on the remaining two, written on one line and so missed by the multi-line pattern. The site count is now asserted so a seventh cannot appear quietly.
+
+**Third instance of this exact term.** `src/api/lib/sofa-combo-pass.ts:228` still carries the comment from the last one ("Was a hardcoded 0. It feeds `surchargesPerUnitSen` … a zero here hands the surcharge's worth of the agreed combo total to the BASE price"), and the canonical engine `src/api/lib/sofa-combo.ts:318` has carried it correctly all along. The repricers were stale copies of a fixed bug — so they now CALL `calculateUnitPrice` / `calculateLineTotalWithDiscount` rather than restating them.
+
+`discountSen` was missing from the line total for the same reason: the line was `newUnit * quantity` with no discount term. Zero on every live line today (0 of 167 sampled), which is exactly how it would have stayed invisible until the first discounted line was repriced.
+
+**Verified.** `tests/repricer-total-height.test.mjs` — 8 tests, including the surcharge's effect priced in money, the six-site count, both queries actually selecting the new columns, and the row type declaring them so a missing column fails `tsc` rather than production. Full suite 4,356 pass / 0 fail. Found BEFORE the backfill ran; it would have repriced ~500 July/August orders with the surcharge stripped.
+
+## BUG-2026-08-24-161 — a same-day price correction could lose to the row it superseded `pricing` `data-integrity` 🟢
+
+🟢 Fixed. Clearing the sofa P3 prices for 2990 and Carress meant POSTing a corrected `customer_product_prices` row on the SAME `effectiveFrom` as the row it supersedes — the ordinary shape of a same-day correction. That left 60 products with two rows dated 2026-08-24, and the two readers of that table disagreed about which one wins:
+
+| reader | order | picks |
+|---|---|---|
+| `resolveCustomerPriceAsOf` (`customer-products.ts:1004`) | `effectiveFrom DESC, created_at DESC` | the correction — what the order screens show |
+| `pickActive` ×2 (`import-completion/sofa-pricing.ts`) | `effectiveFrom` only, over a query also ordered by `effectiveFrom` only | **whatever Postgres happened to return** |
+
+So the repricer could price an order off the **superseded** row while the SO screen showed the corrected one, and a re-run could disagree with itself. Nothing in the output would say so — both numbers are plausible prices, which is why it would have survived review. Fix: both copies share one comparator (`newestFirst`) and both queries select and order by `created_at`, mirroring the canonical resolver exactly.
+
+**Verified.** `tests/price-row-tiebreak.test.mjs` — the comparator is reproduced from source and executed (the same-day pair sorts to the correction regardless of input order) rather than merely asserted about, plus a guard that the canonical resolver still orders the way this one now copies. Found before the July/August backfill, which would have baked the arbitrary choice into ~500 orders.
+
 ## BUG-2026-08-21-160 — a dropdown on the Inventory screen re-routes money between P&L accounts, and left no record that it had `accounting` `audit-logging` `data-integrity` 🟢
 
 > Found while answering what looked like a filing question — 「12 笔 B.FILLER 海绵要不要也并进 S.FILLER」 — and turned out to be an accounting one.

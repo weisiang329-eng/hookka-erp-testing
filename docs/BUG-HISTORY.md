@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-25-167 — `ORDER BY rowid` on Postgres, and a line pairing that depended on an order that does not exist `pricing` `invoices` `infrastructure` 🟢
+
+🟢 Fixed. The new invoice backfill 500'd the moment a single invoice entered its scope. Small scopes appeared to pass — they returned early on zero invoices, so every "OK" was the empty path.
+
+**`ORDER BY rowid` is a SQLite pseudo-column and does not exist on Postgres.** It was carried over from the prior art in `admin.ts` (`/backfill-invoice-prices`), which still contains it — that endpoint would fail the same way on the live database, and is worth knowing before anyone reaches for it.
+
+The deeper problem the crash exposed: the pairing of invoice lines to delivery lines was "the nth occurrence of this product code", which needs a reliable line order **on both sides**. There is none — `invoice_items` has no line number. Ordering by `id` would have RUN, and been a guess: two lines of the same product on one invoice can come from different sales orders at different prices, and nothing records which line is which.
+
+So the pairing no longer depends on order at all. When a product code appears more than once on an invoice, **every** delivery counterpart must resolve to the same build-up — then the pairing cannot matter. If they disagree, those lines are refused and named ("same product on this invoice resolves to different prices — cannot tell which line is which"), the same discipline as a contested sales-order line.
+
+Worth recording: the crash was the lucky part. `ORDER BY id` would have produced plausible numbers on the ambiguous invoices, and nothing would have flagged them.
+
+Regression: `tests/invoice-backfill-from-so.test.mjs` (14 tests).
+
 ## BUG-2026-08-24-166 — the surcharge backfill would have wiped RM 9,670 of special-order charges to zero `pricing` `sales-orders` `data-integrity` 🟢
 
 🟢 Fixed before it wrote anything. Caught by reading the FIRST dry run of an endpoint written that same hour — and the defect was in that new endpoint, not in older code.

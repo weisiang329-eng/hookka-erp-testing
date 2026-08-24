@@ -34,6 +34,16 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-24-164 — the repricer had no scope but status, so "July and August" meant the whole book `pricing` `sales-orders` 🟢
+
+🟢 Fixed. `/recompute-so-sofa-prices` filtered on status and nothing else. Asked to backfill July and August it would have rewritten **every order in the book** — 1,231 orders live on 2026-08-24, against the ~500 the owner had actually decided on, including other customers and other months.
+
+Added `?from=` / `?to=` (compared on the order's OWN date — `companySODate` falling back to `created_at`, the same value the pricing resolves as of), `?customerIds=`, and an exclusion for orders whose invoice is already `PAID` / `PARTIAL_PAID`. The paid exclusion is the owner's ruling (「把还没paid的都补」) and is the DEFAULT: an order whose invoice is settled is money paid against a document the customer holds, so repricing it makes the invoice disagree with the payment. It takes an explicit `?includePaid=true`.
+
+A malformed date is a 400, not a silent full-scope run — ignoring `?from=2026-7-1` would rewrite the whole book while the caller believed it was scoped to July.
+
+Every response now echoes `appliedScope` (statuses, from, to, customerIds, includePaid, paidOrdersExcluded), including the empty-scope early return: "0 orders" and "0 orders matching a filter you did not mean" are otherwise indistinguishable. Regression: `tests/repricer-scope-filters.test.mjs`.
+
 ## BUG-2026-08-24-163 — the repricer's dry run counted unchanged lines as changes `pricing` `data-integrity` 🟢
 
 🟢 Fixed. The change test was `p.newLineRM !== p.oldLineRM` — a comparison of MONEY IN FLOATS, against the repo's standing rule that money is integer sen. Both fields are `sen / 100`, so a line whose price did not move could still read as moved: 103263 sen is RM 1032.63, and the recomputed path returns `1032.6299999999999`.

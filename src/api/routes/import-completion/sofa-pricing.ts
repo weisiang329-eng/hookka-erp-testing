@@ -1265,23 +1265,31 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   // 1032.6299999999999, which !== 1032.63. The write already rounds back to
   // sen, so the money was never wrong — but the DRY RUN was, and the dry run
   // is what a person approves. (Repo rule: money is integer sen.)
-  // A combo residual exists to make a matched SET total the agreed price. It
-  // must never turn one line into a different order of magnitude — on
-  // 2026-08-24 it put RM 8,258 on a 5536-CNR whose list price is RM 900 (master
-  // 900, customer 900, no history: every source agreed, and the plan still said
-  // 8,258). One line, silently, on an order that already exists.
+  // ORDER-OF-MAGNITUDE GUARD, measured against the price the order is
+  // CARRYING — not against the price list.
   //
-  // So: a line whose post-combo base leaves its own list price by more than
-  // 3x is REPORTED, not written. A real combo discount moves a line DOWN or
-  // slightly up as the residual lands; it does not multiply it.
-  const RESIDUAL_SANITY_MULTIPLE = 3;
+  // The first version of this compared the computed price to the list price,
+  // and it did not fire on the case that motivated it: SO-2608-234's 5536-CNR
+  // was going to be rewritten RM 900 -> RM 8,258, and the list agreed with
+  // 8,258. The master price row effective 2026-07-18 holds 825800 sen where
+  // its neighbours hold 82500 — one digit too many, typed into the price list
+  // itself. A guard that trusts the list cannot catch a bad list.
+  //
+  // So the comparison is against what the order says today. A repricing pass
+  // may move a line by a discount or a surcharge; it does not multiply it by
+  // nine. Either direction — a collapse is as suspect as a jump.
+  const OUTLIER_MULTIPLE = 3;
   for (const p of plans) {
-    if (p.skipReason || p.newBaseRM == null || !p.listBaseRM) continue;
-    const ratio = p.newBaseRM / p.listBaseRM;
-    if (ratio > RESIDUAL_SANITY_MULTIPLE || ratio < 1 / RESIDUAL_SANITY_MULTIPLE) {
+    if (p.skipReason || p.newBaseRM == null) continue;
+    // A line that was free, or is becoming free, is a different question —
+    // leave those to the service-order and zero-price rules.
+    if (!p.oldBaseRM || !p.newBaseRM) continue;
+    const ratio = p.newBaseRM / p.oldBaseRM;
+    if (ratio > OUTLIER_MULTIPLE || ratio < 1 / OUTLIER_MULTIPLE) {
       p.skipReason =
-        `combo residual outlier — list ${p.listBaseRM.toFixed(2)}, ` +
-        `computed ${p.newBaseRM.toFixed(2)} (${ratio.toFixed(1)}x); needs review`;
+        `price moved ${ratio.toFixed(1)}x (RM ${p.oldBaseRM.toFixed(2)} -> ` +
+        `RM ${p.newBaseRM.toFixed(2)}) — check the price list for this SKU, ` +
+        `not the order`;
       p.newBaseRM = null;
       p.newUnitRM = null;
       p.newLineRM = null;

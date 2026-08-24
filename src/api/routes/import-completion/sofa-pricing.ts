@@ -757,9 +757,67 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     )
     .bind(...statusFilter)
     .all<SoRow>();
-  const sos = soRes.results ?? [];
+  let sos = soRes.results ?? [];
+
+  // ---- Scope filters (2026-08-24) -------------------------------------
+  //
+  // Status alone was the only knob, so a run aimed at "July and August"
+  // rewrote every order in the book. These narrow it to the set a person
+  // actually decided on, and every one of them is REPORTED back in the
+  // response so the scope that ran is never a guess.
+  //
+  // Dates are compared on the order's OWN date (companySODate, falling back
+  // to created_at) — the same value the pricing resolves as of.
+  const fromDate = (c.req.query("from") || "").trim();
+  const toDate = (c.req.query("to") || "").trim();
+  for (const [label, v] of [["from", fromDate], ["to", toDate]] as const) {
+    if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      return c.json({ success: false, error: `${label} must be YYYY-MM-DD` }, 400);
+    }
+  }
+  const soDateOf = (so: SoRow) =>
+    String(so.companySODate || so.createdAt || "").slice(0, 10);
+  if (fromDate) sos = sos.filter((so) => soDateOf(so) >= fromDate);
+  if (toDate) sos = sos.filter((so) => soDateOf(so) <= toDate);
+
+  const customerIds = (c.req.query("customerIds") || "")
+    .split(",").map((x) => x.trim()).filter(Boolean);
+  if (customerIds.length > 0) {
+    const want = new Set(customerIds);
+    sos = sos.filter((so) => so.customerId && want.has(so.customerId));
+  }
+
+  // An order whose invoice is already PAID (or part-paid) is money the
+  // customer has settled against a document they hold. Repricing it makes the
+  // invoice disagree with the payment, so it is excluded by default and can
+  // only be included deliberately. Owner 2026-08-24: 「把还没paid的都补」.
+  const includePaid = c.req.query("includePaid") === "true";
+  let paidExcluded = 0;
+  if (!includePaid && sos.length > 0) {
+    const paidRes = await db
+      .prepare(
+        `SELECT DISTINCT salesOrderId AS soId
+           FROM invoices
+          WHERE status IN ('PAID','PARTIAL_PAID')
+            AND salesOrderId IS NOT NULL`,
+      )
+      .all<{ soId: string }>();
+    const paid = new Set((paidRes.results ?? []).map((r) => r.soId));
+    const before = sos.length;
+    sos = sos.filter((so) => !paid.has(so.id));
+    paidExcluded = before - sos.length;
+  }
+
+  const appliedScope = {
+    statuses: statusFilter,
+    from: fromDate || null,
+    to: toDate || null,
+    customerIds: customerIds.length ? customerIds : null,
+    includePaid,
+    paidOrdersExcluded: paidExcluded,
+  };
   if (sos.length === 0) {
-    return c.json({ success: true, dryRun, scope: statusFilter, soCount: 0 });
+    return c.json({ success: true, dryRun, scope: statusFilter, appliedScope, soCount: 0 });
   }
   const soIds = sos.map(s => s.id);
   const soById = new Map(sos.map(s => [s.id, s] as const));
@@ -1210,7 +1268,7 @@ app.post("/recompute-so-sofa-prices", async (c) => {
 
   if (dryRun) {
     return c.json({
-      success: true, dryRun: true, scope: statusFilter, summary,
+      success: true, dryRun: true, scope: statusFilter, appliedScope, summary,
       sampleChanges: willChange.slice(0, 10).map(p => ({
         so: p.companySOId, cust: p.customerName, status: p.status,
         product: p.productCode, sz: p.sizeCode, fab: p.fabricCode, tier: p.fabricTier,
@@ -1279,7 +1337,7 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   }
 
   return c.json({
-    success: true, dryRun: false, scope: statusFilter, summary,
+    success: true, dryRun: false, scope: statusFilter, appliedScope, summary,
     itemsUpdated, sosUpdated,
   });
 });

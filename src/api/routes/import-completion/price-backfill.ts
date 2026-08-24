@@ -28,12 +28,19 @@ import { getOrgId } from "../../lib/tenant";
 import { calculateUnitPrice, calculateLineTotalWithDiscount } from "../../../lib/pricing";
 import { loadSpecialsConfig, loadHeightsConfig } from "../../lib/specials-config";
 import { resolveHeightPriceSen } from "../../../lib/height-surcharge";
-import { resolveSpecialOrderPriceSen } from "../../../lib/special-order-surcharge";
+import {
+  resolveSpecialOrderPriceSen,
+  parseSpecialOrderTokens,
+} from "../../../lib/special-order-surcharge";
+import { specialOrderOptions } from "../../../lib/pricing-options";
 import { resolveTotalHeightPriceSen } from "../../../lib/total-height-surcharge";
 
 const app = new Hono<Env>();
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Option names the pricer can actually price. See the confidence note below. */
+const KNOWN_SPECIAL_NAMES = new Set(specialOrderOptions.map((o) => o.name));
 
 type ScopeQuery = {
   from: string;
@@ -244,15 +251,20 @@ app.post("/refresh-so-surcharges", async (c) => {
       },
       specials,
     );
-    const specialTokens = String(it.specialOrder ?? "")
-      .split(/[,+]/)
-      .map((t) => t.trim())
-      .filter(Boolean);
+    // Use the CANONICAL tokenizer, not a second copy of it. The first version
+    // here split on /[,+]/ while the real one splits on /[;,]/ and drops
+    // `OTHER: …` free-text notes — so 28 lines whose specials were perfectly
+    // well known got filed as "not priced by the list" and left untouched.
+    // Writing the parser twice is the same mistake that put six copies of a
+    // dropped surcharge term in this repo.
+    //
+    // "Known" means the STATIC catalog names it: `priceOfSen` returns 0 for a
+    // name absent from `specialOrderOptions` no matter what the config says,
+    // so config membership alone is not enough to be confident.
+    const specialTokens = parseSpecialOrderTokens(it.specialOrder as string | null);
     const specialConfident =
       specialTokens.length === 0 ||
-      specialTokens.every((t) =>
-        (specials ?? []).some((e) => e && e.value === t),
-      );
+      specialTokens.every((t) => KNOWN_SPECIAL_NAMES.has(t));
     const totalHeight = resolveTotalHeightPriceSen(
       undefined,
       it.gapInches as number | string | null,

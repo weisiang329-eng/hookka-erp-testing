@@ -34,6 +34,31 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-27-001 — every JV action in the row menu was dead: the context menu called `action({})`, so Post hit `PUT /journals/undefined` `ui-frontend` `accounting` 🟢
+
+- **Symptom (owner, 2026-08-27)**: 「每次 JV 都会 merge 不上」— posting the July
+  salary JV (JE-2608-0001, RM 35,370.50) from the Journal Entries row menu
+  toasted "Journal entry not found" every time; the entry stayed DRAFT.
+  Reproduced live: the click sends `PUT /api/accounting/journals/undefined`
+  (captured in the network log) — the backend honestly 404s an id that
+  literally is the string carrier of `undefined`.
+- **Root cause** (`src/components/ui/data-grid.tsx` `resolvedCtxItems`): the
+  context menu invokes `item.action({})` on both the click and keyboard paths,
+  relying on actions arriving PRE-BOUND to their row. The ARRAY form of
+  `contextMenuItems` was wrapped (`action: () => item.action(ctxMenu.row)`);
+  the **FUNCTION form's items passed through raw**, so any action that read
+  its argument — JournalsTab's `(r) => handlePost(r.id)`, plus its Delete /
+  Void / Unvoid / Duplicate / Print-voucher — received `{}`. Every page using
+  the function form had arg-reading menu actions silently dead; closure-style
+  actions (`() => doX(row.id)`) kept working, which is why the breakage looked
+  page-specific.
+- **Fix**: one binder for BOTH forms — pure `bindContextMenuRow` in
+  `src/lib/context-menu-bind.ts`, used by `resolvedCtxItems` for the function
+  and array branches alike. Grid-level, so all ~24 grids heal at once.
+- **Verify**: `tests/data-grid-context-menu-row.test.mjs` (3) pins the arg
+  reaches the action, fields survive, closures unchanged; typecheck clean;
+  live re-test after deploy = owner posts the July JV.
+
 ## BUG-2026-08-21-160 — a dropdown on the Inventory screen re-routes money between P&L accounts, and left no record that it had `accounting` `audit-logging` `data-integrity` 🟢
 
 > Found while answering what looked like a filing question — 「12 笔 B.FILLER 海绵要不要也并进 S.FILLER」 — and turned out to be an accounting one.

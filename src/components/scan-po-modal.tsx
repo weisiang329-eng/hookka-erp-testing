@@ -53,30 +53,9 @@ async function enqueuePoBatch(
 // + each result becomes reviewable the moment it lands.
 const QUEUE_BATCH_THRESHOLD = 0;
 
-// How often the modal asks whether the batch has finished.
-//
-// This is DEAD TIME, not work: a scan that completed at t+12.0s was displayed
-// at t+15.0s because the next poll had not come round yet. Measured on prod
-// 2026-08-26, a customer PO averages 12.4s of actual extraction (p90 16.6s),
-// so a flat 5s poll was adding up to 5s — 40% — of pure waiting to a scan
-// that had already finished.
-//
-// So: poll FAST while a result is plausibly imminent, then back off. The
-// early polls are cheap (the batch endpoint is a single indexed read) and
-// they are the ones that matter; a batch still running after two minutes is
-// not one the operator is watching second by second.
-const QUEUE_POLL_SCHEDULE_MS = [
-  // first 30s — a single-document scan lands in here
-  ...Array<number>(20).fill(1500),
-  // 30s–2min — multi-document batches
-  ...Array<number>(30).fill(3000),
-];
-const QUEUE_POLL_TAIL_MS = 5000;
-
-/** Delay before poll number `n` (0-based). Ramps 1.5s → 3s → 5s. */
-function queuePollDelayMs(n: number): number {
-  return QUEUE_POLL_SCHEDULE_MS[n] ?? QUEUE_POLL_TAIL_MS;
-}
+// Polling interval for the in-modal /api/scan-queue/batch/:batchId polling
+// loop. Matches the legacy /scan-queue/:batchId page.
+const QUEUE_POLL_MS = 5000;
 
 // Minimal queue-row shape that the modal reads back. The kind=po rawJson
 // from the engine is `{ pos: ExtractedPO[] }`; we hydrate per-PO cards
@@ -1457,22 +1436,13 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       its.length > 0 &&
       its.every((it) => ["done", "cached", "failed"].includes(it.status));
     if (allTerminal(queueItems)) return;
-    // A self-rescheduling timeout rather than setInterval: the delay changes
-    // as the batch ages, and an interval cannot vary its own period.
-    let poll = 0;
-    let timer = 0;
-    const schedule = () => {
-      timer = window.setTimeout(() => {
-        if (cancelled) return;
-        void tick();
-        poll += 1;
-        schedule();
-      }, queuePollDelayMs(poll));
-    };
-    schedule();
+    // eslint-disable-next-line no-restricted-syntax -- polling loop, stops on terminal status
+    const id = window.setInterval(() => {
+      void tick();
+    }, QUEUE_POLL_MS);
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
+      window.clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, activeBatchId]);

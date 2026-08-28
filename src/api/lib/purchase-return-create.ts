@@ -13,6 +13,7 @@ import {
   ledgerHasSource,
   type LedgerEntryInput,
 } from "./journal-hash";
+import { roundUnitPriceSen } from "../../lib/unit-price";
 
 export type PRCreateItem = {
   purchaseInvoiceItemId?: string;
@@ -261,7 +262,7 @@ export async function applyPurchaseReturnStockOut(
     // Residual (stock drifted below the return qty) — ledger-only, no batch
     // mutation, valued at the return's own unit cost. Mirrors stock-adjustments.
     if (still > 0) {
-      const unit = Math.round(Number(it.unit_cost_sen ?? it.unitCostSen ?? 0));
+      const unit = roundUnitPriceSen(Number(it.unit_cost_sen ?? it.unitCostSen ?? 0));
       plan.push({ batchId: "", qty: still, unitCostSen: unit, totalCostSen: Math.round(still * unit) });
     }
 
@@ -483,7 +484,7 @@ export async function createPurchaseReturn(
   for (const it of input.items) {
     const qty = Number(it.quantity ?? 0);
     if (!Number.isFinite(qty) || qty <= 0) continue; // skip zero/blank lines
-    const unit = Math.round(Number(it.unitCostSen ?? 0));
+    const unit = roundUnitPriceSen(Number(it.unitCostSen ?? 0));
     await db
       .prepare(
         `INSERT INTO purchase_return_items

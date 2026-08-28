@@ -79,6 +79,38 @@ Entries themselves stay newest-first.
 - **Class**: fix-the-instance-miss-the-twins (`docs/BUG-CLASSES.md`), compounded
   by a runtime-only schema path whose application nobody could observe.
 
+### Second pass, same day — the price has to survive the whole chain
+
+Owner, after the first fix landed: 「只要任何有需要的地方都需要支持」.
+
+He is right that stopping at the purchase invoice is its own reconciliation
+error. RM 0.055 × 600 **received** at RM 0.06 values the batch at RM 36.00
+against a supplier invoice of RM 33.00, and the RM 3.00 then sits in stock and
+afterwards in cost of sales. So the rate list grew from 3 columns to **14**,
+following the money: supplier price list → price history → PO → GRN → PI →
+`rm_batches` → `cost_ledger` / opening stock / adjustments / returns / R&D
+issuances / FG batches.
+
+Three more code sites, all of them rounding a RATE:
+
+- `accounting.ts` derived a receipt's unit cost as `Math.round(lineSen / qty)`
+  — 3300 / 600 = 5.5 became 6, which is the RM 36-vs-33 case exactly.
+- `purchase-return-create.ts` rounded the residual unit cost in **two** places.
+- **`sku-form-dialog.tsx` — the supplier price list, where the number is
+  TYPED.** It rounded twice: `step="0.01"` refused the keystroke, and
+  `moneyFieldToSen` (correct for an amount) rounded whatever survived. This is
+  the SOURCE every PO, GRN and PI copies from, so it was the highest-leverage
+  site of all and was not in the first pass.
+
+`unitPriceFieldToSen` now sits beside `moneyFieldToSen` in `money-field.ts` so
+the rate/amount distinction is visible at the call site rather than remembered.
+
+**The sales side is deliberately untouched**, and the tests say so: the owner's
+own ruling is that a computed sales unit price lands on a whole ringgit
+(「我全套系统都要整除的」, 2026-08-07). Furniture is priced in hundreds; no
+sub-cent case exists there, and widening those columns would contradict a live
+ruling to buy nothing.
+
 ## BUG-2026-08-27-001 — every JV action in the row menu was dead: the context menu called `action({})`, so Post hit `PUT /journals/undefined` `ui-frontend` `accounting` 🟢
 
 - **Symptom (owner, 2026-08-27)**: 「每次 JV 都会 merge 不上」— posting the July

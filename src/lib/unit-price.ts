@@ -86,11 +86,51 @@ export function formatUnitPriceInput(sen: number): string {
 /** Decimal places kept on a stored unit price: four of ringgit, two of sen. */
 export const UNIT_PRICE_DECIMALS = 4;
 
-/** Every column that holds a unit price as a RATE rather than an amount. */
+/**
+ * Every column that holds a unit price or unit COST as a RATE.
+ *
+ * The test for membership is one question: **is this number multiplied by a
+ * quantity?** If yes it is a rate and rounding it multiplies the error by that
+ * quantity. If it is a sum that changes hands — a line total, a document total,
+ * a landed cost, a payment — it stays whole sen and is NOT listed here.
+ *
+ * The list follows the supplier's price all the way through, because stopping
+ * halfway is its own reconciliation error. RM 0.055 x 600 received at RM 0.06
+ * values the batch at RM 36.00 against a supplier invoice of RM 33.00, and the
+ * RM 3.00 sits in stock and then in cost of sales:
+ *
+ *   supplier price list  supplier_material_bindings / supplier_materials
+ *          ↓             price_histories (the trail of that price)
+ *   PO → GRN → PI        purchase_order_items / grn_items / purchase_invoice_items
+ *          ↓
+ *   stock valuation      rm_batches / cost_ledger / material_opening_stock
+ *          ↓             stock_adjustments / purchase_return_items
+ *   cost of sales        rd_material_issuances / fg_batches
+ *
+ * The SALES side is deliberately absent. The owner's standing ruling is that a
+ * computed sales unit price lands on a whole ringgit (「我全套系统都要整除的」,
+ * 2026-08-07, `roundUpToWholeRinggit`) — furniture is priced in hundreds and no
+ * sub-cent case exists there. Widening those columns would contradict a live
+ * ruling to buy nothing.
+ */
 export const UNIT_PRICE_COLUMNS: ReadonlyArray<{ table: string; column: string }> = [
-  { table: "purchase_invoice_items", column: "unit_price_sen" },
+  // What the supplier quotes.
+  { table: "supplier_material_bindings", column: "unit_price" },
+  { table: "supplier_materials", column: "unit_price_sen" },
+  { table: "price_histories", column: "old_price" },
+  { table: "price_histories", column: "new_price" },
+  // What we order, receive and are billed.
   { table: "purchase_order_items", column: "unit_price_sen" },
   { table: "grn_items", column: "unit_price" },
+  { table: "purchase_invoice_items", column: "unit_price_sen" },
+  // What the stock is then worth, and what it costs when it is consumed.
+  { table: "rm_batches", column: "unit_cost_sen" },
+  { table: "cost_ledger", column: "unit_cost_sen" },
+  { table: "material_opening_stock", column: "unit_cost_sen" },
+  { table: "stock_adjustments", column: "unit_cost_sen" },
+  { table: "purchase_return_items", column: "unit_cost_sen" },
+  { table: "rd_material_issuances", column: "unit_cost_sen" },
+  { table: "fg_batches", column: "unit_cost_sen" },
 ];
 
 /**

@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
+import { roundUnitPriceSen } from "../../lib/unit-price";
 import type { Env } from "../worker";
 import { requirePermission, requireFinance } from "../lib/rbac";
 import { monthsOverdue, nextMonthDueDate } from "../../lib/terms";
@@ -6580,7 +6581,15 @@ async function loadMaterialCostData(
     const grnLink = grnRaw == null || String(grnRaw).trim() === "" ? null : String(grnRaw).trim();
     const qty = Number(r.qty) || 0;
     if (!grnLink && qty > 0) {
-      pushEvent(rmId, { kind: "receipt", date, qty, unitCostSen: Math.round(lineSen / qty) });
+      // A rate, derived by division: 3300 sen / 600 pcs is 5.5 sen, and
+      // Math.round made it 6 — valuing the receipt at RM 36 against a
+      // supplier invoice of RM 33.
+      pushEvent(rmId, {
+        kind: "receipt",
+        date,
+        qty,
+        unitCostSen: roundUnitPriceSen(lineSen / qty),
+      });
     }
   }
 

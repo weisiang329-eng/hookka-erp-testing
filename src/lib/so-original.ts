@@ -44,6 +44,53 @@ export function originalSourceForRow(row: OriginalSourceRow): OriginalSource | n
   return null;
 }
 
+
+// ---------------------------------------------------------------------------
+// One PDF, one download — however many orders come out of it.
+//
+// A scanned PDF can hold several customer POs, and the create loop calls
+// `persistSoOriginal` once per SO. Each call fetched
+// `/api/scan-queue/:id/bytes` for itself, so eight POs on one scan meant EIGHT
+// parallel downloads of the same multi-megabyte file. Some lost: the failures
+// are caught and reported per-PO, and because they happen on the BYTES fetch —
+// not the upload — nothing reaches the server's error log either. The
+// signature on prod (2026-08-26) was a batch of eight Carress orders where the
+// first three kept their original and the last five did not.
+//
+// The cache is passed IN, not held in this module, so it lives exactly as long
+// as one create pass. A module-level Map would outlive the scan it belongs to,
+// and a row re-fetched later in the same page would get the earlier answer —
+// which is how the existing "empty source bytes" test caught the first
+// attempt at this.
+//
+// It holds the in-flight PROMISE, so calls arriving while the first download
+// is still running wait for it instead of starting their own.
+// ---------------------------------------------------------------------------
+export type QueueBytesCache = Map<string, Promise<Blob>>;
+
+/** A cache for ONE create pass. Make it where the pass starts; drop it after. */
+export function newQueueBytesCache(): QueueBytesCache {
+  return new Map();
+}
+
+function queueBytes(rowId: string, cache?: QueueBytesCache): Promise<Blob> {
+  const hit = cache?.get(rowId);
+  if (hit) return hit;
+  const p = (async () => {
+    const res = await fetch(`/api/scan-queue/${encodeURIComponent(rowId)}/bytes`);
+    if (!res.ok) throw new Error(`source bytes HTTP ${res.status}`);
+    const b = await res.blob();
+    // An empty body is a failure, not an answer — never let it be reused.
+    if (!b.size) throw new Error("source bytes empty");
+    return b;
+  })();
+  if (cache) {
+    cache.set(rowId, p);
+    void p.catch(() => cache.delete(rowId));
+  }
+  return p;
+}
+
 /**
  * Copy the source scan into a durable `/api/files` attachment keyed to the SO
  * (owner 2026-07-15: every SO must keep its original PO on record). That is the
@@ -56,6 +103,8 @@ export async function persistSoOriginal(
   soId: string,
   source: OriginalSource | null,
   poNo: string | null,
+  /** Share one across a create pass so a multi-PO scan downloads once. */
+  cache?: QueueBytesCache,
 ): Promise<{ ok: boolean; poNo: string }> {
   const label = poNo || soId;
   try {
@@ -64,11 +113,7 @@ export async function persistSoOriginal(
     if (source.kind === "file") {
       blob = source.file;
     } else {
-      const bres = await fetch(
-        `/api/scan-queue/${encodeURIComponent(source.rowId)}/bytes`,
-      );
-      if (!bres.ok) throw new Error(`source bytes HTTP ${bres.status}`);
-      blob = await bres.blob();
+      blob = await queueBytes(source.rowId, cache);
     }
     if (!blob.size) throw new Error("source bytes empty");
     const type = blob.type || "application/pdf";

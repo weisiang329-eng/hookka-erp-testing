@@ -8,7 +8,11 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { parsePOText, mapDeliveryHub, type ParsedPO, type POParseResult } from "@/lib/po-parser";
-import { persistSoOriginal, originalSourceForRow } from "@/lib/so-original";
+import {
+  persistSoOriginal,
+  originalSourceForRow,
+  newQueueBytesCache,
+} from "@/lib/so-original";
 import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles, Star, Plus, Trash2 } from "lucide-react";
 import { ReusedScanBadge, CachedScanNotice } from "@/components/scan-cached-hint";
 import { postScanQueueConsume } from "@/lib/scan-queue-client";
@@ -919,6 +923,9 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     // Source-attachment uploads (fired during the create loop). Awaited before
     // the consume loop below, which nulls the scan_queue bytes they read.
     const originalUploads: Promise<{ ok: boolean; poNo: string }>[] = [];
+    // One download per scanned PDF for this whole create pass. Several POs can
+    // come off one scan, and each used to pull the same file down again.
+    const originalBytes = newQueueBytesCache();
 
     // --- Claude-extracted rows ----------------------------------------
     for (const row of selectedClaude) {
@@ -1159,6 +1166,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
                 data.data.id,
                 originalSourceForRow(row),
                 po.customerPO,
+                originalBytes,
               ),
             );
           }

@@ -135,3 +135,15 @@ test('the row cap is REPORTED, never silent', () => {
   assert.match(block, /truncated,/, 'the flag must reach the response');
   assert.match(block, /narrow with \?since=YYYY-MM-DD/, 'and say what to do about it');
 });
+
+test('service orders are not listed — they have no original by design', () => {
+  // A service order is COPIED from an existing order, never scanned from a
+  // customer PO. Listing them made 7 of 18 rows false alarms on 2026-08-26,
+  // and a report that cries wolf daily is one nobody reads on the day it is
+  // right.
+  const block = SO.slice(
+    SO.indexOf('app.get("/missing-original"'),
+    SO.indexOf('app.get("/late-to-customer"'),
+  );
+  assert.match(block, /so\.isServiceOrder IS NULL OR so\.isServiceOrder = FALSE/);
+});

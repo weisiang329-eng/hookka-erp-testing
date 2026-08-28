@@ -1212,6 +1212,11 @@ app.get("/missing-original", async (c) => {
             AND fa.resourceType = 'SO'
             AND fa.orgId = ?
      WHERE (so.orgId = ? OR so.orgId IS NULL)
+       -- A SERVICE ORDER is copied from an existing order, not scanned from a
+       -- customer's PO, so it has no original to be missing. Listing them made
+       -- 7 of the 18 rows on 2026-08-26 false alarms — and a report that cries
+       -- wolf every day is one nobody reads on the day it is right.
+       AND (so.isServiceOrder IS NULL OR so.isServiceOrder = FALSE)
        AND fa.id IS NULL`;
   if (since) {
     sql += " AND so.createdAt >= ?";

@@ -17,20 +17,67 @@ export function cn(...inputs: ClassValue[]) {
 
 // Per-currency cache — constructing Intl.NumberFormat per money cell was a
 // chunk of grid render cost. Almost every call is MYR, so this is effectively
-// one cached formatter. Output byte-identical. (2026-06-04 perf pass.)
+// one cached formatter. (2026-06-04 perf pass.)
+//
+// TWO formatters per currency, not one (2026-08-15). Malaysian trade prices
+// hardware by the piece at sub-cent rates — a supplier invoice for nail legs
+// reads "600 PCS @ 0.05500 = 33.00". Rendered at a fixed 2 decimals that unit
+// price becomes RM0.06, and 600 × RM0.06 is RM36.00: RM3 of invented cost on
+// one line, with nothing on screen looking wrong.
+//
+// So: 2 decimals is the FLOOR, 4 is the ceiling, and digits 3 and 4 appear only
+// when the value actually carries them. RM33 still renders "RM33.00" — the
+// common case is untouched, which is why this is safe to apply everywhere.
 const CURRENCY_FMTS = new Map<string, Intl.NumberFormat>();
-export function formatCurrency(sen: number, currency = "MYR"): string {
-  const amount = sen / 100;
-  let fmt = CURRENCY_FMTS.get(currency);
+const CURRENCY_FMTS_4DP = new Map<string, Intl.NumberFormat>();
+
+function currencyFmt(
+  cache: Map<string, Intl.NumberFormat>,
+  currency: string,
+  maximumFractionDigits: number,
+): Intl.NumberFormat {
+  let fmt = cache.get(currency);
   if (!fmt) {
     fmt = new Intl.NumberFormat("en-MY", {
       style: "currency",
       currency,
       minimumFractionDigits: 2,
+      maximumFractionDigits,
     });
-    CURRENCY_FMTS.set(currency, fmt);
+    cache.set(currency, fmt);
   }
+  return fmt;
+}
+
+export function formatCurrency(sen: number, currency = "MYR"): string {
+  const amount = sen / 100;
+  // Whole sen — the overwhelming majority — takes the 2dp formatter unchanged.
+  // Number.isInteger on the sen value is the exact test: it is true precisely
+  // when the amount needs no third or fourth digit. Guard against NaN/Infinity
+  // reaching Intl with a different shape than before by treating any
+  // non-finite input as the 2dp path, exactly as it was handled previously.
+  const needsExtra = Number.isFinite(sen) && !Number.isInteger(sen);
+  const fmt = needsExtra
+    ? currencyFmt(CURRENCY_FMTS_4DP, currency, 4)
+    : currencyFmt(CURRENCY_FMTS, currency, 2);
   return fmt.format(amount);
+}
+
+/**
+ * An RM amount as plain text for an input field — no "RM" prefix, no grouping
+ * separators (a `type="number"` input rejects those).
+ *
+ * Same rule as formatCurrency: 2 decimals always, the third and fourth only
+ * when the value carries them. 25.5 → "25.50"; 0.055 → "0.055"; 0.0035 →
+ * "0.0035". Trailing zeros beyond the second decimal are dropped so a plain
+ * price never grows spurious digits.
+ */
+export function formatMoneyText(rm: number): string {
+  if (!Number.isFinite(rm)) return "";
+  const fixed = rm.toFixed(4);
+  // Trim only the zeros in positions 3-4, never the mandatory first two.
+  const trimmed = fixed.replace(/(\.\d{2}\d*?)0+$/, "$1");
+  return trimmed;
 }
 
 // Hoisted once at module load. Constructing Intl.NumberFormat is the single

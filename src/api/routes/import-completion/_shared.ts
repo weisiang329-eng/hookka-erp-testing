@@ -1707,12 +1707,23 @@ export type SoiRow = {
   legPriceSen: number;
   specialOrder: string | null;
   specialOrderPriceSen: number;
+  // Part of the unit price on every write path since the height surcharge
+  // shipped — 11 of 11 live lines carrying one have
+  // unitPriceSen = base + leg + divan + special + totalHeight (measured on
+  // prod 2026-08-24). A repricer that omits it silently REMOVES the surcharge.
+  totalHeightPriceSen: number;
+  // Subtracted from the line total, after unit x qty. Zero on every live line
+  // today, which is exactly how an omission like this stays invisible.
+  discountSen: number;
   basePriceSen: number;
   unitPriceSen: number;
   lineTotalSen: number;
 };
 export type SoRow = {
   id: string;
+  // Priced at exactly what the operator typed — 0 means a free repair. Never
+  // repriced; see the filter in sofa-pricing.ts.
+  isServiceOrder?: boolean | number | null;
   companySOId: string | null;
   customerId: string | null;
   customerName: string | null;

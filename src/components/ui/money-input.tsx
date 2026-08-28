@@ -1,5 +1,5 @@
 import * as React from "react";
-import { cn } from "@/lib/utils";
+import { cn, formatMoneyText } from "@/lib/utils";
 import { parseMoneyInput } from "@/lib/parse-money";
 
 export interface MoneyInputProps {
@@ -34,8 +34,16 @@ const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
     const [focused, setFocused] = React.useState(false);
     const [draft, setDraft] = React.useState("");
 
+    // 2 decimals is the floor, 4 the ceiling, and the third and fourth digits
+    // show only when the value actually carries them (2026-08-15). Hardware is
+    // bought by the piece at sub-cent rates — "600 PCS @ 0.05500" — and a fixed
+    // toFixed(2) turned RM0.055 into RM0.06 on the way back out of the field,
+    // which then multiplied out to RM3 of invented cost on a 600-piece line.
+    // RM25.50 still renders "25.50"; only genuinely sub-cent values change.
     const formatted =
-      value === null || value === undefined || Number.isNaN(value) ? "" : value.toFixed(2);
+      value === null || value === undefined || Number.isNaN(value)
+        ? ""
+        : formatMoneyText(value);
 
     // While focused, show the user's raw draft. While blurred, show the formatted value.
     const displayValue = focused ? draft : formatted;
@@ -64,7 +72,10 @@ const MoneyInput = React.forwardRef<HTMLInputElement, MoneyInputProps>(
         id={id}
         type="number"
         inputMode="decimal"
-        step="0.01"
+        // 0.0001, not 0.01 — a `type="number"` input silently refuses to commit
+        // a value finer than its step, so RM0.055 was being rejected by the
+        // field itself before any of our code saw it.
+        step="0.0001"
         disabled={disabled}
         placeholder={placeholder}
         className={cn(

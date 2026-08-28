@@ -27,6 +27,24 @@ OVERHEAD SALARIES / NON-PRODUCTION SALARIES — BY DEPARTMENT），supersede 扩
 上一批（8/11 的 Interest + v8 部门表格）已确认随 8/21 部署上线。
 
 ---
+## 2026-08-28 — 🔵 Fund Transfer 每行加 print 链接（branch `feat/fund-transfer-print-link`，PR 待批）
+
+Owner（贴 Fund Transfer 截图）：「这个 fund transfer 没有办法 print out voucher」。
+实况：`buildFundTransferVoucher` + 批量打印（勾选 → BatchActionsBar「Print / PDF」）早已上线，
+但行上只有 void/delete，没有任何入口提示 → owner 找不到。修 = 行尾加 `print` 链接
+（同 JV 表的行内打印，走同一个 `printVoucher`/`print-voucher.ts` 渲染器），一行改动。
+本地已验：4 行都出链接，点击生成完整 FUND TRANSFER VOUCHER（抬头/单号/户口/金额/大写/签名栏）。
+**待办**：owner 用 weisiang329-eng approve 本 PR（连同 #378、#362 一起批）→ 部署后在 prod 点一次 print 验证。
+## 2026-08-27 — 🔵 JV 行菜单全灭（Post 打 /journals/undefined）· BUG-2026-08-27-001 · PR 待合
+
+Owner:「每次 JV 都会 merge 不上」（JE-2608-0001 七月薪水 35,370.50 过不了账，
+toast「Journal entry not found」）。实测抓包：`PUT /api/accounting/journals/undefined`。
+根因=DataGrid context menu 统一用 `item.action({})` 调用，数组形式有绑行、
+**函数形式没绑** → 所有读参数的菜单动作拿到 `{}`（JournalsTab 的
+Post/Delete/Void/Duplicate 全死）。修=纯函数 `bindContextMenuRow`
+（src/lib/context-menu-bind.ts，3 测）两种形式统一绑，组件级一次修全站 ~24 张表。
+**待办**：owner 合并 PR → 部署后 owner 重按 Post 验证七月 JV 过账。
+（另：PR #362 非生产部门 forecast 仍挂着等 owner；main 保护规则未关。）
 
 ## 2026-08-14 — 🔵 Four owner-decided report/metric items (branch `fix/on-time-delivery-and-decisions`, **NOT deployed, NOT merged**)
 

@@ -112,6 +112,50 @@ Hand-typed purchase orders are deliberately out of scope: no scan means no
 evidence, and the only record of the true price is the supplier's paper. The
 report counts them rather than guessing.
 
+### Fourth pass — the ledger the repair left behind
+
+**Measured on prod immediately after the repair ran:** five CONFIRMED invoices
+whose face had moved while the GL still carried the old amount, with individual
+gaps up to RM 40.00. They were the ONLY `pi_gl_mismatch` rows in the entire
+system, so the repair had created all five.
+
+The cause is a blind spot with a specific shape. `PUT /purchase-invoices/:id`
+already posts a correcting double-entry when an edit moves a CONFIRMED invoice's
+amount — but it fires on `recomputedAmount !== existing.amountSen`, so it is
+blind to a repair that writes the LINES directly: by the time that repair
+finishes, the header already agrees with the lines and no delta is left to
+detect.
+
+The repair endpoint's own response had SAID this would happen ("Ledger legs are
+NOT rewritten here"). **An accurate warning nobody acts on still leaves the books
+wrong**, which is the whole thing being chased — 「account 怎么能对账呢」.
+
+Fix = `POST /purchase-invoices/:id/resync-gl`, built on `loadPiLedgerNet` +
+`buildPiDeltaLegs` — the pair the VOID path already uses. They derive the move
+from WHAT IS ACTUALLY POSTED rather than from a count of button presses, which
+is what makes void → unvoid → void safe; targeting the invoice's current face
+instead of zero is the same primitive with one argument changed, so idempotence
+falls out of the arithmetic instead of a flag. Legs carry
+`purchase_invoice_restate_post`, deliberately reusing an existing suffix in
+`doc-date.ts` so the correction dates to the INVOICE — inventing a sourceType is
+a two-file change and forgetting the second file is silent (class C5, three
+instances). Refused on anything but CONFIRMED-and-unpaid, and refused outright
+on an invoice that was never posted (that is `/backfill-gl-postings`' job).
+
+Regression: `tests/pi-resync-gl.test.mjs`.
+
+**And the repair now finishes the job itself.** Leaving the re-sync as a
+sentence in the response is what produced the five mismatches in the first
+place, so `repair-rounded-unit-prices` SELF-CALLS
+`POST /purchase-invoices/:id/resync-gl` for every invoice it touched — the same
+"call the real path, never copy it" rule the July/August invoice backfill
+settled on, under the CALLER's own session. A DRAFT answers 409 (nothing was
+ever posted) and that counts as success; anything else lands in
+`ledgerFailures` with the response saying plainly that the books are out of
+step. The old test asserted the WARNING TEXT and passed the whole time the
+books were wrong; it now asserts that the ledger actually moves and that no leg
+builder has been copied into the file.
+
 **One row per invoice line — caught on production, in the dry run, before any
 write.** The first live report showed **9 lines, −RM 24.50**. Two supplier
 documents had been scanned TWICE (a retry, a re-upload, the cache path) and each

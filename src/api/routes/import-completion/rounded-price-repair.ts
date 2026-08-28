@@ -457,17 +457,70 @@ app.post("/repair-rounded-unit-prices", async (c) => {
     restated.push({ piId, subtotalSen, taxSen, totalSen });
   }
 
+  // Move each touched invoice's LEDGER to its new face.
+  //
+  // This used to be a sentence in the response saying the caller must do it by
+  // hand. Measured on prod 2026-08-28, minutes after the first real run: five
+  // CONFIRMED invoices with the GL still on the old amount, gaps to RM 40.00,
+  // and they were the ONLY pi_gl_mismatch rows in the system — this endpoint had
+  // created every one of them. **An accurate warning nobody acts on still leaves
+  // the books wrong.**
+  //
+  // The ordinary edit path cannot cover it: its correction fires on
+  // `recomputedAmount !== existing.amountSen`, and by the time the writes above
+  // finish the header already agrees with the lines, so there is no delta left
+  // for it to see.
+  //
+  // So the repair finishes the job itself, by SELF-CALLING the invoice's own
+  // re-sync — the same "call the real path, never copy it" rule the July/August
+  // invoice backfill settled on. It runs under the CALLER'S session: whoever may
+  // correct the ledger by hand is exactly who may do it here. A DRAFT invoice
+  // answers 409 (nothing was ever posted) and that is a success, not a failure.
+  const cookie = c.req.header("cookie") ?? "";
+  const csrf = c.req.header("x-csrf-token") ?? "";
+  const origin = new URL(c.req.url).origin;
+  const ledger: Array<{ piId: string; ok: boolean; status: number; detail: unknown }> = [];
+  for (const piId of touched) {
+    try {
+      const res = await fetch(
+        `${origin}/api/purchase-invoices/${piId}/resync-gl?dryRun=false`,
+        { method: "POST", headers: { cookie, "x-csrf-token": csrf } },
+      );
+      const body = (await res.json().catch(() => null)) as
+        | { data?: unknown; error?: string }
+        | null;
+      ledger.push({
+        piId,
+        // 409 = "nothing was posted for this invoice" (a DRAFT). Correct, not a
+        // failure — but reported either way so it is never inferred.
+        ok: res.ok || res.status === 409,
+        status: res.status,
+        detail: body?.data ?? body?.error ?? null,
+      });
+    } catch (err) {
+      ledger.push({
+        piId,
+        ok: false,
+        status: 0,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  const ledgerFailures = ledger.filter((l) => !l.ok);
+
   return c.json({
     success: true,
     dryRun: false,
     summary: summarise(plan),
     fixed: batch,
     invoicesRestated: restated,
+    ledger,
+    ledgerFailures,
     remaining: Math.max(0, eligible.length - batch.length),
     note:
-      "Ledger legs are NOT rewritten here. Any invoice already posted must be " +
-      "re-posted through its own Edit action so the GL restatement runs on the " +
-      "hash chain — this endpoint reports which ones (invoicesRestated).",
+      ledgerFailures.length === 0
+        ? "Invoice faces and their GL postings both moved."
+        : `${ledgerFailures.length} invoice(s) had their lines corrected but their LEDGER did NOT re-sync — the books are out of step until this is resolved.`,
   });
 });
 

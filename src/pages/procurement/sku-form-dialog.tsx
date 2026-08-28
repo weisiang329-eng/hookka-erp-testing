@@ -8,7 +8,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { X } from "lucide-react";
-import { moneyFieldToSen } from "@/lib/money-field";
+import { unitPriceFieldToSen } from "@/lib/money-field";
+import { formatUnitPriceInput } from "@/lib/unit-price";
 
 export type SupplierSKU = {
   id: string;
@@ -144,7 +145,9 @@ export function SKUFormDialog({
   const [supplierDescription, setSupplierDescription] = useState(
     editData?.supplierDescription || "",
   );
-  const [unitPrice, setUnitPrice] = useState(editData ? String(editData.unitPriceSen / 100) : "");
+  const [unitPrice, setUnitPrice] = useState(
+    editData ? formatUnitPriceInput(editData.unitPriceSen) : "",
+  );
   const [currency] = useState(editData?.currency || "MYR");
   const [leadTimeDays, setLeadTimeDays] = useState(editData?.leadTimeDays || 7);
   const [moq, setMoq] = useState(editData?.moq || 1);
@@ -184,7 +187,9 @@ export function SKUFormDialog({
     // BUG-2026-08-13-095 - one parser. `type="number"` shields this one from
     // the comma, and the refusal below already existed; converted so the guard
     // does not depend on the input type staying numeric.
-    const price = moneyFieldToSen(unitPrice);
+    // A supplier price is a RATE — it is the SOURCE every PO, GRN and PI
+    // copies from, so rounding it here rounds the whole chain.
+    const price = unitPriceFieldToSen(unitPrice);
     if (price === null || price < 0) {
       setFormError("Enter a valid unit price before saving.");
       return;
@@ -378,7 +383,7 @@ export function SKUFormDialog({
               <Input
                 type="number"
                 onFocus={(e) => e.currentTarget.select()}
-                step="0.01"
+                step="0.0001"
                 min="0"
                 value={unitPrice}
                 onChange={(e) => setUnitPrice(e.target.value)}

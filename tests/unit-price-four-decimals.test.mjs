@@ -100,16 +100,82 @@ test('what it renders round-trips back to the same stored rate', () => {
 });
 
 // --- 3. the DB decision ----------------------------------------------------
-test('three columns hold a unit price as a RATE, and only three', () => {
+test('the supplier price is followed all the way to cost of sales', () => {
+  // Owner 2026-08-28: 「只要任何有需要的地方都需要支持」. Stopping at the
+  // purchase invoice is its own reconciliation error — RM 0.055 x 600 received
+  // at RM 0.06 values the batch at RM 36.00 against an invoice of RM 33.00, and
+  // the RM 3.00 then sits in stock and in cost of sales.
   assert.deepEqual(
     UNIT_PRICE_COLUMNS.map((c) => `${c.table}.${c.column}`),
     [
-      'purchase_invoice_items.unit_price_sen',
+      // what the supplier quotes
+      'supplier_material_bindings.unit_price',
+      'supplier_materials.unit_price_sen',
+      'price_histories.old_price',
+      'price_histories.new_price',
+      // what we order, receive, are billed
       'purchase_order_items.unit_price_sen',
       'grn_items.unit_price',
+      'purchase_invoice_items.unit_price_sen',
+      // what the stock is worth, and costs when consumed
+      'rm_batches.unit_cost_sen',
+      'cost_ledger.unit_cost_sen',
+      'material_opening_stock.unit_cost_sen',
+      'stock_adjustments.unit_cost_sen',
+      'purchase_return_items.unit_cost_sen',
+      'rd_material_issuances.unit_cost_sen',
+      'fg_batches.unit_cost_sen',
     ],
   );
   assert.equal(UNIT_PRICE_DECIMALS, 4);
+});
+
+test('every one of them is a real column in the schema snapshot', () => {
+  // A typo here would widen nothing and report ok:false forever, which reads as
+  // "production is broken" rather than "the list is wrong".
+  const schema = JSON.parse(readFileSync('tests/db-schema.json', 'utf8'));
+  for (const { table, column } of UNIT_PRICE_COLUMNS) {
+    assert.ok(schema[table], `table ${table} must exist`);
+    assert.ok(
+      schema[table].includes(column),
+      `${table}.${column} must exist — got ${schema[table].join(', ')}`,
+    );
+  }
+});
+
+test('AMOUNT columns are deliberately absent', () => {
+  // The membership test is "is it multiplied by a quantity". A sum that changes
+  // hands stays whole sen; letting precision leak into these moves the
+  // reconciliation problem rather than fixing it.
+  const listed = new Set(UNIT_PRICE_COLUMNS.map((c) => `${c.table}.${c.column}`));
+  for (const amount of [
+    'rm_batches.total_value_sen',
+    'stock_adjustments.total_cost_sen',
+    'purchase_return_items.line_total_sen',
+    'grns.landed_cost_sen',
+    'grns.shipping_cost_sen',
+    'rd_material_issuances.total_cost_sen',
+  ]) {
+    assert.equal(listed.has(amount), false, `${amount} is an amount, not a rate`);
+  }
+});
+
+test('the SALES side is absent, and that is the owner’s own ruling', () => {
+  // 「我全套系统都要整除的」 (2026-08-07): a computed sales unit price lands on
+  // a WHOLE RINGGIT. Furniture is priced in hundreds and no sub-cent case
+  // exists there, so widening these would contradict a live ruling to buy
+  // nothing. If that ruling ever changes, this test is the place it changes.
+  const listed = new Set(UNIT_PRICE_COLUMNS.map((c) => `${c.table}.${c.column}`));
+  for (const sales of [
+    'sales_order_items.unit_price_sen',
+    'invoice_items.unit_price_sen',
+    'consignment_order_items.unit_price_sen',
+    'products.base_price_sen',
+    'customer_products.base_price_sen',
+    'product_prices.base_price_sen',
+  ]) {
+    assert.equal(listed.has(sales), false, `${sales} follows the whole-ringgit rule`);
+  }
 });
 
 test('an INTEGER column is not ok, and neither is a MISSING one', () => {
@@ -334,4 +400,60 @@ test('the API stores the rate and derives the amount, not the reverse', () => {
   const src = read('src/api/routes/purchase-invoices.ts');
   assert.match(src, /const unitPriceSen = roundUnitPriceSen\(Number\(it\.unitPriceSen\)\);/);
   assert.match(src, /lineTotalSen: computeLineTotalSen\(qty, unitPriceSen\)/);
+});
+
+// --- 7. the SOURCE of the price, and the cost chain below it --------------
+test('the supplier price list itself accepts and stores a sub-cent price', () => {
+  // This screen is where the number is TYPED. It is the source every PO, GRN
+  // and PI copies from, so rounding here rounds the whole chain — and it was
+  // rounding twice: step="0.01" refused the keystroke, and moneyFieldToSen
+  // (correct for an amount) rounded whatever survived.
+  const src = read('src/pages/procurement/sku-form-dialog.tsx');
+  assert.match(src, /step="0\.0001"/);
+  assert.match(src, /const price = unitPriceFieldToSen\(unitPrice\)/);
+  assert.match(src, /formatUnitPriceInput\(editData\.unitPriceSen\)/, 'and it seeds the full price');
+  assert.equal(
+    /moneyFieldToSen\(unitPrice\)/.test(src),
+    false,
+    'the amount parser must not own a rate',
+  );
+});
+
+test('the two form parsers are distinct, and the rate one does not round', () => {
+  const src = read('src/lib/money-field.ts');
+  assert.match(src, /export function unitPriceFieldToSen/);
+  assert.match(src, /return roundUnitPriceSen\(rm \* 100\);/);
+  // moneyFieldToSen must keep rounding — it is the AMOUNT parser and dozens of
+  // salary / journal / payment fields depend on whole sen.
+  assert.match(src, /export function moneyFieldToSen/);
+  assert.match(read('src/lib/parse-money.ts'), /return Math\.round\(rm \* 100\);/);
+});
+
+test('a unit cost derived by DIVISION keeps its fraction', () => {
+  // 3300 sen / 600 pcs is 5.5 sen. Math.round made it 6, valuing the receipt at
+  // RM 36.00 against a supplier invoice of RM 33.00 — the RM 3.00 lands in
+  // stock and then in cost of sales, which is exactly the reconciliation the
+  // owner is chasing.
+  assert.equal(roundUnitPriceSen(3300 / 600), 5.5);
+  const src = read('src/api/routes/accounting.ts');
+  assert.match(src, /unitCostSen: roundUnitPriceSen\(lineSen \/ qty\)/);
+  assert.equal(
+    /unitCostSen: Math\.round\(lineSen \/ qty\)/.test(src),
+    false,
+    'the division must not round to whole sen',
+  );
+});
+
+test('a purchase return values its lines at the full unit cost', () => {
+  const src = read('src/api/lib/purchase-return-create.ts');
+  assert.equal(
+    /const unit = Math\.round\(Number\(it\./.test(src),
+    false,
+    'both residual-cost sites rounded the rate',
+  );
+  const kept = [...src.matchAll(/const unit = roundUnitPriceSen\(/g)];
+  assert.equal(kept.length, 2, 'both sites moved, not just the first');
+  // ...while the line totals they build stay whole sen.
+  assert.match(src, /totalCostSen: Math\.round\(take \* b\.unitCostSen\)/);
+  assert.match(src, /totalCostSen: Math\.round\(still \* unit\)/);
 });

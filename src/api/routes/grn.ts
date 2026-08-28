@@ -49,6 +49,12 @@ function ensureGrnMigrations(db: D1Database): Promise<void> {
   grnMigrationPromise = (async () => {
     const stmts = [
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS arrival_state TEXT",
+      // Sub-cent unit prices (owner 2026-08-15). See src/lib/unit-price.ts for
+      // the worked example: an INTEGER column silently rounds RM0.055 to
+      // RM0.06, and on a 600-piece line that is RM3 of invented cost. The code
+      // here never rounded — the COLUMN TYPE did. integer → numeric is a
+      // widening conversion, so no data moves and no USING clause is needed.
+      "ALTER TABLE grn_items ALTER COLUMN unit_price TYPE NUMERIC(14,4)",
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS shipping_method TEXT",
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS carrier_name TEXT",
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS tracking_number TEXT",
@@ -1615,9 +1621,12 @@ app.post("/", async (c) => {
       }));
     }
 
-    const totalAmount = grnItems.reduce(
-      (sum, i) => sum + i.acceptedQty * i.unitPrice,
-      0,
+    // Rounded to whole sen: unit prices may now carry sub-sen precision (a
+    // rate), but this is the GRN's own money total (an amount), and an amount
+    // lands on whole sen. Summing first and rounding once keeps it equal to
+    // the supplier's arithmetic rather than to the sum of rounded lines.
+    const totalAmount = Math.round(
+      grnItems.reduce((sum, i) => sum + i.acceptedQty * i.unitPrice, 0),
     );
 
     // Final fall-through for purchase company: if body and source PO didn't

@@ -1070,6 +1070,12 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_orders_po_no ON purchase_orders(poNo)",
       // 0181 — real material_code column so new POs don't mash code into name.
       "ALTER TABLE purchase_order_items ADD COLUMN IF NOT EXISTS material_code TEXT",
+      // Sub-cent unit prices (owner 2026-08-15). See src/lib/unit-price.ts for
+      // the worked example: an INTEGER column silently rounds RM0.055 to
+      // RM0.06, and on a 600-piece line that is RM3 of invented cost. The code
+      // here never rounded — the COLUMN TYPE did. integer → numeric is a
+      // widening conversion, so no data moves and no USING clause is needed.
+      "ALTER TABLE purchase_order_items ALTER COLUMN unit_price_sen TYPE NUMERIC(14,4)",
       // 0200 — per-document purchase company override. Defaulted from the
       // supplier on create; never null in writes (HOOKKA fallback).
       "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS purchase_org_code TEXT",

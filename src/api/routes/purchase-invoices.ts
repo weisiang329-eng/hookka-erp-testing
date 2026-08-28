@@ -23,6 +23,7 @@ import {
   ledgerHasSource,
 } from "../lib/journal-hash";
 import { nextMonthDueDate } from "../../lib/terms";
+import { roundUnitPriceSen, lineTotalSen as computeLineTotalSen } from "../../lib/unit-price";
 import { issueDocNumber } from "../lib/doc-number-service";
 import {
   checkConvertAvailability,
@@ -60,6 +61,18 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // for lines invoiced straight off a PO with no receipt in between.
       "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS po_id TEXT",
       "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS invoiced_qty NUMERIC DEFAULT 0",
+      // Sub-cent unit prices (owner 2026-08-15, OCEAN SKY invoice 2608-461:
+      // "NAIL LEG 5/8 — 600 PCS @ 0.05500 = 33.00"). An INTEGER column rounds
+      // RM0.055 to RM0.06 on the way in, and 600 x RM0.06 is RM36.00 — RM3
+      // invented on one line, invisible on screen because the line total is
+      // recomputed from the same rounded price.
+      //
+      // integer → numeric is a widening conversion: every existing value is
+      // already a valid numeric, so no data moves and no USING clause is
+      // needed. Scale 4 is two decimals of sen, which is the finest resolution
+      // suppliers actually quote. LINE TOTALS stay integer sen deliberately —
+      // a rate needs the precision, an amount that changes hands does not.
+      "ALTER TABLE purchase_invoice_items ALTER COLUMN unit_price_sen TYPE NUMERIC(14,4)",
       // Supplier reference numbers (owner 2026-06-21): the supplier's own
       // invoice number AND their delivery-order number. snake_case → no
       // column-rename-map.json entry needed.
@@ -472,7 +485,13 @@ function normalizeItems(
       return { ok: false, error: `items[${i}]: not an object` };
     }
     const qty = Number(it.qty);
-    const unitPriceSen = Math.round(Number(it.unitPriceSen));
+    // NOT Math.round. A unit price is a RATE that gets multiplied by qty, so
+    // rounding it here multiplies the error by the quantity: OCEAN SKY invoice
+    // 2608-461 is "600 PCS @ 0.05500 = 33.00", and whole-sen rounding turned
+    // RM0.055 into RM0.06 and the line into RM36.00. Keep two decimals of sen
+    // (= four of ringgit, which is what suppliers quote at); the LINE TOTAL
+    // below still lands on whole sen, because that is money that changes hands.
+    const unitPriceSen = roundUnitPriceSen(Number(it.unitPriceSen));
     const materialName = String(it.materialName ?? "").trim();
     if (!materialName) {
       return { ok: false, error: `items[${i}]: materialName is required` };
@@ -505,7 +524,9 @@ function normalizeItems(
       supplierSku: supSku,
       qty,
       unitPriceSen,
-      lineTotalSen: Math.round(qty * unitPriceSen),
+      // Round ONCE, on the product — never the rate first. 600 x 5.5 sen is
+      // 3300 sen = RM33.00, which is exactly what the supplier billed.
+      lineTotalSen: computeLineTotalSen(qty, unitPriceSen),
       taxSen,
       lineType,
       notes: it.notes == null ? null : String(it.notes),

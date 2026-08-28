@@ -8713,6 +8713,16 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.amountSen)}</td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.description ?? ""}</td>
                     <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                      {/* Owner 2026-08-28 「fund transfer 没有办法 print out
+                          voucher」— the batch bar could always print selected
+                          rows, but nothing on the row said so; give every row
+                          its own print link like the JV grid has. */}
+                      <button
+                        className="text-xs underline decoration-dotted cursor-pointer text-[#6B5C32] hover:text-[#4A3F22] mr-3"
+                        onClick={() => printVoucher(buildFundTransferVoucher(r, accounts))}
+                      >
+                        print
+                      </button>
                       <span className="mr-2"><LifecycleBadge state={r.lifecycleState} /></span>
                       <LifecycleActions
                         state={r.lifecycleState}

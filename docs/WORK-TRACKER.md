@@ -14,6 +14,15 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-28 — 🔵 Fund Transfer 每行加 print 链接（branch `feat/fund-transfer-print-link`，PR 待批）
+
+Owner（贴 Fund Transfer 截图）：「这个 fund transfer 没有办法 print out voucher」。
+实况：`buildFundTransferVoucher` + 批量打印（勾选 → BatchActionsBar「Print / PDF」）早已上线，
+但行上只有 void/delete，没有任何入口提示 → owner 找不到。修 = 行尾加 `print` 链接
+（同 JV 表的行内打印，走同一个 `printVoucher`/`print-voucher.ts` 渲染器），一行改动。
+本地已验：4 行都出链接，点击生成完整 FUND TRANSFER VOUCHER（抬头/单号/户口/金额/大写/签名栏）。
+**待办**：owner 用 weisiang329-eng approve 本 PR（连同 #378、#362 一起批）→ 部署后在 prod 点一次 print 验证。
+
 ## 2026-08-14 — 🔵 Four owner-decided report/metric items (branch `fix/on-time-delivery-and-decisions`, **NOT deployed, NOT merged**)
 
 All four decisions were MADE by the owner before the work started; this branch implements

@@ -23,6 +23,8 @@
 //   • every failure is swallowed. Learning is a side benefit of creating a
 //     document — it must never be the reason a receipt or an invoice fails.
 // ---------------------------------------------------------------------------
+import { roundUnitPriceSen } from "../../lib/unit-price";
+
 
 interface DbLike {
   prepare(sql: string): {
@@ -175,7 +177,7 @@ export async function learnSupplierBindings(
           (line.materialName ?? code).trim() || code,
           sku,
           desc,
-          Math.max(0, Math.round(Number(line.unitPriceSen) || 0)),
+          Math.max(0, roundUnitPriceSen(Number(line.unitPriceSen) || 0)),
         )
         .run();
       out.created++;

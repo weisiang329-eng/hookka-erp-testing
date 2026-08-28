@@ -44,6 +44,12 @@ import { getOrgId } from "../../lib/tenant";
 
 const app = new Hono<Env>();
 
+/**
+ * How far a price may move before it is treated as a unit mismatch rather than
+ * a price change. Same multiple the sofa repricer uses.
+ */
+const OUTLIER_MULTIPLE = 3;
+
 type Drift = {
   bindingId: string;
   supplierId: string;
@@ -160,8 +166,24 @@ async function buildDrift(db: D1Database, orgId: string): Promise<Drift[]> {
     }
     const paidSen = [...hit.prices][0];
     let whyNot: string | undefined;
+    // An order-of-magnitude move is not a price change — it is a UNIT change.
+    // Measured on the first prod dry run, 11 of 86: NON WOVEN WHITE RM 0.77 ->
+    // RM 231 (a roll billed against a per-metre list), M4X30MM RM 0.02 ->
+    // RM 18 (a box against a per-piece list), GALAXY-04-VIOLET RM 127.20 ->
+    // RM 5 the other way. Writing any of those into the price list would
+    // silently mis-price every future order of that material by 300x.
+    //
+    // Same guard, same multiple, as the sofa repricer's — and it measures
+    // against what the LIST carries today, never against another derived
+    // number, because a guard that trusts a computed figure cannot catch a
+    // wrong computed figure.
+    const ratio = listSen > 0 ? paidSen / listSen : null;
     if (paidSen === listSen) {
       whyNot = "already current";
+    } else if (ratio !== null && (ratio > OUTLIER_MULTIPLE || ratio < 1 / OUTLIER_MULTIPLE)) {
+      whyNot =
+        `price moved ${ratio.toFixed(1)}x (RM ${(listSen / 100).toFixed(4)} -> RM ${(paidSen / 100).toFixed(4)}) — ` +
+        `almost always a per-box vs per-piece unit mismatch, not a price change. Check the invoice against the list's unit.`;
     } else if (listFrom && hit.date < listFrom) {
       // The list is AHEAD of the evidence: somebody set a price effective later
       // than the newest invoice. Moving it back would undo that decision.
@@ -193,6 +215,18 @@ function summarise(rows: Drift[]) {
     suppliersAffected: new Set(eligible.map((r) => r.supplierId)).size,
     skipped: rows.length - eligible.length,
     skippedByReason: byReason,
+    // Pulled out of the reason bag on purpose: these are the ones a person has
+    // to look at, and a count buried among "already current" is not a worklist.
+    unitMismatches: rows
+      .filter((r) => !r.eligible && (r.whyNot ?? "").startsWith("price moved"))
+      .map((r) => ({
+        supplierName: r.supplierName,
+        materialCode: r.materialCode,
+        listSen: r.listSen,
+        invoiceSen: r.paidSen,
+        sourcePiNo: r.sourcePiNo,
+        paidOn: r.paidOn,
+      })),
   };
 }
 

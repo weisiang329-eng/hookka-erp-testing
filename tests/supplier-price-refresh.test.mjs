@@ -87,6 +87,54 @@ test('two prices on the same latest date are refused, never averaged', () => {
   assert.equal(/\/ hit\.prices\.size/.test(SRC), false, 'no averaging may appear');
 });
 
+test('an order-of-magnitude move is a UNIT mismatch, and is refused', () => {
+  // Caught on the FIRST production dry run, before anything was written: 11 of
+  // 86 proposed changes were not price changes at all.
+  //
+  //   NON WOVEN WHITE     RM 0.77  -> RM 231    (a roll billed against a
+  //                                              per-metre list)
+  //   M4X30MM             RM 0.02  -> RM 18     (a box against a per-piece list)
+  //   GALAXY-04-VIOLET    RM 127.20 -> RM 5     (the same thing, inverted)
+  //
+  // Writing any of those into the price list would silently mis-price every
+  // future order of that material by up to 300x — far worse than the stale
+  // price it replaced, and invisible until someone read an invoice.
+  assert.match(SRC, /const OUTLIER_MULTIPLE = 3;/);
+  assert.match(SRC, /ratio > OUTLIER_MULTIPLE \|\| ratio < 1 \/ OUTLIER_MULTIPLE/);
+  assert.match(SRC, /per-box vs per-piece unit mismatch/);
+});
+
+test('the guard measures against the LIST, not another derived number', () => {
+  // A guard that trusts a computed figure cannot catch a wrong computed figure
+  // — that is exactly how the 8,258 got through the sofa repricer's first
+  // version.
+  assert.match(SRC, /const ratio = listSen > 0 \? paidSen \/ listSen : null;/);
+});
+
+test('the ratio rule, executed on the real cases', () => {
+  const M = 3;
+  const suspect = (list, paid) => {
+    if (!list) return false;
+    const r = paid / list;
+    return r > M || r < 1 / M;
+  };
+  assert.equal(suspect(77, 23100), true, 'NON WOVEN WHITE — a roll vs a metre');
+  assert.equal(suspect(2, 1800), true, 'M4X30MM — a box vs a piece');
+  assert.equal(suspect(12720, 500), true, 'GALAXY-04-VIOLET — inverted');
+  assert.equal(suspect(5, 5.5), false, 'NL 5/8 — the real 10% rise survives');
+  assert.equal(suspect(2, 2.2), false, 'SCRW(M4X38)-R');
+  assert.equal(suspect(3, 2.5), false, 'SCRW(M4X50)-R — a real cut survives');
+  assert.equal(suspect(680, 780), false, 'PB72 — an ordinary board increase');
+});
+
+test('unit mismatches are surfaced as a WORKLIST, not buried in a count', () => {
+  // A number inside "skippedByReason" next to "already current: 161" is not
+  // something anyone acts on.
+  assert.match(SRC, /unitMismatches: rows/);
+  assert.match(SRC, /\(r\.whyNot \?\? ""\)\.startsWith\("price moved"\)/);
+  assert.match(SRC, /sourcePiNo: r\.sourcePiNo/, 'each row must name the invoice to check');
+});
+
 test('a list already NEWER than the evidence is left alone', () => {
   // Somebody may have set a price effective later than the last invoice. Pulling
   // it back to an older invoice would silently undo that decision.

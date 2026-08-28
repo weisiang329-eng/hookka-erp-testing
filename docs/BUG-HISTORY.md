@@ -34,6 +34,46 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-28-169 — a price-list refresh would have written per-BOX prices into a per-PIECE list `procurement` `money` 🟢
+
+🟢 Caught on the FIRST production dry run, before anything was written.
+
+Owner: 「把我们的价目表也更新去最新价钱」. Every purchase order autofills its
+unit price from `supplier_material_bindings`, and the list had gone stale —
+OCEAN SKY's fasteners were stamped 2026-05-05 while August invoices paid
+something different on all three. Real scope measured: **86 changes across 11
+suppliers, 47 up and 39 down**, 161 already current.
+
+**11 of those 86 were not price changes at all.** They were unit mismatches —
+the invoice line priced per box or per roll against a list priced per piece or
+per metre:
+
+| Material | List | Invoice | |
+| --- | --- | --- | --- |
+| NON WOVEN WHITE | RM 0.77 | RM 231.00 | ×300 |
+| M4X30MM | RM 0.02 | RM 18.00 | ×900 |
+| CS 7MM | RM 0.82 | RM 21.00 | ×25.6 |
+| GALAXY-04- VIOLET | RM 127.20 | RM 5.00 | ×0.04 |
+| SD Y | RM 50.22 | RM 9.00 | ×0.18 |
+
+Writing any of those into the price list would have **silently mis-priced every
+future order of that material by up to 300×** — far worse than the stale price it
+replaced, and invisible until somebody read an invoice.
+
+Fix = the same order-of-magnitude guard the sofa repricer carries (`OUTLIER_MULTIPLE
+= 3`), measured against what the LIST holds today rather than against another
+derived number — a guard that trusts a computed figure cannot catch a wrong
+computed figure. The refused rows are surfaced as `unitMismatches`, a worklist
+naming the invoice to check, rather than as a count buried next to
+"already current: 161".
+
+**The lesson, and it is the repo's oldest one:** the guard already existed, in
+`import-completion/sofa-pricing.ts`, written for exactly this failure. Building a
+second repricer without carrying it over is fix-the-instance-miss-the-twins in a
+new file rather than a new line. Regression: `tests/supplier-price-refresh.test.mjs`
+executes the ratio rule against all five real cases plus the four genuine price
+moves that must survive it.
+
 ## BUG-2026-08-28-168 — the sub-cent price fix shipped in four places and reached the operator in none of them `procurement` `money` 🟢
 
 - **Symptom (Siti → owner, 2026-08-28 13:23)**: 「i try to enter the price, it

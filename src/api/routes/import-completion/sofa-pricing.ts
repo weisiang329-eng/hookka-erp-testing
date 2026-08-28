@@ -2,7 +2,29 @@ import { Hono } from "hono";
 import type { Env } from "../../worker";
 import { requirePermission } from "../../lib/rbac";
 import { getOrgId } from "../../lib/tenant";
+import {
+  calculateUnitPrice,
+  calculateLineTotalWithDiscount,
+} from "../../../lib/pricing";
 import { PRICE_BASELINE_DATE, type BaselineCandidate, MODEL_MAP_HOUZS, priceFor, HEIGHTS_TO_FILL, SOFA_TARGET_BASES, type SoiRow, type SoRow } from "./_shared";
+
+
+// A row's effectiveFrom alone does not identify the winner: a same-day
+// correction shares the date with the row it supersedes. Sort by date, then
+// by created_at DESC — the same order resolveCustomerPriceAsOf uses, so the
+// repricer and the order screens can never price the same data differently.
+// Rows without created_at (master product_prices) sort stably among themselves.
+type DatedPriceRow = {
+  basePriceSen: number | null;
+  seatHeightPrices: string | null;
+  effectiveFrom: string;
+  createdAt?: string | null;
+};
+function newestFirst(a: DatedPriceRow, b: DatedPriceRow): number {
+  const byDate = b.effectiveFrom.localeCompare(a.effectiveFrom);
+  if (byDate !== 0) return byDate;
+  return String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? ""));
+}
 
 const app = new Hono<Env>();
 
@@ -692,6 +714,10 @@ app.post("/recompute-so-sofa-prices", async (c) => {
 
   const db = c.var.DB;
   const dryRun = c.req.query("dryRun") === "true";
+  const sampleLimit = Math.min(
+    500,
+    Math.max(1, Number(c.req.query("samples")) || 10),
+  );
   const statusFilter = (c.req.query("statuses") || "").trim()
     ? c.req.query("statuses")!.split(",").map(s => s.trim()).filter(Boolean)
     : ["IN_PRODUCTION", "READY_TO_SHIP", "CONFIRMED", "DRAFT"];
@@ -729,15 +755,94 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   const soRes = await db
     .prepare(
       `SELECT id, companySOId, customerId, customerName, status,
-              companySODate, created_at AS createdAt
+              companySODate, isServiceOrder, created_at AS createdAt
          FROM sales_orders
         WHERE status IN (${soPlaceholders})`,
     )
     .bind(...statusFilter)
     .all<SoRow>();
-  const sos = soRes.results ?? [];
+  let sos = soRes.results ?? [];
+
+  // A SERVICE ORDER keeps the price it was ISSUED at. Owner, 2026-08-24, in
+  // as few words as the rule needs:
+  //
+  //   「service order是根据当初开的价格 0就是0 有amount就是有amount」
+  //
+  // So it is not a scope choice and there is no flag for it: a repair was
+  // quoted at a number (sometimes zero, for goodwill), the customer was told
+  // that number, and a price-list change months later does not reach back and
+  // alter what was agreed. Every write path already says the same thing; this
+  // repricer had never heard of them. The dry run that day put 33
+  // service-order lines in the plan worth +RM 15,674.50, NINETEEN of them
+  // currently at RM 0 — it would have billed customers for repairs that were
+  // given away. (Same trap as the SV-2606-001 RM 730 incident.)
+  const serviceOrdersExcluded = sos.filter(
+    (so) => so.isServiceOrder === true || (so.isServiceOrder as unknown) === 1,
+  ).length;
+  sos = sos.filter(
+    (so) => !(so.isServiceOrder === true || (so.isServiceOrder as unknown) === 1),
+  );
+
+  // ---- Scope filters (2026-08-24) -------------------------------------
+  //
+  // Status alone was the only knob, so a run aimed at "July and August"
+  // rewrote every order in the book. These narrow it to the set a person
+  // actually decided on, and every one of them is REPORTED back in the
+  // response so the scope that ran is never a guess.
+  //
+  // Dates are compared on the order's OWN date (companySODate, falling back
+  // to created_at) — the same value the pricing resolves as of.
+  const fromDate = (c.req.query("from") || "").trim();
+  const toDate = (c.req.query("to") || "").trim();
+  for (const [label, v] of [["from", fromDate], ["to", toDate]] as const) {
+    if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      return c.json({ success: false, error: `${label} must be YYYY-MM-DD` }, 400);
+    }
+  }
+  const soDateOf = (so: SoRow) =>
+    String(so.companySODate || so.createdAt || "").slice(0, 10);
+  if (fromDate) sos = sos.filter((so) => soDateOf(so) >= fromDate);
+  if (toDate) sos = sos.filter((so) => soDateOf(so) <= toDate);
+
+  const customerIds = (c.req.query("customerIds") || "")
+    .split(",").map((x) => x.trim()).filter(Boolean);
+  if (customerIds.length > 0) {
+    const want = new Set(customerIds);
+    sos = sos.filter((so) => so.customerId && want.has(so.customerId));
+  }
+
+  // An order whose invoice is already PAID (or part-paid) is money the
+  // customer has settled against a document they hold. Repricing it makes the
+  // invoice disagree with the payment, so it is excluded by default and can
+  // only be included deliberately. Owner 2026-08-24: 「把还没paid的都补」.
+  const includePaid = c.req.query("includePaid") === "true";
+  let paidExcluded = 0;
+  if (!includePaid && sos.length > 0) {
+    const paidRes = await db
+      .prepare(
+        `SELECT DISTINCT salesOrderId AS soId
+           FROM invoices
+          WHERE status IN ('PAID','PARTIAL_PAID')
+            AND salesOrderId IS NOT NULL`,
+      )
+      .all<{ soId: string }>();
+    const paid = new Set((paidRes.results ?? []).map((r) => r.soId));
+    const before = sos.length;
+    sos = sos.filter((so) => !paid.has(so.id));
+    paidExcluded = before - sos.length;
+  }
+
+  const appliedScope = {
+    serviceOrdersExcluded,
+    statuses: statusFilter,
+    from: fromDate || null,
+    to: toDate || null,
+    customerIds: customerIds.length ? customerIds : null,
+    includePaid,
+    paidOrdersExcluded: paidExcluded,
+  };
   if (sos.length === 0) {
-    return c.json({ success: true, dryRun, scope: statusFilter, soCount: 0 });
+    return c.json({ success: true, dryRun, scope: statusFilter, appliedScope, soCount: 0 });
   }
   const soIds = sos.map(s => s.id);
   const soById = new Map(sos.map(s => [s.id, s] as const));
@@ -750,6 +855,7 @@ app.post("/recompute-so-sofa-prices", async (c) => {
       `SELECT id, salesOrderId, productId, productCode, itemCategory, sizeCode,
               fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
               legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
+              totalHeightPriceSen, discountSen,
               basePriceSen, unitPriceSen, lineTotalSen
          FROM sales_order_items
         WHERE itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
@@ -778,14 +884,21 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     const [customerId, productId] = k.split("|");
     const cpRes = await db
       .prepare(
-        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom
+        // created_at is the TIE-BREAK, not decoration: two price rows can
+        // share an effectiveFrom (a same-day correction supersedes the
+        // morning's row), and without it which one wins is whatever order
+        // Postgres happens to return. resolveCustomerPriceAsOf — the
+        // resolver the ORDER SCREENS use — already breaks the tie this way;
+        // this one did not, so the same data could price two ways.
+        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom,
+                cpp.created_at AS "createdAt"
            FROM customer_products cp
            JOIN customer_product_prices cpp ON cpp.customerProductId = cp.id
           WHERE cp.customerId = ? AND cp.productId = ?
-          ORDER BY cpp.effectiveFrom DESC`,
+          ORDER BY cpp.effectiveFrom DESC, cpp.created_at DESC`,
       )
       .bind(customerId, productId)
-      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>();
+      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string; createdAt?: string | null }>();
     cpHistMap.set(k, cpRes.results ?? []);
   }
 
@@ -807,12 +920,12 @@ app.post("/recompute-so-sofa-prices", async (c) => {
 
   type SeatHeightEntry = { height: string; priceSen: number; tier?: string };
   function pickActive(
-    rows: Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>,
+    rows: DatedPriceRow[],
     asOf: string,
   ): { basePriceSen: number; entries: SeatHeightEntry[] } | null {
     const usable = rows
       .filter((r) => r.effectiveFrom <= asOf && r.basePriceSen != null)
-      .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+      .sort(newestFirst);
     const r = usable[0];
     if (!r) return null;
     let entries: SeatHeightEntry[] = [];
@@ -853,6 +966,8 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     newUnitRM: number | null;
     oldLineRM: number;
     newLineRM: number | null;
+    /** What the price list gave, before the combo pass redistributed. */
+    listBaseRM?: number | null;
     skipReason?: string;
   };
   const plans: ChangePlan[] = [];
@@ -901,8 +1016,27 @@ app.post("/recompute-so-sofa-prices", async (c) => {
       // encodes the size (e.g. "1003-(Q)"). No tier lookup needed.
       priceSen = active.basePriceSen;
     }
-    const newUnit = priceSen + it.legPriceSen + it.divanPriceSen + it.specialOrderPriceSen;
-    const newLine = newUnit * it.quantity;
+    // The CANONICAL build-up, not a hand-rolled sum. This line read
+    // `priceSen + leg + divan + special` and silently dropped
+    // totalHeightPriceSen — which every write path includes (measured on prod
+    // 2026-08-24: 11 of 11 live lines carrying one have
+    // unitPriceSen = base + leg + divan + special + totalHeight). Repricing a
+    // bedframe with a height surcharge REMOVED the surcharge.
+    const newUnit = calculateUnitPrice({
+      basePriceSen: priceSen,
+      divanPriceSen: it.divanPriceSen,
+      legPriceSen: it.legPriceSen,
+      totalHeightPriceSen: it.totalHeightPriceSen ?? 0,
+      specialOrderPriceSen: it.specialOrderPriceSen,
+    });
+    const newLine = calculateLineTotalWithDiscount(
+      newUnit,
+      it.quantity,
+      it.discountSen ?? 0,
+    );
+    // The price the LIST gives, kept beside the plan so the combo pass cannot
+    // move a line without leaving the original visible.
+    plan.listBaseRM = priceSen / 100;
     plan.newBaseRM = priceSen / 100;
     plan.newUnitRM = newUnit / 100;
     plan.newLineRM = newLine / 100;
@@ -1081,8 +1215,13 @@ app.post("/recompute-so-sofa-prices", async (c) => {
           const it = items.find(i => i.id === p.itemId)!;
           const oldLineSen = (p.newLineRM ?? 0) * 100;
           const adjustedLineSen = Math.floor(oldLineSen * ratio);
+          // Same omission lived here too — the combo residual rebuilt the unit
+          // price from its own sum of surcharges, also without totalHeight.
           const surchargesPerUnit =
-            it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+            it.divanPriceSen +
+            it.legPriceSen +
+            (it.totalHeightPriceSen ?? 0) +
+            it.specialOrderPriceSen;
           const adjustedUnitSen = Math.max(
             0, Math.round(adjustedLineSen / Math.max(1, it.quantity)),
           );
@@ -1102,13 +1241,22 @@ app.post("/recompute-so-sofa-prices", async (c) => {
             (a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0),
           )[0];
           const it = items.find(i => i.id === target.itemId)!;
+          // Same omission lived here too — the combo residual rebuilt the unit
+          // price from its own sum of surcharges, also without totalHeight.
           const surchargesPerUnit =
-            it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+            it.divanPriceSen +
+            it.legPriceSen +
+            (it.totalHeightPriceSen ?? 0) +
+            it.specialOrderPriceSen;
           const cur = (target.newBaseRM ?? 0) * 100;
           const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
           const newBase = Math.max(0, adj);
           const newUnit = newBase + surchargesPerUnit;
-          const newLine = newUnit * it.quantity;
+          const newLine = calculateLineTotalWithDiscount(
+            newUnit,
+            it.quantity,
+            it.discountSen ?? 0,
+          );
           target.newBaseRM = newBase / 100;
           target.newUnitRM = newUnit / 100;
           target.newLineRM = newLine / 100;
@@ -1119,10 +1267,53 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   }
 
   // Summary stats
-  const willChange = plans.filter(p => p.newLineRM != null && p.newLineRM !== p.oldLineRM);
-  const noChange = plans.filter(p => p.newLineRM != null && p.newLineRM === p.oldLineRM);
+  // Compare in SEN, not in RM. These fields are `sen / 100` floats, so an
+  // unchanged line can read as changed: 103263/100 recomputes to
+  // 1032.6299999999999, which !== 1032.63. The write already rounds back to
+  // sen, so the money was never wrong — but the DRY RUN was, and the dry run
+  // is what a person approves. (Repo rule: money is integer sen.)
+  // ORDER-OF-MAGNITUDE GUARD, measured against the price the order is
+  // CARRYING — not against the price list.
+  //
+  // The first version of this compared the computed price to the list price,
+  // and it did not fire on the case that motivated it: SO-2608-234's 5536-CNR
+  // was going to be rewritten RM 900 -> RM 8,258, and the list agreed with
+  // 8,258. The master price row effective 2026-07-18 holds 825800 sen where
+  // its neighbours hold 82500 — one digit too many, typed into the price list
+  // itself. A guard that trusts the list cannot catch a bad list.
+  //
+  // So the comparison is against what the order says today. A repricing pass
+  // may move a line by a discount or a surcharge; it does not multiply it by
+  // nine. Either direction — a collapse is as suspect as a jump.
+  const OUTLIER_MULTIPLE = 3;
+  for (const p of plans) {
+    if (p.skipReason || p.newBaseRM == null) continue;
+    // A line that was free, or is becoming free, is a different question —
+    // leave those to the service-order and zero-price rules.
+    if (!p.oldBaseRM || !p.newBaseRM) continue;
+    const ratio = p.newBaseRM / p.oldBaseRM;
+    if (ratio > OUTLIER_MULTIPLE || ratio < 1 / OUTLIER_MULTIPLE) {
+      p.skipReason =
+        `price moved ${ratio.toFixed(1)}x (RM ${p.oldBaseRM.toFixed(2)} -> ` +
+        `RM ${p.newBaseRM.toFixed(2)}) — check the price list for this SKU, ` +
+        `not the order`;
+      p.newBaseRM = null;
+      p.newUnitRM = null;
+      p.newLineRM = null;
+    }
+  }
+
+  const senOf = (rm: number | null | undefined) => Math.round((rm ?? 0) * 100);
+  const differs = (p: ChangePlan) =>
+    p.newLineRM != null && senOf(p.newLineRM) !== senOf(p.oldLineRM);
+  const willChange = plans.filter(differs);
+  const noChange = plans.filter(p => p.newLineRM != null && !differs(p));
   const skipped = plans.filter(p => p.skipReason);
-  const sumDiff = willChange.reduce((s, p) => s + ((p.newLineRM ?? 0) - p.oldLineRM), 0);
+  const sumDiffSen = willChange.reduce(
+    (acc, p) => acc + (senOf(p.newLineRM) - senOf(p.oldLineRM)),
+    0,
+  );
+  const sumDiff = sumDiffSen / 100;
   const summary = {
     soCount: sos.length,
     sofaItemsConsidered: items.length,
@@ -1138,8 +1329,12 @@ app.post("/recompute-so-sofa-prices", async (c) => {
 
   if (dryRun) {
     return c.json({
-      success: true, dryRun: true, scope: statusFilter, summary,
-      sampleChanges: willChange.slice(0, 10).map(p => ({
+      success: true, dryRun: true, scope: statusFilter, appliedScope, summary,
+      // Ten rows is a taste, not a decision. `?samples=N` returns up to 500
+      // so the person approving a repricing run can read the WHOLE list —
+      // and `samplesTruncated` says plainly when it could not.
+      samplesTruncated: willChange.length > sampleLimit,
+      sampleChanges: willChange.slice(0, sampleLimit).map(p => ({
         so: p.companySOId, cust: p.customerName, status: p.status,
         product: p.productCode, sz: p.sizeCode, fab: p.fabricCode, tier: p.fabricTier,
         oldBase: p.oldBaseRM, newBase: p.newBaseRM,
@@ -1207,7 +1402,7 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   }
 
   return c.json({
-    success: true, dryRun: false, scope: statusFilter, summary,
+    success: true, dryRun: false, scope: statusFilter, appliedScope, summary,
     itemsUpdated, sosUpdated,
   });
 });
@@ -1274,6 +1469,7 @@ app.post("/recompute-co-sofa-prices", async (c) => {
       `SELECT id, consignmentOrderId AS salesOrderId, productId, productCode, itemCategory, sizeCode,
               fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
               legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
+              totalHeightPriceSen, discountSen,
               basePriceSen, unitPriceSen, lineTotalSen
          FROM consignment_order_items
         WHERE itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
@@ -1300,14 +1496,21 @@ app.post("/recompute-co-sofa-prices", async (c) => {
     const [customerId, productId] = k.split("|");
     const cpRes = await db
       .prepare(
-        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom
+        // created_at is the TIE-BREAK, not decoration: two price rows can
+        // share an effectiveFrom (a same-day correction supersedes the
+        // morning's row), and without it which one wins is whatever order
+        // Postgres happens to return. resolveCustomerPriceAsOf — the
+        // resolver the ORDER SCREENS use — already breaks the tie this way;
+        // this one did not, so the same data could price two ways.
+        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom,
+                cpp.created_at AS "createdAt"
            FROM customer_products cp
            JOIN customer_product_prices cpp ON cpp.customerProductId = cp.id
           WHERE cp.customerId = ? AND cp.productId = ?
-          ORDER BY cpp.effectiveFrom DESC`,
+          ORDER BY cpp.effectiveFrom DESC, cpp.created_at DESC`,
       )
       .bind(customerId, productId)
-      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>();
+      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string; createdAt?: string | null }>();
     cpHistMap.set(k, cpRes.results ?? []);
   }
   const productIds = Array.from(new Set(items.map(it => it.productId).filter((p): p is string => !!p)));
@@ -1326,8 +1529,8 @@ app.post("/recompute-co-sofa-prices", async (c) => {
   }
 
   type SeatHeightEntry = { height: string; priceSen: number; tier?: string };
-  function pickActive(rows: Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>, asOf: string) {
-    const usable = rows.filter((r) => r.effectiveFrom <= asOf && r.basePriceSen != null).sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+  function pickActive(rows: DatedPriceRow[], asOf: string) {
+    const usable = rows.filter((r) => r.effectiveFrom <= asOf && r.basePriceSen != null).sort(newestFirst);
     const r = usable[0];
     if (!r) return null;
     let entries: SeatHeightEntry[] = [];
@@ -1385,8 +1588,24 @@ app.post("/recompute-co-sofa-prices", async (c) => {
     } else {
       priceSen = active.basePriceSen;
     }
-    const newUnit = priceSen + it.legPriceSen + it.divanPriceSen + it.specialOrderPriceSen;
-    const newLine = newUnit * it.quantity;
+    // The CANONICAL build-up, not a hand-rolled sum. This line read
+    // `priceSen + leg + divan + special` and silently dropped
+    // totalHeightPriceSen — which every write path includes (measured on prod
+    // 2026-08-24: 11 of 11 live lines carrying one have
+    // unitPriceSen = base + leg + divan + special + totalHeight). Repricing a
+    // bedframe with a height surcharge REMOVED the surcharge.
+    const newUnit = calculateUnitPrice({
+      basePriceSen: priceSen,
+      divanPriceSen: it.divanPriceSen,
+      legPriceSen: it.legPriceSen,
+      totalHeightPriceSen: it.totalHeightPriceSen ?? 0,
+      specialOrderPriceSen: it.specialOrderPriceSen,
+    });
+    const newLine = calculateLineTotalWithDiscount(
+      newUnit,
+      it.quantity,
+      it.discountSen ?? 0,
+    );
     plan.newBaseRM = priceSen / 100;
     plan.newUnitRM = newUnit / 100;
     plan.newLineRM = newLine / 100;
@@ -1498,7 +1717,15 @@ app.post("/recompute-co-sofa-prices", async (c) => {
           const it = items.find(i => i.id === p.itemId)!;
           const oldLineSen = (p.newLineRM ?? 0) * 100;
           const adjustedLineSen = Math.floor(oldLineSen * ratio);
-          const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+          // Same omission, two more copies. The CANONICAL combo engine
+          // (lib/sofa-combo.ts) already carries totalHeightPriceSen — and
+          // lib/sofa-combo-pass.ts still holds the comment from the last time
+          // this exact term was found hardcoded to 0. Third instance.
+          const surchargesPerUnit =
+            it.divanPriceSen +
+            it.legPriceSen +
+            (it.totalHeightPriceSen ?? 0) +
+            it.specialOrderPriceSen;
           const adjustedUnitSen = Math.max(0, Math.round(adjustedLineSen / Math.max(1, it.quantity)));
           const newBaseSen = Math.max(0, adjustedUnitSen - surchargesPerUnit);
           const newUnitSen = newBaseSen + surchargesPerUnit;
@@ -1510,12 +1737,24 @@ app.post("/recompute-co-sofa-prices", async (c) => {
         if (residualSen !== 0 && adjusted.length > 0) {
           const target = adjusted.slice().sort((a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0))[0];
           const it = items.find(i => i.id === target.itemId)!;
-          const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+          // Same omission, two more copies. The CANONICAL combo engine
+          // (lib/sofa-combo.ts) already carries totalHeightPriceSen — and
+          // lib/sofa-combo-pass.ts still holds the comment from the last time
+          // this exact term was found hardcoded to 0. Third instance.
+          const surchargesPerUnit =
+            it.divanPriceSen +
+            it.legPriceSen +
+            (it.totalHeightPriceSen ?? 0) +
+            it.specialOrderPriceSen;
           const cur = (target.newBaseRM ?? 0) * 100;
           const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
           const newBase = Math.max(0, adj);
           const newUnit = newBase + surchargesPerUnit;
-          const newLine = newUnit * it.quantity;
+          const newLine = calculateLineTotalWithDiscount(
+            newUnit,
+            it.quantity,
+            it.discountSen ?? 0,
+          );
           target.newBaseRM = newBase / 100; target.newUnitRM = newUnit / 100; target.newLineRM = newLine / 100;
         }
         comboMatches++;
@@ -1523,10 +1762,22 @@ app.post("/recompute-co-sofa-prices", async (c) => {
     }
   }
 
-  const willChange = plans.filter(p => p.newLineRM != null && p.newLineRM !== p.oldLineRM);
-  const noChange = plans.filter(p => p.newLineRM != null && p.newLineRM === p.oldLineRM);
+  // Compare in SEN, not in RM. These fields are `sen / 100` floats, so an
+  // unchanged line can read as changed: 103263/100 recomputes to
+  // 1032.6299999999999, which !== 1032.63. The write already rounds back to
+  // sen, so the money was never wrong — but the DRY RUN was, and the dry run
+  // is what a person approves. (Repo rule: money is integer sen.)
+  const senOf = (rm: number | null | undefined) => Math.round((rm ?? 0) * 100);
+  const differs = (p: ChangePlan2) =>
+    p.newLineRM != null && senOf(p.newLineRM) !== senOf(p.oldLineRM);
+  const willChange = plans.filter(differs);
+  const noChange = plans.filter(p => p.newLineRM != null && !differs(p));
   const skipped = plans.filter(p => p.skipReason);
-  const sumDiff = willChange.reduce((s, p) => s + ((p.newLineRM ?? 0) - p.oldLineRM), 0);
+  const sumDiffSen = willChange.reduce(
+    (acc, p) => acc + (senOf(p.newLineRM) - senOf(p.oldLineRM)),
+    0,
+  );
+  const sumDiff = sumDiffSen / 100;
   const summary = {
     coCount: cos.length, itemsConsidered: items.length, willChange: willChange.length,
     noChange: noChange.length, skipped: skipped.length,

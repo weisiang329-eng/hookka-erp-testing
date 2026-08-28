@@ -59,6 +59,102 @@ Entries themselves stay newest-first.
   reaches the action, fields survive, closures unchanged; typecheck clean;
   live re-test after deploy = owner posts the July JV.
 
+## BUG-2026-08-25-167 — `ORDER BY rowid` on Postgres, and a line pairing that depended on an order that does not exist `pricing` `invoices` `infrastructure` 🟢
+
+🟢 Fixed. The new invoice backfill 500'd the moment a single invoice entered its scope. Small scopes appeared to pass — they returned early on zero invoices, so every "OK" was the empty path.
+
+**`ORDER BY rowid` is a SQLite pseudo-column and does not exist on Postgres.** It was carried over from the prior art in `admin.ts` (`/backfill-invoice-prices`), which still contains it — that endpoint would fail the same way on the live database, and is worth knowing before anyone reaches for it.
+
+The deeper problem the crash exposed: the pairing of invoice lines to delivery lines was "the nth occurrence of this product code", which needs a reliable line order **on both sides**. There is none — `invoice_items` has no line number. Ordering by `id` would have RUN, and been a guess: two lines of the same product on one invoice can come from different sales orders at different prices, and nothing records which line is which.
+
+So the pairing no longer depends on order at all. When a product code appears more than once on an invoice, **every** delivery counterpart must resolve to the same build-up — then the pairing cannot matter. If they disagree, those lines are refused and named ("same product on this invoice resolves to different prices — cannot tell which line is which"), the same discipline as a contested sales-order line.
+
+Worth recording: the crash was the lucky part. `ORDER BY id` would have produced plausible numbers on the ambiguous invoices, and nothing would have flagged them.
+
+Regression: `tests/invoice-backfill-from-so.test.mjs` (14 tests).
+
+## BUG-2026-08-24-166 — the surcharge backfill would have wiped RM 9,670 of special-order charges to zero `pricing` `sales-orders` `data-integrity` 🟢
+
+🟢 Fixed before it wrote anything. Caught by reading the FIRST dry run of an endpoint written that same hour — and the defect was in that new endpoint, not in older code.
+
+`/refresh-so-surcharges` re-derives a line's divan / leg / total-height / special-order charges from the owner's current lists. Its first live dry run reported **37 lines, net −RM 9,555** where an independent check had found only 8 lines needing correction. The breakdown said why: **27 lines going special-order → RM 0**, RM 9,670 of charges about to be deleted.
+
+Two causes, one shape:
+
+1. `priceOfSen` returns **0** for a token it cannot find in the config. A special the current list does not name is UNKNOWN, not free — but the derivation treated the two identically.
+2. The endpoint never passed the line's own **`customSpecials`** (per-line owner-defined surcharges, stored as JSON on the row), so anything priced there derived to nothing.
+
+This is the repo's oldest documented bug shape — **an absence read as a value** — reappearing inside code written to *fix* surcharges. Worth stating plainly: the author had just spent the session catching the same shape in five other places.
+
+Fix: derive only where the derivation is CONFIDENT. Every token on the line must be priced by the config (or covered by a custom special); every height must appear in its list. Where it is not, **the stored figure stands** and the line is reported under `unresolved` with what was kept and why — silence there would read as "nothing else needed changing", which is the opposite of the truth. Total-height rides on both height lookups, since it derives from gap + divan + leg.
+
+Regression: `tests/refresh-so-surcharges.test.mjs` (15 tests).
+
+**Follow-up, same endpoint, same shape (2026-08-25).** The confidence check itself was written as a SECOND COPY of the tokenizer — splitting on `/[,+]/` while the canonical `parseSpecialOrderTokens` splits on `/[;,]/` and drops `OTHER: …` free-text notes. The live data uses semicolons, so **28 lines whose specials were perfectly well known** were filed as "not priced by the list" and left untouched. It now calls the canonical parser, and "known" is decided by the STATIC catalog (`specialOrderOptions`) because `priceOfSen` returns 0 for any name absent from it regardless of the config. Writing the parser twice is the same mistake that put six copies of a dropped surcharge term in this repo — third time in two days.
+
+## BUG-2026-08-24-165 — the repricer would have billed customers for free repairs, and multiplied one line by nine `pricing` `sales-orders` `data-integrity` 🟢
+
+🟢 Fixed. Both found by READING the dry run before the July/August backfill ran, and neither would have raised an error if written.
+
+**Service orders.** Owner's rule, stated 2026-08-24 in as few words as it needs: 「service order是根据当初开的价格 **0就是0 有amount就是有amount**」 — a repair was quoted at a number (sometimes zero, for goodwill), the customer was told that number, and a price-list change months later does not reach back and alter what was agreed. It is a RULE, not a scope choice, so there is deliberately **no flag** to include them; a test forbids one. An `SV-` document is priced at exactly what the operator typed — 0 means 0, a free or goodwill repair. Every write path says so (the SO handler still carries a note about the SV-2606-001 RM 730 incident); this repricer had never heard of them. The 2026-08-24 dry run put **33 service-order lines** in the plan worth **+RM 15,674.50**, **19 of them currently at RM 0**. That was 76% of the run's headline total. The query now selects `isServiceOrder`, drops those orders, and reports how many it dropped — "205 lines will change" means something different if 33 were quietly dropped on the way.
+
+**Order-of-magnitude moves — and a typo in the price list.** SO-2608-234's `5536-CNR` was going to be rewritten **RM 900 → RM 8,258**. The first version of this guard compared the computed price against the PRICE LIST and did not fire, because **the list agreed with 8,258**: the master `product_prices` row effective **2026-07-18** holds `825800` sen where its neighbours (2026-08-20, 2026-08-21) hold `82500` and `90000`. One digit too many, typed into the price list itself — and the repricer resolves as of the ORDER's date, so any order dated between 2026-07-18 and 2026-08-19 picks it up.
+
+A guard that trusts the list cannot catch a bad list, so it now measures against **what the order carries today**: a line moving more than 3× in either direction is SKIPPED with a reason that names both prices and points at the SKU's price list rather than the order. **The 2026-07-18 master row for 5536-CNR is a real data error the owner still needs to correct** — the guard stops it spreading, it does not fix it.
+
+Both are the same lesson: a dry run is only worth reading if what it cannot justify appears as a SKIP with a reason rather than as a number. Regression: `tests/repricer-service-orders-and-outliers.test.mjs`, including the ratio rule executed against the real 900 → 8,258 case.
+
+## BUG-2026-08-24-164 — the repricer had no scope but status, so "July and August" meant the whole book `pricing` `sales-orders` 🟢
+
+🟢 Fixed. `/recompute-so-sofa-prices` filtered on status and nothing else. Asked to backfill July and August it would have rewritten **every order in the book** — 1,231 orders live on 2026-08-24, against the ~500 the owner had actually decided on, including other customers and other months.
+
+Added `?from=` / `?to=` (compared on the order's OWN date — `companySODate` falling back to `created_at`, the same value the pricing resolves as of), `?customerIds=`, and an exclusion for orders whose invoice is already `PAID` / `PARTIAL_PAID`. The paid exclusion is the owner's ruling (「把还没paid的都补」) and is the DEFAULT: an order whose invoice is settled is money paid against a document the customer holds, so repricing it makes the invoice disagree with the payment. It takes an explicit `?includePaid=true`.
+
+A malformed date is a 400, not a silent full-scope run — ignoring `?from=2026-7-1` would rewrite the whole book while the caller believed it was scoped to July.
+
+Every response now echoes `appliedScope` (statuses, from, to, customerIds, includePaid, paidOrdersExcluded), including the empty-scope early return: "0 orders" and "0 orders matching a filter you did not mean" are otherwise indistinguishable. Regression: `tests/repricer-scope-filters.test.mjs`.
+
+**Follow-up the same day:** the dry run also capped its change list at 10 rows with no indication that it had. Ten rows is a taste, not a decision, and this list is what a person approves before ~500 orders are rewritten — `?samples=N` now returns up to 500 and `samplesTruncated` says plainly when the list was cut.
+
+## BUG-2026-08-24-163 — the repricer's dry run counted unchanged lines as changes `pricing` `data-integrity` 🟢
+
+🟢 Fixed. The change test was `p.newLineRM !== p.oldLineRM` — a comparison of MONEY IN FLOATS, against the repo's standing rule that money is integer sen. Both fields are `sen / 100`, so a line whose price did not move could still read as moved: 103263 sen is RM 1032.63, and the recomputed path returns `1032.6299999999999`.
+
+The money itself was never wrong — the write rounds back with `Math.round(RM * 100)`, so the stored sen is exact. What was wrong is the **dry run**, and the dry run is the artefact a person approves before ~500 orders are rewritten. On the live scope it reported **351 changed lines**; an unknown share of those were lines that do not change at all, and each one still took an UPDATE.
+
+Fix: compare and sum in sen (`senOf` + `differs`), in both the SO and CO copies. Regression in `tests/repricer-total-height.test.mjs`, including the exact float that lied.
+
+Found in the same session as -161 and -162, all three in the path being prepared for the July/August price backfill.
+
+## BUG-2026-08-24-162 — the repricer dropped the total-height surcharge, in six places `pricing` `sales-orders` `data-integrity` 🟢
+
+> Owner, briefing the July/August price backfill: 「确保 BedFrame 包含 D1 price、leg price、**total height price**、special order price，再加上 Sofa 等等，全部都要有。你看一下，确保了解它的源代码是怎么计算 costing 的。」 He named the term that was missing.
+
+**Root cause.** `/api/import/recompute-so-sofa-prices` and its consignment twin built the unit price by hand — `priceSen + legPriceSen + divanPriceSen + specialOrderPriceSen` — while every WRITE path builds it through `calculateUnitPrice` (`src/lib/pricing.ts:38`), which also carries `totalHeightPriceSen`. Measured on prod the same day: of the live July/August lines carrying a height surcharge, **11 of 11** have `unitPriceSen = base + leg + divan + special + totalHeight`.
+
+So repricing a bedframe with a height surcharge **silently removed it** — a LOWER price on an order already sent to a customer, with nothing in the output naming the missing term. A 26" total height at RM 80 × 3 units is RM 240 off one line. Two of the surcharge sums also fed the combo residual, where the missing term would have been redistributed into the base and made each line's build-up stop adding up.
+
+**Six sites, not two.** SO repricer and CO repricer, each with a main pass and **two** combo-residual passes. The first sweep fixed four; the new guard went red on the remaining two, written on one line and so missed by the multi-line pattern. The site count is now asserted so a seventh cannot appear quietly.
+
+**Third instance of this exact term.** `src/api/lib/sofa-combo-pass.ts:228` still carries the comment from the last one ("Was a hardcoded 0. It feeds `surchargesPerUnitSen` … a zero here hands the surcharge's worth of the agreed combo total to the BASE price"), and the canonical engine `src/api/lib/sofa-combo.ts:318` has carried it correctly all along. The repricers were stale copies of a fixed bug — so they now CALL `calculateUnitPrice` / `calculateLineTotalWithDiscount` rather than restating them.
+
+`discountSen` was missing from the line total for the same reason: the line was `newUnit * quantity` with no discount term. Zero on every live line today (0 of 167 sampled), which is exactly how it would have stayed invisible until the first discounted line was repriced.
+
+**Verified.** `tests/repricer-total-height.test.mjs` — 8 tests, including the surcharge's effect priced in money, the six-site count, both queries actually selecting the new columns, and the row type declaring them so a missing column fails `tsc` rather than production. Full suite 4,356 pass / 0 fail. Found BEFORE the backfill ran; it would have repriced ~500 July/August orders with the surcharge stripped.
+
+## BUG-2026-08-24-161 — a same-day price correction could lose to the row it superseded `pricing` `data-integrity` 🟢
+
+🟢 Fixed. Clearing the sofa P3 prices for 2990 and Carress meant POSTing a corrected `customer_product_prices` row on the SAME `effectiveFrom` as the row it supersedes — the ordinary shape of a same-day correction. That left 60 products with two rows dated 2026-08-24, and the two readers of that table disagreed about which one wins:
+
+| reader | order | picks |
+|---|---|---|
+| `resolveCustomerPriceAsOf` (`customer-products.ts:1004`) | `effectiveFrom DESC, created_at DESC` | the correction — what the order screens show |
+| `pickActive` ×2 (`import-completion/sofa-pricing.ts`) | `effectiveFrom` only, over a query also ordered by `effectiveFrom` only | **whatever Postgres happened to return** |
+
+So the repricer could price an order off the **superseded** row while the SO screen showed the corrected one, and a re-run could disagree with itself. Nothing in the output would say so — both numbers are plausible prices, which is why it would have survived review. Fix: both copies share one comparator (`newestFirst`) and both queries select and order by `created_at`, mirroring the canonical resolver exactly.
+
+**Verified.** `tests/price-row-tiebreak.test.mjs` — the comparator is reproduced from source and executed (the same-day pair sorts to the correction regardless of input order) rather than merely asserted about, plus a guard that the canonical resolver still orders the way this one now copies. Found before the July/August backfill, which would have baked the arbitrary choice into ~500 orders.
+
 ## BUG-2026-08-21-160 — a dropdown on the Inventory screen re-routes money between P&L accounts, and left no record that it had `accounting` `audit-logging` `data-integrity` 🟢
 
 > Found while answering what looked like a filing question — 「12 笔 B.FILLER 海绵要不要也并进 S.FILLER」 — and turned out to be an accounting one.

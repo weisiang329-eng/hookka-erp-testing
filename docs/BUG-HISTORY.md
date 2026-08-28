@@ -144,6 +144,18 @@ on an invoice that was never posted (that is `/backfill-gl-postings`' job).
 
 Regression: `tests/pi-resync-gl.test.mjs`.
 
+**And the repair now finishes the job itself.** Leaving the re-sync as a
+sentence in the response is what produced the five mismatches in the first
+place, so `repair-rounded-unit-prices` SELF-CALLS
+`POST /purchase-invoices/:id/resync-gl` for every invoice it touched — the same
+"call the real path, never copy it" rule the July/August invoice backfill
+settled on, under the CALLER's own session. A DRAFT answers 409 (nothing was
+ever posted) and that counts as success; anything else lands in
+`ledgerFailures` with the response saying plainly that the books are out of
+step. The old test asserted the WARNING TEXT and passed the whole time the
+books were wrong; it now asserts that the ledger actually moves and that no leg
+builder has been copied into the file.
+
 **One row per invoice line — caught on production, in the dry run, before any
 write.** The first live report showed **9 lines, −RM 24.50**. Two supplier
 documents had been scanned TWICE (a retry, a re-upload, the cache path) and each

@@ -170,13 +170,58 @@ test('the header is RE-DERIVED from its lines, never adjusted by a delta', () =>
   );
 });
 
-test('it does not pretend to have restated the ledger', () => {
-  // Rewriting a posted invoice's GL legs means reversing and re-posting on the
-  // hash chain — that logic lives in invoices.ts and is reached through Edit.
-  // Copying it here would be the seventh copy of a thing this repo has already
-  // been burned by duplicating.
-  assert.match(POST, /Ledger legs are NOT rewritten here/);
-  for (const forbidden of ['buildJournalEntryStatements', 'ledger_journal_entries']) {
+test('the repair FINISHES the ledger — it does not leave a note asking someone to', () => {
+  // This is the test that would have caught the real failure. The endpoint used
+  // to return a sentence saying the caller must re-post by hand. Measured on
+  // prod minutes after the first run: five CONFIRMED invoices with the GL still
+  // on the old amount, gaps to RM 40.00, and they were the ONLY pi_gl_mismatch
+  // rows in the system — this endpoint had created every one.
+  //
+  // An accurate warning nobody acts on still leaves the books wrong.
+  assert.match(POST, /\/api\/purchase-invoices\/\$\{piId\}\/resync-gl\?dryRun=false/);
+  assert.match(POST, /method: "POST", headers: \{ cookie, "x-csrf-token": csrf \}/);
+  assert.equal(
+    /Ledger legs are NOT rewritten here/.test(SRC),
+    false,
+    'the note that stood in for doing the work must be gone',
+  );
+});
+
+test('a ledger re-sync that fails is REPORTED, never swallowed', () => {
+  // Lines corrected + ledger not moved is the worst of the three states: it
+  // looks finished and the books are out of step. It must be loud.
+  assert.match(POST, /const ledgerFailures = ledger\.filter\(\(l\) => !l\.ok\);/);
+  assert.match(POST, /their LEDGER did NOT re-sync/);
+  assert.match(POST, /ledgerFailures,/, 'and it rides in the response body');
+  // A DRAFT answers 409 because nothing was ever posted — correct, not a failure,
+  // but still reported rather than inferred.
+  assert.match(POST, /res\.ok \|\| res\.status === 409/);
+});
+
+test('the self-call runs under the CALLER’s session', () => {
+  // No shared secret, no elevated path: whoever may correct the ledger by hand
+  // is exactly who may do it here.
+  assert.match(POST, /const cookie = c\.req\.header\("cookie"\)/);
+  assert.match(POST, /const csrf = c\.req\.header\("x-csrf-token"\)/);
+});
+
+test('it moves the ledger by CALLING the real path, never by copying it', () => {
+  // AMENDED 2026-08-28. This test used to assert the note that said "Ledger legs
+  // are NOT rewritten here", and it passed while five invoices sat with their GL
+  // on the old amount. The property worth pinning was never "does it say so" —
+  // it is "does the ledger end up right, without a second copy of the posting
+  // logic in this file".
+  //
+  // Both halves matter. Copying the leg builders here would be the seventh copy
+  // of a thing this repo has been burned by duplicating; not moving the ledger
+  // at all leaves the books out of step. The self-call is what satisfies both.
+  assert.match(POST, /resync-gl\?dryRun=false/, 'the ledger must actually move');
+  for (const forbidden of [
+    'buildJournalEntryStatements',
+    'buildPiDeltaLegs',
+    'buildPiApprovalLegs',
+    'ledger_journal_entries',
+  ]) {
     assert.equal(SRC.includes(forbidden), false, `${forbidden} must stay in its own module`);
   }
 });

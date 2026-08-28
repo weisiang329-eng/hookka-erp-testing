@@ -206,7 +206,10 @@ export function sanitizeSupplierDoc(
         qty != null &&
         qty > 0
       ) {
-        unitPrice = Math.round((amount / qty) * 100) / 100;
+        // Four decimals, not two: RM 33.00 over 600 pcs is RM 0.055, and
+        // rounding it here to RM 0.06 re-creates the very RM 3.00 error
+        // this derivation exists to avoid.
+        unitPrice = Math.round((amount / qty) * 10000) / 10000;
       }
       return {
         supplierCode: str(l?.supplierCode),

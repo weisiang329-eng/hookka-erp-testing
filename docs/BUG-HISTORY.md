@@ -79,6 +79,39 @@ Entries themselves stay newest-first.
 - **Class**: fix-the-instance-miss-the-twins (`docs/BUG-CLASSES.md`), compounded
   by a runtime-only schema path whose application nobody could observe.
 
+### Third pass — repairing the invoices already written, and two upstream sites
+
+Owner: 「你把之前的那个因为三位数、四位数不能填进去的问题，都帮我 backfill 回去」.
+
+**The damage is not recoverable by arithmetic.** The rounding happened on the
+way IN — RM 0.055 became 6 sen before anything was written, and the line total
+was recomputed FROM that 6. The invoice agrees with itself perfectly; nothing
+inside the ERP disagrees. That is exactly why it survived.
+
+The evidence lives in ONE place: `scan_queue.raw_json`, the scanner's structured
+reading of the supplier's own PDF, recording `unitPrice: 0.055` beside
+`amount: 33.00` as printed. The PDF bytes are NULLed on consume; that JSON is
+not. So `import-completion/rounded-price-repair.ts` **copies the supplier's own
+number** — the owner's standing rule for this shape — behind a confidence gate
+that requires the scanned document to agree with ITSELF, and refuses (with a
+named reason) on an ambiguous pairing, a missing line, a self-contradicting
+scan, or a gap larger than a rounding.
+
+Two more rounding sites found on the way, both UPSTREAM of everything the first
+two passes fixed:
+
+- **`scan-engine.ts`** derived a missing unit price as `amount / qty` rounded to
+  two decimals of RINGGIT. RM 33.00 / 600 → RM 0.06 — the derivation re-created
+  the exact error it exists to avoid.
+- **`supplier-binding-learn.ts`** rounded the price it writes into the supplier
+  price list, which is what the NEXT purchase order copies from. A fix that
+  stops at the documents but leaves the price list rounded regenerates the bug
+  on the next order.
+
+Hand-typed purchase orders are deliberately out of scope: no scan means no
+evidence, and the only record of the true price is the supplier's paper. The
+report counts them rather than guessing.
+
 ### Second pass, same day — the price has to survive the whole chain
 
 Owner, after the first fix landed: 「只要任何有需要的地方都需要支持」.

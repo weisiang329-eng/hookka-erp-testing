@@ -36,6 +36,7 @@ import { readFileSync } from 'node:fs';
 import {
   persistSoOriginal,
   originalSourceForRow,
+  newQueueBytesCache,
 } from '../src/lib/so-original.ts';
 
 // --- a fetch stub that records every call --------------------------------
@@ -207,5 +208,70 @@ test('every SO-creation branch in scan-po-modal calls persistSoOriginal', () => 
   assert.ok(
     awaited < consumed,
     'the attachment copies must finish before the queue rows are consumed',
+  );
+});
+
+// --- 9. one scanned PDF, one download ------------------------------------
+test('several POs off ONE scan download the source once, not once each', async () => {
+  // The fault this exists to stop: eight POs on one PDF meant eight parallel
+  // downloads of the same multi-megabyte file, and some lost. Because the
+  // failure lands on the BYTES fetch rather than the upload, nothing reaches
+  // the server's error log — on prod (2026-08-26) it showed up only as a batch
+  // of eight Carress orders where the first three kept their original and the
+  // last five did not.
+  const f = stubFetch();
+  const cache = newQueueBytesCache();
+  const results = await withFetch(f, () =>
+    Promise.all(
+      [1, 2, 3, 4, 5, 6, 7, 8].map((n) =>
+        persistSoOriginal(`so-${n}`, { kind: 'queue', rowId: 'row-1' }, `PO-${n}`, cache),
+      ),
+    ),
+  );
+  assert.deepEqual(
+    results.map((r) => r.ok),
+    Array(8).fill(true),
+    'every PO keeps its original',
+  );
+  const byteCalls = f.calls.filter((c) => c.url.includes('/api/scan-queue/'));
+  assert.equal(byteCalls.length, 1, 'the PDF is downloaded ONCE for all eight');
+  const uploads = f.calls.filter((c) => c.url.includes('/api/files'));
+  assert.equal(uploads.length, 8, 'but each SO still gets its own attachment');
+});
+
+test('two DIFFERENT scans still download separately', async () => {
+  const f = stubFetch();
+  const cache = newQueueBytesCache();
+  await withFetch(f, () =>
+    Promise.all([
+      persistSoOriginal('so-a', { kind: 'queue', rowId: 'row-a' }, 'PO-A', cache),
+      persistSoOriginal('so-b', { kind: 'queue', rowId: 'row-b' }, 'PO-B', cache),
+    ]),
+  );
+  assert.equal(f.calls.filter((c) => c.url.includes('/api/scan-queue/')).length, 2);
+});
+
+test('a failed download is not remembered as the answer', async () => {
+  // Otherwise one blip would poison every later PO from that scan.
+  const cache = newQueueBytesCache();
+  const bad = await quiet(() =>
+    withFetch(stubFetch({ bytesStatus: 500 }), () =>
+      persistSoOriginal('so-x', { kind: 'queue', rowId: 'row-z' }, 'PO-X', cache),
+    ),
+  );
+  assert.equal(bad.ok, false);
+  const good = await withFetch(stubFetch(), () =>
+    persistSoOriginal('so-y', { kind: 'queue', rowId: 'row-z' }, 'PO-Y', cache),
+  );
+  assert.equal(good.ok, true, 'the retry is allowed to fetch again');
+});
+
+test('the queue-path create branch passes a shared cache', () => {
+  const src = readFileSync('src/components/scan-po-modal.tsx', 'utf8');
+  assert.match(src, /const originalBytes = newQueueBytesCache\(\);/);
+  assert.match(
+    src,
+    /originalSourceForRow\(row\),[\s\S]{0,80}?originalBytes,/,
+    'the queue branch must share one download across the pass',
   );
 });

@@ -59,6 +59,22 @@ Entries themselves stay newest-first.
   reaches the action, fields survive, closures unchanged; typecheck clean;
   live re-test after deploy = owner posts the July JV.
 
+## BUG-2026-08-26-168 — several POs on one scanned PDF fought each other for the download, and some lost `sales-orders` `ui-frontend` `data-integrity` 🟢
+
+> Owner: 「今天又有问题，昨天又有问题，前天又有问题…先把现在的问题修掉，就是后面的单不要再出现这样的问题了」
+
+The RBAC fix (BUG-2026-08-21-159) removed the wall, and originals started saving again — 42 of the 60 orders created after it kept theirs, against 0 before. But 18 did not, and it was still happening daily.
+
+**Seven of the eighteen were not misses at all.** A SERVICE ORDER is copied from an existing order, never scanned from a customer's PO, so it has no original to lose. The report listed them anyway, so every day carried a few false alarms — and a report that cries wolf daily is one nobody reads on the day it is right. Those are now excluded.
+
+**The other eleven were real, and eight were one customer.** `persistSoOriginal` fetches `/api/scan-queue/:id/bytes` per SALES ORDER. A scanned PDF can hold several customer POs, so eight POs off one scan meant **eight parallel downloads of the same multi-megabyte file**, fired together by `Promise.all`. Some lost. The failure is caught and reported per-PO, and because it lands on the BYTES fetch rather than the upload, **nothing reaches the server's error log** — which is why a check for `/api/files` errors came back empty and made the client look innocent. The prod signature was a batch of eight Carress orders (2026-08-24 08:31) where the first three kept their original and the last five did not.
+
+**Fix:** the bytes for a scan are fetched ONCE per create pass and shared. The cache holds the in-flight promise, so a call arriving mid-download waits rather than starting its own; a failed download is evicted so the next PO may retry.
+
+**The cache is passed IN rather than held in the module** — and that distinction was not a preference. The first attempt used a module-level Map, and the existing "empty source bytes" test went red: a Map that outlives the scan it belongs to hands a later fetch of the same row the earlier answer. Scoped to one create pass, the test passes on its own terms.
+
+Regression: `tests/so-original-every-path.test.mjs` — eight POs off one row cause exactly ONE download and eight attachments, two different rows still download separately, a failed download is not remembered, and the create branch is asserted to pass the shared cache.
+
 ## BUG-2026-08-25-167 — `ORDER BY rowid` on Postgres, and a line pairing that depended on an order that does not exist `pricing` `invoices` `infrastructure` 🟢
 
 🟢 Fixed. The new invoice backfill 500'd the moment a single invoice entered its scope. Small scopes appeared to pass — they returned early on zero invoices, so every "OK" was the empty path.

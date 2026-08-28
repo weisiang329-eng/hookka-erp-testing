@@ -112,6 +112,17 @@ Hand-typed purchase orders are deliberately out of scope: no scan means no
 evidence, and the only record of the true price is the supplier's paper. The
 report counts them rather than guessing.
 
+**One row per invoice line — caught on production, in the dry run, before any
+write.** The first live report showed **9 lines, −RM 24.50**. Two supplier
+documents had been scanned TWICE (a retry, a re-upload, the cache path) and each
+reading matched the SAME invoice line, so 9 rows were really 7 and the true
+figure was **−RM 14.50**. The write itself would have been harmless — the same
+value written twice — but **the money is the thing being approved**, and a
+report that inflates it by 69% is a report that gets approved for the wrong
+reason. Readings that agree now collapse to one row; readings that DISAGREE
+about the same line are a genuine ambiguity and both are refused. This is the
+same "count the claimants" rule the July/August invoice backfill settled on.
+
 ### Second pass, same day — the price has to survive the whole chain
 
 Owner, after the first fix landed: 「只要任何有需要的地方都需要支持」.

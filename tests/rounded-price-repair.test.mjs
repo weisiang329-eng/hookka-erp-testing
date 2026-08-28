@@ -105,6 +105,30 @@ test('every refusal is counted and named in the summary', () => {
   assert.match(SRC, /scansTruncated/, 'a capped scan read must say so');
 });
 
+test('ONE row per invoice line — a document scanned twice is not counted twice', () => {
+  // Caught on PRODUCTION, in the dry run, before any write: 9 reported rows
+  // were only 7 invoice lines, because two supplier documents had been scanned
+  // twice and each reading matched the same line. The WRITE would have been
+  // harmless (identical value, twice) but the reported money was -RM 24.50
+  // against a true -RM 14.50 — and the money is the thing being approved.
+  const SRC2 = readFileSync('src/api/routes/import-completion/rounded-price-repair.ts', 'utf8');
+  assert.match(SRC2, /const byItem = new Map<string, Candidate\[\]>\(\);/);
+  assert.match(SRC2, /const prices = new Set\(group\.map\(\(g\) => g\.scannedUnitSen\)\);/);
+  assert.match(SRC2, /if \(prices\.size === 1\)/, 'agreeing readings collapse to one row');
+  assert.match(
+    SRC2,
+    /scans of this document disagree on the price/,
+    'disagreeing readings are refused, never picked',
+  );
+});
+
+test('the dedupe keeps the refusals visible rather than dropping them', () => {
+  // A refused row carries no itemId and must survive to the report — silently
+  // dropping it would turn "refused for a reason" into "never existed".
+  const SRC2 = readFileSync('src/api/routes/import-completion/rounded-price-repair.ts', 'utf8');
+  assert.match(SRC2, /if \(!cd\.eligible \|\| !cd\.itemId\) \{[\s\S]{0,40}?deduped\.push\(cd\);/);
+});
+
 // --- 3. safety ------------------------------------------------------------
 test('PAID and PARTIAL_PAID invoices cannot enter the plan by construction', () => {
   // Money has changed hands against a document the supplier holds; correcting

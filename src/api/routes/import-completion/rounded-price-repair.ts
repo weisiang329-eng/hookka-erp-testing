@@ -314,7 +314,40 @@ async function buildPlan(
     }
   }
 
-  return { candidates, scansRead: scans.length, scansTruncated, docsWithSubCent, noInvoiceMatch };
+  // 5. ONE row per invoice line. The same supplier document is often scanned
+  //    more than once — a retry, a re-upload, the cache path — and each of
+  //    those readings matches the SAME invoice line. Left as-is the write is
+  //    harmless (identical value written twice) but the REPORT double-counts
+  //    the money, and the money is the thing being approved: measured on prod
+  //    2026-08-28, 9 rows were only 7 lines, and -RM 24.50 was really -RM 14.50.
+  //
+  //    Two readings that DISAGREE about the same line is a genuine ambiguity,
+  //    not a duplicate, so both are refused rather than one being picked.
+  const byItem = new Map<string, Candidate[]>();
+  const deduped: Candidate[] = [];
+  for (const cd of candidates) {
+    if (!cd.eligible || !cd.itemId) {
+      deduped.push(cd);
+      continue;
+    }
+    byItem.set(cd.itemId, [...(byItem.get(cd.itemId) ?? []), cd]);
+  }
+  for (const [, group] of byItem) {
+    const prices = new Set(group.map((g) => g.scannedUnitSen));
+    if (prices.size === 1) {
+      deduped.push(group[0]);
+      continue;
+    }
+    for (const g of group) {
+      deduped.push({
+        ...g,
+        eligible: false,
+        whyNot: `${prices.size} scans of this document disagree on the price (${[...prices].join(", ")} sen)`,
+      });
+    }
+  }
+
+  return { candidates: deduped, scansRead: scans.length, scansTruncated, docsWithSubCent, noInvoiceMatch };
 }
 
 function summarise(plan: Plan) {

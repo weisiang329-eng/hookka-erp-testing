@@ -26,6 +26,7 @@ import { MoneyInput } from "@/components/ui/money-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency } from "@/lib/utils";
+import { roundUnitPriceSen } from "@/lib/unit-price";
 import type { Supplier, RawMaterial, SupplierMaterialBinding, PurchaseOrder } from "@/types";
 import { MaterialPicker, type MaterialOption } from "@/components/material-picker";
 import { ArrowLeft, Plus, Save, Trash2, FolderInput } from "lucide-react";
@@ -528,7 +529,10 @@ function CreatePurchaseInvoicePage() {
               materialName: l.materialName.trim(),
               supplierSku: l.supplierSku.trim() || null,
               qty: Number(l.qty) || 0,
-              unitPriceSen: Math.round((Number(l.unitPriceRM) || 0) * 100),
+              // A RATE, not an amount: keep the sub-cent digits. Math.round here
+              // turned the supplier's RM 0.055 into RM 0.06 before it ever
+              // reached the (now NUMERIC(14,4)) column.
+              unitPriceSen: roundUnitPriceSen((Number(l.unitPriceRM) || 0) * 100),
               taxSen: lineTaxSen < 0 ? 0 : lineTaxSen,
               lineType: "STOCKED" as const,
               // Convert-chain: carry the GRN source line so the backend draws down

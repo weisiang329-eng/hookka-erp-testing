@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
+import { ensureUnitPricePrecision } from "../lib/unit-price-precision";
 import type { Env } from "../worker";
 import { requirePermission, requireFinance } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
@@ -50,6 +51,9 @@ let piMigrationPromise: Promise<void> | null = null;
 function ensurePiMigrations(db: D1Database): Promise<void> {
   if (piMigrationPromise) return piMigrationPromise;
   piMigrationPromise = (async () => {
+    // A unit price is a RATE with four decimals of sen. Shared with the PO and
+    // GRN routes so the three cannot drift apart again.
+    await ensureUnitPricePrecision(db);
     const stmts = [
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS grn_id TEXT",
       "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS grn_item_id TEXT",
@@ -61,18 +65,11 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // for lines invoiced straight off a PO with no receipt in between.
       "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS po_id TEXT",
       "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS invoiced_qty NUMERIC DEFAULT 0",
-      // Sub-cent unit prices (owner 2026-08-15, OCEAN SKY invoice 2608-461:
-      // "NAIL LEG 5/8 — 600 PCS @ 0.05500 = 33.00"). An INTEGER column rounds
-      // RM0.055 to RM0.06 on the way in, and 600 x RM0.06 is RM36.00 — RM3
-      // invented on one line, invisible on screen because the line total is
-      // recomputed from the same rounded price.
-      //
-      // integer → numeric is a widening conversion: every existing value is
-      // already a valid numeric, so no data moves and no USING clause is
-      // needed. Scale 4 is two decimals of sen, which is the finest resolution
-      // suppliers actually quote. LINE TOTALS stay integer sen deliberately —
-      // a rate needs the precision, an amount that changes hands does not.
-      "ALTER TABLE purchase_invoice_items ALTER COLUMN unit_price_sen TYPE NUMERIC(14,4)",
+      // Sub-cent unit prices are NOT here. They used to be — one ALTER in each
+      // of three route files, each awaited on WRITES only, so the column stayed
+      // INTEGER until somebody happened to save a document. It is one
+      // definition in api/lib/unit-price-precision.ts now, and it is applied
+      // from the read paths too. See the call above.
       // Supplier reference numbers (owner 2026-06-21): the supplier's own
       // invoice number AND their delivery-order number. snake_case → no
       // column-rename-map.json entry needed.
@@ -772,6 +769,10 @@ async function generatePiNo(db: D1Database): Promise<string> {
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
   const db = c.var.DB;
+  // Opening the list is enough to widen the unit-price column. Cheap after the
+  // first time (one catalogue read, no DDL), and it removes the dependency on
+  // somebody saving a document before the schema fix reaches production.
+  await ensureUnitPricePrecision(db);
   const statusParam = c.req.query("status") ?? "";
   const supplierIdParam = c.req.query("supplierId") ?? "";
   const dateFrom = c.req.query("dateFrom") ?? "";

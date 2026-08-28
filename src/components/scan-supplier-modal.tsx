@@ -52,6 +52,7 @@ import {
   CachedScanNotice,
 } from "@/components/scan-cached-hint";
 import { bestMatch } from "@/lib/party-fuzzy-match";
+import { roundUnitPriceSen } from "@/lib/unit-price";
 import { resolvePoLink, splitPoRefs } from "@/lib/po-ref-match";
 import {
   allocateLinesToPos,
@@ -2062,7 +2063,10 @@ function CreatePIWizard({
               materialName: (l.materialName || l.description).trim(),
               supplierSku: l.supplierSku.trim() || null,
               qty: Number(l.qty) || 0,
-              unitPriceSen: Math.round((Number(l.unitPriceRM) || 0) * 100),
+              // A RATE, not an amount: keep the sub-cent digits. Math.round here
+              // turned the supplier's RM 0.055 into RM 0.06 before it ever
+              // reached the (now NUMERIC(14,4)) column.
+              unitPriceSen: roundUnitPriceSen((Number(l.unitPriceRM) || 0) * 100),
               taxSen: lineTaxSen < 0 ? 0 : lineTaxSen,
               lineType: "STOCKED" as const,
               grnItemId: null,
@@ -3519,9 +3523,13 @@ function PICard({
                     />
                   </td>
                   <td className="px-1 py-1">
+                    {/* A RATE, not an amount — suppliers quote piece prices at
+                        RM 0.055, and step="0.01" makes the browser refuse the
+                        keystroke outright. The tax cell beside this one is an
+                        amount and correctly stays at 0.01. */}
                     <Input
                       type="number"
-                      step="0.01"
+                      step="0.0001"
                       className="h-8 text-xs text-right"
                       value={num(line.unitPriceRM)}
                       onChange={(e) =>

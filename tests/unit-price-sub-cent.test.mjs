@@ -67,25 +67,25 @@ test("purchase-invoices no longer rounds the rate", () => {
   );
 });
 
-test("every table holding a unit price is widened in a self-apply block", () => {
-  // Migrations are inert in this repo — a migration file alone would change
-  // nothing in production. The ALTER must live in the runtime block that is
-  // awaited before the first write, so that is what is asserted.
-  for (const [file, alter] of [
-    [
-      "../src/api/routes/purchase-invoices.ts",
-      /ALTER TABLE purchase_invoice_items ALTER COLUMN unit_price_sen TYPE NUMERIC\(14,4\)/,
-    ],
-    [
-      "../src/api/routes/purchase-orders.ts",
-      /ALTER TABLE purchase_order_items ALTER COLUMN unit_price_sen TYPE NUMERIC\(14,4\)/,
-    ],
-    [
-      "../src/api/routes/grn.ts",
-      /ALTER TABLE grn_items ALTER COLUMN unit_price TYPE NUMERIC\(14,4\)/,
-    ],
+test("every table holding a unit price is widened by the shared self-apply", () => {
+  // AMENDED 2026-08-28. This test used to assert one ALTER inside each of the
+  // three route files, and it passed while the fix was NOT reaching production:
+  // every one of those blocks is awaited on WRITES only, so the column stayed
+  // INTEGER until somebody happened to save a purchase invoice. The assertion
+  // was true and the property it stood for was false.
+  //
+  // The three copies are now one definition, applied from the READ paths too.
+  // The full set of assertions lives in unit-price-four-decimals.test.mjs; what
+  // is kept here is the link, so this file cannot silently stop covering it.
+  const lib = read("../src/api/lib/unit-price-precision.ts");
+  assert.match(lib, /widenUnitPriceSql\(r\.table, r\.column\)/);
+  assert.match(lib, /export function ensureUnitPricePrecision/);
+  for (const file of [
+    "../src/api/routes/purchase-invoices.ts",
+    "../src/api/routes/purchase-orders.ts",
+    "../src/api/routes/grn.ts",
   ]) {
-    assert.match(read(file), alter, file);
+    assert.match(read(file), /ensureUnitPricePrecision\(/, file);
   }
 });
 

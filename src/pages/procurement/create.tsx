@@ -31,6 +31,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency, formatRM } from "@/lib/utils";
+import {
+  roundUnitPriceSen,
+  lineTotalSen,
+  formatUnitPriceInput,
+} from "@/lib/unit-price";
 import type { Supplier, SupplierMaterialBinding, RawMaterial } from "@/types";
 import { ArrowLeft, Plus, Save, Trash2 } from "lucide-react";
 import { parseMoneyInput } from "@/lib/parse-money";
@@ -1009,18 +1014,20 @@ function CreatePurchaseOrderPage() {
                           </td>
                           {/* Price (RM) */}
                           <td className="px-3 py-2 text-right">
+                            {/* A unit price is a RATE: step="0.01" made the
+                                browser refuse RM 0.055 outright. */}
                             <Input
                               className="h-8 text-sm text-right"
                               type="number"
-                              step="0.01"
+                              step="0.0001"
                               inputMode="decimal"
                               onFocus={(e) => e.currentTarget.select()}
                               min={0}
-                              value={item.unitPriceSen === 0 ? "" : (item.unitPriceSen / 100).toFixed(2)}
+                              value={item.unitPriceSen === 0 ? "" : formatUnitPriceInput(item.unitPriceSen)}
                               onChange={(e) => {
                                 // BUG-2026-08-13-095 - one money parser. `type="number"`, so the browser blocked the comma and this was never the live bug; converted so one parser owns money, and so an unreadable value can no longer be written as NaN.
                                 const rm = parseMoneyInput(e.target.value);
-                                const sen = rm !== null && rm >= 0 ? Math.round(rm * 100) : 0;
+                                const sen = rm !== null && rm >= 0 ? roundUnitPriceSen(rm * 100) : 0;
                                 updateItemPrice(idx, sen);
                               }}
                             />
@@ -1035,7 +1042,7 @@ function CreatePurchaseOrderPage() {
                           <td className="px-3 py-2 text-right text-sm text-[#374151]">{item.moq}</td>
                           {/* Line total */}
                           <td className="px-3 py-2 text-right text-sm font-medium amount text-[#1F1D1B]">
-                            {formatCurrency(item.quantity * item.unitPriceSen)}
+                            {formatCurrency(lineTotalSen(item.quantity, item.unitPriceSen))}
                           </td>
                           {/* Delete */}
                           <td className="px-3 py-2 text-right">

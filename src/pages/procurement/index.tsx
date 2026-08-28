@@ -12,6 +12,7 @@ import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { StatusTabStrip } from "@/components/ui/status-tab-strip";
 import { tabTotals } from "@/lib/status-tab-strip";
 import { formatCurrency, cn } from "@/lib/utils";
+import { roundUnitPriceSen, lineTotalSen } from "@/lib/unit-price";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } from "@/types";
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
@@ -698,7 +699,9 @@ function POFormDialog({
                             className="h-8 text-xs"
                             value={item.unitPriceSen === 0 ? null : item.unitPriceSen / 100}
                             onChange={(rm) => {
-                              const sen = rm !== null && rm >= 0 ? Math.round(rm * 100) : 0;
+                              // A RATE — keep the sub-cent digits (RM 0.055).
+                              const sen =
+                                rm !== null && rm >= 0 ? roundUnitPriceSen(rm * 100) : 0;
                               updateItemPrice(idx, sen);
                             }}
                           />
@@ -723,7 +726,7 @@ function POFormDialog({
                         </div>
                         <div className="col-span-3 flex items-end justify-end">
                           <span className="text-xs font-medium text-[#1F1D1B]">
-                            Line total: {formatCurrency(item.quantity * item.unitPriceSen)}
+                            Line total: {formatCurrency(lineTotalSen(item.quantity, item.unitPriceSen))}
                           </span>
                         </div>
                       </div>

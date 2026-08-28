@@ -51,3 +51,65 @@ export function roundUnitPriceSen(sen: number): number {
 export function lineTotalSen(qty: number, unitPriceSen: number): number {
   return Math.round(qty * unitPriceSen);
 }
+
+/**
+ * Render a stored unit price for an EDITABLE text/number input.
+ *
+ * Two decimals is the floor — RM 25 must still read "25.00" so the ordinary
+ * case looks untouched — and the third and fourth digits appear only when the
+ * price actually carries them.
+ *
+ * This exists because `(sen / 100).toFixed(2)` was seeding every unit-price
+ * field in the procurement forms. That is a silent truncation on the way IN:
+ * the operator opens a saved RM 0.055 line, the field says "0.06", and saving
+ * writes 0.06 back. A correct column and a correct multiplication cannot
+ * survive a form that rounds the value before the operator has touched it.
+ */
+export function formatUnitPriceInput(sen: number): string {
+  if (!Number.isFinite(sen)) return "";
+  let s = (sen / 100).toFixed(4);
+  // Trim trailing zeros, but never past two decimals.
+  while (s.endsWith("0") && !/\.\d\d$/.test(s)) s = s.slice(0, -1);
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+// The DB side of the same rule.
+//
+// These live here, in the zero-import module, rather than next to the runtime
+// self-apply that uses them, for one reason: the self-apply file imports the
+// Worker's helpers and cannot be loaded by a plain `node --test`. Keeping the
+// DECISION pure means the thing that decides "is this column wide enough" is
+// executed by a test, not merely read by one.
+// ---------------------------------------------------------------------------
+
+/** Decimal places kept on a stored unit price: four of ringgit, two of sen. */
+export const UNIT_PRICE_DECIMALS = 4;
+
+/** Every column that holds a unit price as a RATE rather than an amount. */
+export const UNIT_PRICE_COLUMNS: ReadonlyArray<{ table: string; column: string }> = [
+  { table: "purchase_invoice_items", column: "unit_price_sen" },
+  { table: "purchase_order_items", column: "unit_price_sen" },
+  { table: "grn_items", column: "unit_price" },
+];
+
+/**
+ * Can this column hold RM 0.055?
+ *
+ * A column that is ABSENT is not ok. Reporting a missing column as fine is the
+ * absence-read-as-a-value mistake this repo keeps paying for, and it would make
+ * the diagnostic answer "all good" on a database that has no such table.
+ */
+export function precisionOk(
+  dataType: string | null | undefined,
+  scale: number | null | undefined,
+): boolean {
+  if (!dataType) return false;
+  if (scale == null) return false; // integer columns report no scale
+  return scale >= UNIT_PRICE_DECIMALS;
+}
+
+/** The widening statement for one column. integer → numeric moves no data. */
+export function widenUnitPriceSql(table: string, column: string): string {
+  return `ALTER TABLE ${table} ALTER COLUMN ${column} TYPE NUMERIC(14,${UNIT_PRICE_DECIMALS})`;
+}

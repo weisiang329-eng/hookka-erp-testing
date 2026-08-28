@@ -105,8 +105,12 @@ export default function ForecastPage() {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [showEmpty, setShowEmpty] = useState(true);
   // Salaries are keyed PER DEPARTMENT (owner 2026-08-11) — seeded from the
-  // departments payslips have seen, plus any dept already keyed in the blob.
-  const [depts, setDepts] = useState<string[]>([]);
+  // departments MASTER (production AND non-production, owner 2026-08-24) plus
+  // any dept already keyed in the blob. Each dept carries the P&L bucket its
+  // labour-map account belongs to, so its row files in the right section;
+  // mappedAccounts is the set a dept-mode month supersedes.
+  const [deptInfo, setDeptInfo] = useState<{ code: string; bucket: string }[]>([]);
+  const [mappedAccounts, setMappedAccounts] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let stale = false;
@@ -138,14 +142,23 @@ export default function ForecastPage() {
           next[ym] = { salesStr: m.salesSen ? (Number(m.salesSen) / 100).toFixed(2) : "", pct };
         }
         setMonths(next);
-        // Dept row list = live payslip departments ∪ departments already keyed
-        // in the saved blob (a keyed dept must never vanish from the grid).
-        const live = ((deptJ?.data as { departments?: string[] } | undefined)?.departments ?? []).filter(
-          (d): d is string => typeof d === "string" && d.length > 0,
-        );
-        const savedDepts = new Set<string>();
-        for (const mm of Object.values(next)) for (const k of Object.keys(mm.pct)) if (k.startsWith("dept:")) savedDepts.add(k.slice(5));
-        setDepts([...new Set([...live, ...savedDepts])].sort());
+        // Dept row list = departments master ∪ departments already keyed in
+        // the saved blob (a keyed dept must never vanish from the grid). The
+        // endpoint classifies each dept by its labour-map account's bucket;
+        // a saved dept the master no longer knows defaults to DIRECT_LABOUR.
+        const deptData = deptJ?.data as
+          | { departments?: { code?: string; bucket?: string }[] | string[]; mappedAccounts?: string[] }
+          | undefined;
+        const live = new Map<string, string>();
+        for (const d of deptData?.departments ?? []) {
+          if (typeof d === "string") { if (d) live.set(d, "DIRECT_LABOUR"); }
+          else if (d?.code) live.set(String(d.code), String(d.bucket ?? "DIRECT_LABOUR"));
+        }
+        for (const mm of Object.values(next))
+          for (const k of Object.keys(mm.pct))
+            if (k.startsWith("dept:") && !live.has(k.slice(5))) live.set(k.slice(5), "DIRECT_LABOUR");
+        setDeptInfo([...live.entries()].map(([code, bucket]) => ({ code, bucket })).sort((a, b) => a.code.localeCompare(b.code)));
+        setMappedAccounts(new Set((deptData?.mappedAccounts ?? []).filter((a): a is string => typeof a === "string")));
         // Saved figures exist → start with empty lines hidden (owner rule);
         // a fresh page shows everything so the first month can be keyed.
         setShowEmpty(!Object.values(next).some((mm) => Object.keys(mm.pct).length > 0));
@@ -192,11 +205,21 @@ export default function ForecastPage() {
     return {
       materials,
       direct,
-      // Owner 2026-08-11: salaries are FORECAST PER DEPARTMENT. The dept rows
-      // are keyable pseudo-lines (`dept:<CODE>`, same trick as `cat:`); the
-      // 750-x account rows stay visible for legacy months but are SUPERSEDED
-      // the moment a month carries any dept entry (shared rule, salary-dept.ts).
-      labour: depts.map((d) => ({ code: `dept:${d}`, name: d, type: "COST" }) as CoaAcct),
+      // Owner 2026-08-11: salaries are FORECAST PER DEPARTMENT — pseudo-lines
+      // `dept:<CODE>` (same trick as `cat:`). Owner 2026-08-24: every dept in
+      // the MASTER is keyable, and each row files in the SAME P&L section its
+      // labour-map account posts to (production → direct labour; warehouse /
+      // maintenance → factory overhead; office / R&D → operating expenses).
+      // Accounts the labour map can post to are SUPERSEDED in dept-mode months.
+      labour: deptInfo
+        .filter((d) => d.bucket !== "FACTORY_OVERHEAD" && d.bucket !== "OPEX_SALARIES" && d.bucket !== "OPERATING_EXPENSE")
+        .map((d) => ({ code: `dept:${d.code}`, name: d.code, type: "COST" }) as CoaAcct),
+      labourOvhDepts: deptInfo
+        .filter((d) => d.bucket === "FACTORY_OVERHEAD")
+        .map((d) => ({ code: `dept:${d.code}`, name: d.code, type: "COST" }) as CoaAcct),
+      labourExpDepts: deptInfo
+        .filter((d) => d.bucket === "OPEX_SALARIES" || d.bucket === "OPERATING_EXPENSE")
+        .map((d) => ({ code: `dept:${d.code}`, name: d.code, type: "EXPENSE" }) as CoaAcct),
       labourAccounts: byBucket("DIRECT_LABOUR"),
       overhead: byBucket("FACTORY_OVERHEAD"),
       otherIncome: byBucket("OTHER_INCOME"),
@@ -204,9 +227,9 @@ export default function ForecastPage() {
         a.code.localeCompare(b.code),
       ),
     };
-  }, [accounts, override, depts]);
+  }, [accounts, override, deptInfo]);
   const cogsRows = useMemo(
-    () => [...lines.materials, ...lines.direct, ...lines.labour, ...lines.labourAccounts, ...lines.overhead],
+    () => [...lines.materials, ...lines.direct, ...lines.labour, ...lines.labourOvhDepts, ...lines.labourAccounts, ...lines.overhead],
     [lines],
   );
 
@@ -231,16 +254,18 @@ export default function ForecastPage() {
       return Math.round((salesSen * strToBp(e?.p ?? "")) / 10000);
     };
     const sum = (rows: CoaAcct[]) => rows.reduce((s, r) => s + amt(r.code), 0);
-    // Supersede rule (salary-dept.ts): a month with any dept row ignores its
-    // 750-x account entries, or labour would double-count.
+    // Supersede rule (salary-dept.ts): a month with any dept row ignores the
+    // 750-x accounts AND every account the labour map posts to — keying both
+    // a dept row and its account would double-count the same wages.
     const deptMode = monthHasDeptForecast(m?.pct);
-    const sumGuard = (rows: CoaAcct[]) =>
-      rows.reduce((s, r) => (deptMode && forecastEntryKind(r.code) === "labourAccount" ? s : s + amt(r.code)), 0);
+    const superseded = (code: string) =>
+      deptMode && (forecastEntryKind(code) === "labourAccount" || mappedAccounts.has(code));
+    const sumGuard = (rows: CoaAcct[]) => rows.reduce((s, r) => (superseded(r.code) ? s : s + amt(r.code)), 0);
     const cogs = sumGuard(cogsRows);
     const oi = sum(lines.otherIncome);
-    const exp = sum(lines.expenses);
+    const exp = sumGuard([...lines.expenses, ...lines.labourExpDepts]);
     const gp = salesSen - cogs;
-    return { salesSen, amt, cogs, gp, oi, exp, np: gp + oi - exp };
+    return { salesSen, amt, cogs, gp, oi, exp, np: gp + oi - exp, superseded };
   };
 
   // Keying one side CLEARS the other (owner: "就是其中一个").
@@ -326,6 +351,15 @@ export default function ForecastPage() {
   const cellInputs = (ym: string, code: string) => {
     const e = months[ym]?.pct[code] ?? {};
     const c = calc(ym);
+    // A dept-mode month owns these wages in its department rows — the mapped
+    // account's cell goes quiet instead of silently not counting.
+    if (c.superseded(code)) {
+      return (
+        <span className="text-[11px] text-[#C7C1BA]" title="Superseded by the department rows for this month">
+          —
+        </span>
+      );
+    }
     const amtKeyed = e.a !== undefined && e.a !== "";
     const pctKeyed = e.p !== undefined && e.p !== "";
     const derivedPct =
@@ -413,7 +447,7 @@ export default function ForecastPage() {
           </td>
           {yms.map((ym) => {
             const c = calc(ym);
-            const tot = rows.reduce((s, r) => s + c.amt(r.code), 0);
+            const tot = rows.reduce((s, r) => (c.superseded(r.code) ? s : s + c.amt(r.code)), 0);
             return (
               <td key={ym} className="px-2 py-1.5 text-right font-semibold text-[#6B5C32] border-l border-[#F0ECE9]">
                 {amtWithPct(tot, c.salesSen, true)}
@@ -580,10 +614,12 @@ export default function ForecastPage() {
                   </>
                 )}
                 {section("ovh", "FACTORY OVERHEAD", lines.overhead)}
+                {section("ovhDept", "OVERHEAD SALARIES — BY DEPARTMENT", lines.labourOvhDepts)}
                 {totalRow("TOTAL COGS", (c) => c.cogs)}
                 {totalRow("GROSS PROFIT", (c) => c.gp, true)}
                 {section("oi", "OTHER INCOME", lines.otherIncome)}
                 {section("exp", "OPERATING EXPENSES", lines.expenses)}
+                {section("expDept", "NON-PRODUCTION SALARIES — BY DEPARTMENT", lines.labourExpDepts)}
                 {totalRow("TOTAL EXPENSES", (c) => c.exp)}
                 {totalRow("NET PROFIT", (c) => c.np, true)}
               </tbody>

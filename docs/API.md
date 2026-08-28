@@ -31,7 +31,7 @@ as a Cloudflare Pages Function via `functions/api/[[route]].ts`. There is no
   route module) and is exempt from the rate limiter.
 
 **Counts at generation time:** 139 mounts, 136 route files in
-`src/api/routes/`, 943 top-level handler registrations discovered.
+`src/api/routes/`, 944 top-level handler registrations discovered.
 
 ## Scope and limits of this file
 
@@ -81,7 +81,7 @@ offsets pointing past the end of their own file.
 | `/api/organisations` | `src/api/routes/organisations.ts` | `GET /` <sub>:361</sub><br>`POST /` <sub>:417</sub><br>`PATCH /:id` <sub>:511</sub><br>`DELETE /:id` <sub>:619</sub><br>`PUT /` <sub>:646</sub> | gated |
 | `/api/sales-orders` | `src/api/routes/sales-orders.ts` | `GET /` <sub>:165</sub><br>`POST /check-customer-pos` <sub>:757</sub><br>`POST /backfill-hub-by-state` <sub>:819</sub><br>`GET /status-changes` <sub>:952</sub><br>`GET /stats` <sub>:984</sub><br>`GET /delivery-progress` <sub>:1113</sub><br>`GET /missing-original` <sub>:1189</sub><br>`GET /late-to-customer` <sub>:1270</sub><br>`GET /repair-components` <sub>:1305</sub><br>`GET /:id/edit-eligibility` <sub>:1390</sub><br>`POST /:id/override-edit-lock` <sub>:1504</sub><br>`POST /` <sub>:1718</sub><br>`POST /:id/confirm` <sub>:2499</sub><br>`GET /:ref/footprint` <sub>:2842</sub><br>`GET /:id` <sub>:2849</sub><br>`PUT /:id` <sub>:3101</sub><br>`PATCH /:id/hub` <sub>:4539</sub><br>`DELETE /:id` <sub>:5220</sub><br>`POST /copy-for-service-order` <sub>:5326</sub><br>`POST /batch-company` <sub>:5708</sub> | gated |
 | `/api/purchase-orders` | `src/api/routes/purchase-orders.ts` | `GET /` <sub>:323</sub><br>`GET /stats` <sub>:419</sub><br>`POST /` <sub>:434</sub><br>`GET /:id` <sub>:705</sub><br>`PUT /:id` <sub>:764</sub><br>`POST /:id/email` <sub>:1114</sub><br>`DELETE /:id` <sub>:1175</sub> | gated |
-| `/api/purchase-invoices` | `src/api/routes/purchase-invoices.ts` | `GET /` <sub>:770</sub><br>`GET /:id` <sub>:823</sub><br>`POST /` <sub>:1069</sub><br>`POST /repair-gl-visibility` <sub>:1857</sub><br>`POST /backfill-gl-postings` <sub>:1903</sub><br>`PUT /:id` <sub>:1922</sub><br>`DELETE /:id` <sub>:2575</sub><br>`POST /:id/void` <sub>:2712</sub><br>`POST /:id/unvoid` <sub>:2817</sub> | gated |
+| `/api/purchase-invoices` | `src/api/routes/purchase-invoices.ts` | `GET /` <sub>:770</sub><br>`GET /:id` <sub>:823</sub><br>`POST /` <sub>:1069</sub><br>`POST /repair-gl-visibility` <sub>:1857</sub><br>`POST /backfill-gl-postings` <sub>:1903</sub><br>`PUT /:id` <sub>:1922</sub><br>`DELETE /:id` <sub>:2575</sub><br>`POST /:id/void` <sub>:2712</sub><br>`POST /:id/unvoid` <sub>:2817</sub><br>`POST /:id/resync-gl` <sub>:2924</sub> | gated |
 | `/api/credit-notes` | `src/api/routes/credit-notes.ts` | `GET /` <sub>:189</sub><br>`POST /` <sub>:204</sub><br>`GET /:id` <sub>:448</sub><br>`PUT /:id` <sub>:471</sub> | gated |
 | `/api/debit-notes` | `src/api/routes/debit-notes.ts` | `GET /` <sub>:122</sub><br>`POST /` <sub>:137</sub><br>`GET /:id` <sub>:282</sub><br>`PUT /:id` <sub>:302</sub> | gated |
 | `/api/e-invoices` | `src/api/routes/e-invoices.ts` | `GET /` <sub>:119</sub><br>`POST /` <sub>:134</sub><br>`GET /:id` <sub>:235</sub><br>`PUT /:id` <sub>:257</sub> | gated |

@@ -2888,4 +2888,176 @@ app.post("/:id/unvoid", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/purchase-invoices/:id/resync-gl?dryRun=false
+//
+// Move a CONFIRMED invoice's ledger position to what its lines say TODAY.
+//
+// ## Why this exists
+//
+// The PUT path already posts a correcting double-entry when an edit changes a
+// CONFIRMED invoice's amount. It fires on `recomputedAmount !== existing.amountSen`
+// — so it is blind to a repair that writes the lines directly, which is exactly
+// what `import-completion/rounded-price-repair.ts` does: by the time it finishes,
+// the header already agrees with the lines and there is no delta left to detect.
+// Measured on prod 2026-08-28: five invoices whose face had moved while the GL
+// still carried the old amount, and they were the ONLY `pi_gl_mismatch` rows in
+// the system.
+//
+// ## Why it is safe to run twice
+//
+// It reuses `loadPiLedgerNet` + `buildPiDeltaLegs`, the same pair the void path
+// uses. Those derive the move from WHAT IS ACTUALLY POSTED rather than from a
+// count of button presses — so a second call computes an all-zero delta and
+// writes nothing. Idempotence is a property of the arithmetic here, not a flag.
+//
+// The legs carry `purchase_invoice_restate_post`, deliberately reusing an
+// existing suffix in `doc-date.ts`'s alternation so they date to the INVOICE,
+// not to the day the repair ran. Inventing a new sourceType is a two-file change
+// and forgetting the second file is silent — that is BUG-2026-08-06-001, class
+// C5, which has now happened three times.
+//
+// Refused on anything but CONFIRMED-and-unpaid: a DRAFT was never posted (use
+// backfill-gl-postings), a CANCELLED invoice is deliberately at zero, and a paid
+// one is a credit note, not an edit.
+// ---------------------------------------------------------------------------
+app.post("/:id/resync-gl", async (c) => {
+  const denied = requireFinance(c);
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const db = c.var.DB;
+  await ensurePiMigrations(db);
+  const dryRun = c.req.query("dryRun") !== "false";
+
+  const pi = await db
+    .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
+    .bind(id)
+    .first<PurchaseInvoiceRow>();
+  if (!pi) return c.json({ success: false, error: "Purchase invoice not found" }, 404);
+
+  const status = String(pi.status ?? "");
+  if (status !== "CONFIRMED") {
+    return c.json(
+      {
+        success: false,
+        error:
+          status === "DRAFT"
+            ? "A draft has no posting to re-sync."
+            : status === "CANCELLED"
+              ? "A voided invoice is deliberately netted to zero."
+              : `An invoice in ${status} has money applied — correct it with a credit note, not a re-sync.`,
+      },
+      409,
+    );
+  }
+  const paidSen = Number(
+    (pi as unknown as { paidAmountSen?: number; paid_amount_sen?: number }).paidAmountSen ??
+      (pi as unknown as { paid_amount_sen?: number }).paid_amount_sen ??
+      0,
+  );
+  if (paidSen > 0) {
+    return c.json(
+      {
+        success: false,
+        error: `RM ${(paidSen / 100).toFixed(2)} has been paid against this invoice — un-apply the payment first.`,
+      },
+      409,
+    );
+  }
+
+  const { total, orgId: legOrgId, legs } = await loadPiLedgerNet(db, id);
+  if (legs === 0) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "This invoice has never been posted, so there is nothing to re-sync — use /backfill-gl-postings to post it.",
+      },
+      409,
+    );
+  }
+
+  // The TARGET: what this invoice's CURRENT lines would post as, built through
+  // the same mapper + leg builder the original posting used, so a correction
+  // lands in the same 70x accounts rather than a parallel set.
+  const itemRows =
+    (
+      await db
+        .prepare("SELECT * FROM purchase_invoice_items WHERE pi_id = ?")
+        .bind(id)
+        .all<Record<string, unknown>>()
+    ).results ?? [];
+  const lines = itemRows.map((r) => ({
+    mc: (r.material_code ?? r.materialCode ?? null) as string | null,
+    amt: Number(r.line_total_sen ?? r.lineTotalSen ?? 0),
+    lt: String(r.line_type ?? r.lineType ?? "STOCKED"),
+    taxAmt: Number(r.tax_sen ?? r.taxSen ?? 0),
+  }));
+  const { bucket, pdefault } = await mapPurchaseLinesToAccounts(db, lines);
+  const apTotalSen = Math.round(Number(pi.amountSen) || 0);
+  const wanted = buildPiApprovalLegs({
+    piNo: String(pi.piNo ?? id),
+    supplierName: String(pi.supplierName ?? ""),
+    apTotalSen,
+    drBucket: bucket,
+    pdefault,
+  });
+  const target = new Map<string, number>();
+  for (const l of wanted) {
+    target.set(
+      l.accountCode,
+      (target.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
+    );
+  }
+
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  const orgId = legOrgId ?? getOrgId(c);
+  const deltaLegs = buildPiDeltaLegs(target, total, {
+    sourceType: "purchase_invoice_restate_post",
+    sourceId: id,
+    description: `GL re-sync · PI ${pi.piNo ?? id} · ${pi.supplierName ?? ""}`,
+    actorUserId,
+    orgId,
+  });
+
+  const movement = deltaLegs.map((l) => ({
+    accountCode: l.accountCode,
+    debitSen: l.debitSen,
+    creditSen: l.creditSen,
+  }));
+
+  if (deltaLegs.length === 0) {
+    return c.json({
+      success: true,
+      dryRun,
+      data: { id, piNo: pi.piNo, alreadyInSync: true, apTotalSen, movement: [] },
+    });
+  }
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      data: { id, piNo: pi.piNo, alreadyInSync: false, apTotalSen, movement },
+    });
+  }
+
+  const { statements } = await buildJournalEntryStatements(db, orgId, deltaLegs);
+  await db.batch(statements);
+
+  await emitAudit(c, {
+    resource: "purchase-invoices",
+    resourceId: id,
+    action: "resync-gl",
+    before: { amountSen: pi.amountSen, ledgerLegsSeen: legs },
+    after: { apTotalSen, correctionLegs: movement },
+  });
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    data: { id, piNo: pi.piNo, alreadyInSync: false, apTotalSen, movement },
+  });
+});
+
 export default app;

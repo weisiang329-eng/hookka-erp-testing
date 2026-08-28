@@ -34,6 +34,51 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-28-168 — the sub-cent price fix shipped in four places and reached the operator in none of them `procurement` `money` 🟢
+
+- **Symptom (Siti → owner, 2026-08-28 13:23)**: 「i try to enter the price, it
+  was still rounding off the amount」 — the day after the sub-cent fix
+  ([#335]) merged. Owner: 「全部啊 我们的 FE BE DB 都要可以 不可以进位成 0.66
+  的 我们的 account 就不对到完了」 and 「你想看 我需要给 rm0.055 然后变成给
+  0.06 不是代表给多了吗 account 怎么能对账呢」.
+- **The money**: OCEAN SKY 2608-461 quotes NAIL LEG 5/8 at 600 PCS × RM 0.05500
+  = RM 33.00. Recorded at RM 0.06 that line is RM 36.00 — RM 3.00 invented, and
+  **invisible**, because the line total is recomputed from the rounded rate and
+  therefore agrees with itself. Only the supplier's paper disagrees.
+- **Root cause, and it is a shape not an oversight**: #335 was correct in
+  everything it touched — the three columns widened, `MoneyInput` given
+  `step="0.0001"`, `formatCurrency` taught a third and fourth digit,
+  `lineTotalSen` written to multiply first and round once. The procurement
+  forms do not go through those helpers. Each carried its own `step="0.01"`,
+  its own `(sen / 100).toFixed(2)` seed and its own `Math.round(rm * 100)` on
+  submit — **nine sites across six files**, including the OCR path
+  (`scan-supplier-modal.tsx`) that produced the OCEAN SKY invoice in the first
+  place, and the PI Edit seed, which truncated a correctly-stored RM 0.055 the
+  instant the operator pressed Edit and wrote 0.06 back on save.
+- **Second, separate fault — the DB fix was never proven applied.** Migrations
+  are inert on deploy here; the widening lived as one ALTER inside each of
+  three route self-apply blocks, and every one of those is awaited on **writes
+  only**. So between the deploy and somebody's first save, the honest answer to
+  "is production fixed?" was *nobody can say*. The old regression test asserted
+  those three ALTERs and passed the whole time: the assertion was true and the
+  property it stood for was false.
+- **Fix**: one definition in `src/api/lib/unit-price-precision.ts`, called from
+  the PI / PO / GRN **list handlers** as well as the write paths — opening a
+  page is now enough. It probes `information_schema` first and issues DDL only
+  for a column still too narrow, so the steady state is one catalogue read and
+  no table lock. All nine form sites moved onto `roundUnitPriceSen` /
+  `lineTotalSen` / `formatUnitPriceInput`. `GET /api/import/unit-price-precision`
+  reports the live column types and deliberately does **not** repair them — a
+  probe that fixes what it measures cannot answer the question being asked.
+- **Rate vs amount is preserved**: tax, discount, line totals and payments stay
+  whole sen. Only the three unit-price columns carry four decimals.
+- **Regression**: `tests/unit-price-four-decimals.test.mjs` (21 tests) —
+  executes the arithmetic on the real invoice, round-trips the form seed, and
+  COUNTS the form sites rather than checking the one that was reported.
+  `tests/unit-price-sub-cent.test.mjs` amended, with the reason it used to pass.
+- **Class**: fix-the-instance-miss-the-twins (`docs/BUG-CLASSES.md`), compounded
+  by a runtime-only schema path whose application nobody could observe.
+
 ## BUG-2026-08-27-001 — every JV action in the row menu was dead: the context menu called `action({})`, so Post hit `PUT /journals/undefined` `ui-frontend` `accounting` 🟢
 
 - **Symptom (owner, 2026-08-27)**: 「每次 JV 都会 merge 不上」— posting the July

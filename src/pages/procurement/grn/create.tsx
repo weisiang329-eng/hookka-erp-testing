@@ -41,6 +41,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MoneyInput } from "@/components/ui/money-input";
+import { roundUnitPriceSen } from "@/lib/unit-price";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { PurchaseOrder, Supplier, RawMaterial, SupplierMaterialBinding } from "@/types";
@@ -1367,7 +1368,8 @@ function GRNCreatePage() {
                             updateManualItem(
                               row.id,
                               "unitPriceSen",
-                              Math.round((v ?? 0) * 100),
+                              // A RATE, not an amount — keep the sub-cent digits.
+                              roundUnitPriceSen((v ?? 0) * 100),
                             )
                           }
                           className="w-28 ml-auto"

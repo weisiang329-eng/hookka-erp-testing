@@ -20,7 +20,7 @@ Owns the shop floor: a **dept-tabbed WIP board** (one production_order per confi
   - `/production/tracker` → redirect to `/planning?tab=tracker` (`src/dashboard-routes.tsx`). The Master Tracker lives as a TAB of the Planning page; the standalone `production/tracker.tsx` was deleted 2026-08-13 — unreachable since the route became a redirect, imported nowhere. **`PlanningPage` does not read `?tab=` yet** (`activeTab` is local state), so this redirect and the Production page's own "Master Tracker" button both land on Capacity Overview.
   - `/production/scan` → `src/pages/production/scan.tsx` (shop-floor dept scan) · `/production/fg-scan` → `src/pages/production/fg-scan.tsx`
   - `/production/wip-times` → `src/pages/production/wip-times.tsx` (per-dept minute rates)
-  - `/bom` → `src/pages/bom.tsx:6136` (`BOMManagementPage`) · `/cnc-templates` → `src/pages/cnc-templates.tsx`
+  - `/bom` → `src/pages/bom.tsx:6245` (`BOMManagementPage`) · `/cnc-templates` → `src/pages/cnc-templates.tsx`
 - API routes
   - PO / job-card / WIP / scan **handlers** → `src/api/routes/production-orders.ts` (3903 lines); every shared
     function lives in `src/api/routes/production-orders/_helpers.ts` (5799). Mounted `worker.ts:1233`.
@@ -42,7 +42,7 @@ Owns the shop floor: a **dept-tabbed WIP board** (one production_order per confi
 1. **BOM explosion → job cards** — `breakBomIntoWips` (`bom-wip-breakdown.ts:350`) reads `bom_templates.wipComponents`, resolves tokens (`resolveWipTokens:151`) and stamps each card's `wipKey` via `deriveTopLevelWipKey` (`:125`) — THE single shared wipKey formula (FAB_SEW splits on `'::'`[2], etc.). Shared with `po-cost-cascade` and `repair-scope`; never re-implement.
 2. **Dept scan-complete** — three sibling handlers by dept/sticker: `app.post("/:id/scan-complete")` (`production-orders.ts:1862`, PACKING per-piece), `/scan-complete-dept` (`:2460`, FAB_CUT/FAB_SEW), `/scan-complete-shared` (`:2787`, Sew/Uph). Each has dual auth (dashboard RBAC OR X-Worker-Token), advances the card, then calls `recomputePoStatusAndProgress` (`_helpers.ts:4133`).
 3. **PO status recompute + completion cascade** — `recomputePoStatusAndProgress` (`_helpers.ts:4133`) is the single source of truth for PO `status` + progress. On full completion it fans out to `postProductionOrderCompletion` (`fg-completion.ts`, FG units/batches), `postJobCardLabor` (`po-cost-cascade.ts:953`), and the SO/CO cascades (`cascadePoCompletionToSO` `_helpers.ts:3900` / `cascadeUpholsteryToSO` `:3536` / `cascadeCNCompletionToCO` `:3994`).
-4. **Cost cascade** — on scan/completion: `consumeRawMaterialsForPO` (`po-cost-cascade.ts:671`, RM_ISSUE), `postJobCardLabor` (`:953`, LABOR_POSTED — idempotent via a `cost_ledger` check in the scan handler), `backfillFGBatchCost` (`:1153`), `postWIPCompletionMarker` (`:1276`). All append-only to `cost_ledger`.
+4. **Cost cascade** — on scan/completion: `consumeRawMaterialsForPO` (`po-cost-cascade.ts:803`, RM_ISSUE), `postJobCardLabor` (`:953`, LABOR_POSTED — idempotent via a `cost_ledger` check in the scan handler), `backfillFGBatchCost` (`:1153`), `postWIPCompletionMarker` (`:1276`). All append-only to `cost_ledger`.
 5. **Stock PO create** — `app.post("/stock")` (`production-orders.ts:1187`) builds make-to-stock POs (no SO). Board list read is `app.get("/")` (`:726`) via `fetchFilteredPOs` (`_helpers.ts:1444`); board summary `app.get("/board")` (`:3301`).
 6. **BOM edit** — `bom.tsx` `EditBOMDialog` (`:2963`) → `PUT /templates/:id` (`bom.ts:484`); master templates via `MasterTemplatesDialog` (`bom.tsx:3893`). Per-dept minute rates are edited on `src/pages/production/wip-times.tsx` (backed by `wip-times.ts`) and land in `bom_templates.wipComponents`.
 
@@ -52,8 +52,8 @@ Owns the shop floor: a **dept-tabbed WIP board** (one production_order per confi
 | `ProductionPage` | `src/pages/production/index.tsx:548` | WIP board; every column/row branches on `activeTab` |
 | `filteredOrders` (memo) | `src/pages/production/index.tsx:2825` | Dept-narrow + overdue-set grid filter |
 | `loadFgStickers` / `packingStickerUrl` | `src/pages/production/index.tsx:5506 / 5465` | FG sticker set (immediate paint → /p/ token upgrade) |
-| `BOMManagementPage` | `src/pages/bom.tsx:6136` | BOM page shell (tabs, list) |
-| `EditBOMDialog` / `MasterTemplatesDialog` | `src/pages/bom.tsx:2963 / 3893` | L1+WIP editor / master variants |
+| `BOMManagementPage` | `src/pages/bom.tsx:6245` | BOM page shell (tabs, list) |
+| `EditBOMDialog` / `MasterTemplatesDialog` | `src/pages/bom.tsx:3070 / 4001` | L1+WIP editor / master variants |
 | `rowToPO` | `production-orders/_helpers.ts:905` | PO row → API shape (dual-keyed reads) |
 | `applyWipInventoryChange` | `production-orders/_helpers.ts:2574` | WIP inventory change; idempotent ONLY when `orgId` passed |
 | `recomputePoStatusAndProgress` | `production-orders/_helpers.ts:4133` | Single source of truth for PO status/progress |
@@ -65,7 +65,7 @@ Owns the shop floor: a **dept-tabbed WIP board** (one production_order per confi
 | `app.post("/packing-rack-tokens")` | `production-orders.ts:1642` | Authed /p/ piece-token mint (batched) |
 | `GET /overdue-counts` | `production-orders.ts:393` | Server overdue set behind the grid chips |
 | `deriveTopLevelWipKey` / `breakBomIntoWips` | `src/api/lib/bom-wip-breakdown.ts:125 / 350` | THE wipKey formula / BOM → job-card WIPs |
-| `consumeRawMaterialsForPO` / `postJobCardLabor` | `src/api/lib/po-cost-cascade.ts:671 / 953` | RM consumption / labour GL posting |
+| `consumeRawMaterialsForPO` / `postJobCardLabor` | `src/api/lib/po-cost-cascade.ts:813 / 1116` | RM consumption / labour GL posting |
 | `applyPackingRack` | `src/api/lib/packing-rack-write.ts:71` | Rack set/clear + rack_items occupancy mirror |
 | `PUT /templates/:id` / `POST /templates/bulk-process-edit` | `src/api/routes/bom.ts:484 / 631` | BOM template update / batch process edit |
 | `GET /:id/events` | `src/api/routes/job-cards.ts:430` | Job-card event timeline |
@@ -88,7 +88,7 @@ Owns the shop floor: a **dept-tabbed WIP board** (one production_order per confi
 ## Common tasks (mini-playbook)
 - **Add a field to a PO** → column self-apply in `ensurePendingMigrations` (`production-orders/_helpers.ts:98`); persist in `applyPoUpdate` (`_helpers.ts:4274`); surface in `rowToPO` (`_helpers.ts:905`); render in `index.tsx:548`. New column snake_case (+ rename-map if camelCase). Keep the list snapshot in sync.
 - **Change the scan/completion cascade** → edit `recomputePoStatusAndProgress` (`_helpers.ts:4133`) and the relevant `scan-complete*` handler (`production-orders.ts:1862`/`:2460`/`:2787`); keep the SO/CO cascade (`cascadePoCompletionToSO` `_helpers.ts:3900`) and cost cascade (`po-cost-cascade.ts`) in sync.
-- **Adjust the cost cascade** → `consumeRawMaterialsForPO` / `postJobCardLabor` / `backfillFGBatchCost` in `po-cost-cascade.ts:671/953/1153`; all append-only to `cost_ledger`, guard idempotency (labour checks `cost_ledger` before posting).
+- **Adjust the cost cascade** → `consumeRawMaterialsForPO` / `postJobCardLabor` / `backfillFGBatchCost` in `po-cost-cascade.ts:803/953/1153`; all append-only to `cost_ledger`, guard idempotency (labour checks `cost_ledger` before posting).
 - **Change BOM explosion** → `breakBomIntoWips` / `deriveTopLevelWipKey` (`bom-wip-breakdown.ts:350/125`); verify with `tests/bom-explosion.test.mjs` + `tests/production-order-builder.test.mjs`. Never re-implement the wipKey formula.
 - **Touch a BOM template** → `bom.tsx` dialogs → `bom.ts` (`GET /templates:231`, `PUT /templates:377`, `PUT /templates/:id:484`, `bulk-process-edit:631`); master variants via `bom-master-templates.ts`.
 

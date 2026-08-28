@@ -67,13 +67,22 @@ function emailValid(v: string): boolean {
   return isValidEmail(v);
 }
 
-async function getLeads(): Promise<Lead[]> {
+// The list endpoint is paginated (it used to return the whole table on every
+// call, which stops being survivable the moment a bought contact list lands —
+// the Penang file alone is 939 rows). It returns `total` beside the page, and
+// this board shows only the first page.
+//
+// So the total is carried back and displayed. A board silently holding 200 of
+// 939 leads, with nothing on screen saying so, is worse than a slow board: the
+// salesperson would work the list believing they had seen all of it.
+async function getLeads(): Promise<{ leads: Lead[]; total: number }> {
   try {
     const r = await fetch("/api/sales-leads");
-    const j = (await r.json()) as { success: boolean; data?: Lead[] };
-    return j.success && j.data ? j.data : [];
+    const j = (await r.json()) as { success: boolean; data?: Lead[]; total?: number };
+    const leads = j.success && j.data ? j.data : [];
+    return { leads, total: Number(j.total ?? leads.length) };
   } catch {
-    return [];
+    return { leads: [], total: 0 };
   }
 }
 
@@ -99,10 +108,13 @@ export default function LeadsPage() {
   const [openLeadId, setOpenLeadId] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverStage, setDragOverStage] = useState<string | null>(null);
+  // Rows the server holds for this org, which may exceed the page shown here.
+  const [leadTotal, setLeadTotal] = useState(0);
 
   const reload = useCallback(async () => {
     const [ls, fu] = await Promise.all([getLeads(), getFollowUps()]);
-    setLeads(ls);
+    setLeads(ls.leads);
+    setLeadTotal(ls.total);
     setFollowUps(fu);
     setLoaded(true);
   }, []);
@@ -183,6 +195,16 @@ export default function LeadsPage() {
 
   return (
     <div className="p-6">
+      {/* The board shows one page. Say so when there is more, rather than
+          letting a salesperson work a truncated list believing it is the whole
+          one — see getLeads above. */}
+      {leadTotal > leads.length && (
+        <div className="mb-4 rounded-lg border border-[#E5C88A] bg-[#FDF6E7] px-4 py-2.5 text-sm text-[#7A5A16]">
+          Showing <strong>{leads.length}</strong> of <strong>{leadTotal}</strong> leads.
+          The board is built for deals you are actively working — use the leads list to
+          search and filter the full set.
+        </div>
+      )}
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
         <div>

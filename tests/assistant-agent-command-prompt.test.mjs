@@ -34,8 +34,16 @@ test("system prompt no longer declares a blanket STRICTLY READ-ONLY refusal", ()
     /You are STRICTLY READ-ONLY\. You cannot create, update, or delete anything\./,
     "the blanket read-only line caused the model to refuse commanding/teaching agents",
   );
-  // It should still say it's read-only for ERP DATA (scoped, not blanket).
-  assert.match(p, /READ-ONLY for ERP DATA/, "must still be read-only for ERP data");
+  // It must still be read-only for the BUSINESS RECORDS — scoped, not blanket.
+  // The wording moved from "ERP DATA" to "business documents" when the schedule
+  // approval flow landed; what matters is that the scope is still stated, not
+  // which noun it uses.
+  assert.match(
+    p,
+    /READ-ONLY for (ERP DATA|business documents)/,
+    "must still say it is read-only for business records",
+  );
+  assert.match(p, /cannot create, update, or delete/, "the refusal itself must survive");
 });
 
 test("system prompt tells the model it CAN command + teach agents", () => {

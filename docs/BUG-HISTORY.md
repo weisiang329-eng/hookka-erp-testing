@@ -30,9 +30,295 @@ Entries themselves stay newest-first.
 - `data-integrity` (4) — [BUG-2026-04-25-008](#bug-2026-04-25-008-stability-add-timeout-abort-propagation-to-fetchjson)
 - `auth-rbac` (3) — [BUG-2026-06-12-010](#bug-2026-06-12-010--any-admin-could-disable-or-delete-other-peoples-accounts-no-admin-tier-below-super-admin)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
-- `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+- `audit-logging` (2) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
 
 ---
+
+## BUG-2026-08-25-167 — `ORDER BY rowid` on Postgres, and a line pairing that depended on an order that does not exist `pricing` `invoices` `infrastructure` 🟢
+
+🟢 Fixed. The new invoice backfill 500'd the moment a single invoice entered its scope. Small scopes appeared to pass — they returned early on zero invoices, so every "OK" was the empty path.
+
+**`ORDER BY rowid` is a SQLite pseudo-column and does not exist on Postgres.** It was carried over from the prior art in `admin.ts` (`/backfill-invoice-prices`), which still contains it — that endpoint would fail the same way on the live database, and is worth knowing before anyone reaches for it.
+
+The deeper problem the crash exposed: the pairing of invoice lines to delivery lines was "the nth occurrence of this product code", which needs a reliable line order **on both sides**. There is none — `invoice_items` has no line number. Ordering by `id` would have RUN, and been a guess: two lines of the same product on one invoice can come from different sales orders at different prices, and nothing records which line is which.
+
+So the pairing no longer depends on order at all. When a product code appears more than once on an invoice, **every** delivery counterpart must resolve to the same build-up — then the pairing cannot matter. If they disagree, those lines are refused and named ("same product on this invoice resolves to different prices — cannot tell which line is which"), the same discipline as a contested sales-order line.
+
+Worth recording: the crash was the lucky part. `ORDER BY id` would have produced plausible numbers on the ambiguous invoices, and nothing would have flagged them.
+
+Regression: `tests/invoice-backfill-from-so.test.mjs` (14 tests).
+
+## BUG-2026-08-24-166 — the surcharge backfill would have wiped RM 9,670 of special-order charges to zero `pricing` `sales-orders` `data-integrity` 🟢
+
+🟢 Fixed before it wrote anything. Caught by reading the FIRST dry run of an endpoint written that same hour — and the defect was in that new endpoint, not in older code.
+
+`/refresh-so-surcharges` re-derives a line's divan / leg / total-height / special-order charges from the owner's current lists. Its first live dry run reported **37 lines, net −RM 9,555** where an independent check had found only 8 lines needing correction. The breakdown said why: **27 lines going special-order → RM 0**, RM 9,670 of charges about to be deleted.
+
+Two causes, one shape:
+
+1. `priceOfSen` returns **0** for a token it cannot find in the config. A special the current list does not name is UNKNOWN, not free — but the derivation treated the two identically.
+2. The endpoint never passed the line's own **`customSpecials`** (per-line owner-defined surcharges, stored as JSON on the row), so anything priced there derived to nothing.
+
+This is the repo's oldest documented bug shape — **an absence read as a value** — reappearing inside code written to *fix* surcharges. Worth stating plainly: the author had just spent the session catching the same shape in five other places.
+
+Fix: derive only where the derivation is CONFIDENT. Every token on the line must be priced by the config (or covered by a custom special); every height must appear in its list. Where it is not, **the stored figure stands** and the line is reported under `unresolved` with what was kept and why — silence there would read as "nothing else needed changing", which is the opposite of the truth. Total-height rides on both height lookups, since it derives from gap + divan + leg.
+
+Regression: `tests/refresh-so-surcharges.test.mjs` (15 tests).
+
+**Follow-up, same endpoint, same shape (2026-08-25).** The confidence check itself was written as a SECOND COPY of the tokenizer — splitting on `/[,+]/` while the canonical `parseSpecialOrderTokens` splits on `/[;,]/` and drops `OTHER: …` free-text notes. The live data uses semicolons, so **28 lines whose specials were perfectly well known** were filed as "not priced by the list" and left untouched. It now calls the canonical parser, and "known" is decided by the STATIC catalog (`specialOrderOptions`) because `priceOfSen` returns 0 for any name absent from it regardless of the config. Writing the parser twice is the same mistake that put six copies of a dropped surcharge term in this repo — third time in two days.
+
+## BUG-2026-08-24-165 — the repricer would have billed customers for free repairs, and multiplied one line by nine `pricing` `sales-orders` `data-integrity` 🟢
+
+🟢 Fixed. Both found by READING the dry run before the July/August backfill ran, and neither would have raised an error if written.
+
+**Service orders.** Owner's rule, stated 2026-08-24 in as few words as it needs: 「service order是根据当初开的价格 **0就是0 有amount就是有amount**」 — a repair was quoted at a number (sometimes zero, for goodwill), the customer was told that number, and a price-list change months later does not reach back and alter what was agreed. It is a RULE, not a scope choice, so there is deliberately **no flag** to include them; a test forbids one. An `SV-` document is priced at exactly what the operator typed — 0 means 0, a free or goodwill repair. Every write path says so (the SO handler still carries a note about the SV-2606-001 RM 730 incident); this repricer had never heard of them. The 2026-08-24 dry run put **33 service-order lines** in the plan worth **+RM 15,674.50**, **19 of them currently at RM 0**. That was 76% of the run's headline total. The query now selects `isServiceOrder`, drops those orders, and reports how many it dropped — "205 lines will change" means something different if 33 were quietly dropped on the way.
+
+**Order-of-magnitude moves — and a typo in the price list.** SO-2608-234's `5536-CNR` was going to be rewritten **RM 900 → RM 8,258**. The first version of this guard compared the computed price against the PRICE LIST and did not fire, because **the list agreed with 8,258**: the master `product_prices` row effective **2026-07-18** holds `825800` sen where its neighbours (2026-08-20, 2026-08-21) hold `82500` and `90000`. One digit too many, typed into the price list itself — and the repricer resolves as of the ORDER's date, so any order dated between 2026-07-18 and 2026-08-19 picks it up.
+
+A guard that trusts the list cannot catch a bad list, so it now measures against **what the order carries today**: a line moving more than 3× in either direction is SKIPPED with a reason that names both prices and points at the SKU's price list rather than the order. **The 2026-07-18 master row for 5536-CNR is a real data error the owner still needs to correct** — the guard stops it spreading, it does not fix it.
+
+Both are the same lesson: a dry run is only worth reading if what it cannot justify appears as a SKIP with a reason rather than as a number. Regression: `tests/repricer-service-orders-and-outliers.test.mjs`, including the ratio rule executed against the real 900 → 8,258 case.
+
+## BUG-2026-08-24-164 — the repricer had no scope but status, so "July and August" meant the whole book `pricing` `sales-orders` 🟢
+
+🟢 Fixed. `/recompute-so-sofa-prices` filtered on status and nothing else. Asked to backfill July and August it would have rewritten **every order in the book** — 1,231 orders live on 2026-08-24, against the ~500 the owner had actually decided on, including other customers and other months.
+
+Added `?from=` / `?to=` (compared on the order's OWN date — `companySODate` falling back to `created_at`, the same value the pricing resolves as of), `?customerIds=`, and an exclusion for orders whose invoice is already `PAID` / `PARTIAL_PAID`. The paid exclusion is the owner's ruling (「把还没paid的都补」) and is the DEFAULT: an order whose invoice is settled is money paid against a document the customer holds, so repricing it makes the invoice disagree with the payment. It takes an explicit `?includePaid=true`.
+
+A malformed date is a 400, not a silent full-scope run — ignoring `?from=2026-7-1` would rewrite the whole book while the caller believed it was scoped to July.
+
+Every response now echoes `appliedScope` (statuses, from, to, customerIds, includePaid, paidOrdersExcluded), including the empty-scope early return: "0 orders" and "0 orders matching a filter you did not mean" are otherwise indistinguishable. Regression: `tests/repricer-scope-filters.test.mjs`.
+
+**Follow-up the same day:** the dry run also capped its change list at 10 rows with no indication that it had. Ten rows is a taste, not a decision, and this list is what a person approves before ~500 orders are rewritten — `?samples=N` now returns up to 500 and `samplesTruncated` says plainly when the list was cut.
+
+## BUG-2026-08-24-163 — the repricer's dry run counted unchanged lines as changes `pricing` `data-integrity` 🟢
+
+🟢 Fixed. The change test was `p.newLineRM !== p.oldLineRM` — a comparison of MONEY IN FLOATS, against the repo's standing rule that money is integer sen. Both fields are `sen / 100`, so a line whose price did not move could still read as moved: 103263 sen is RM 1032.63, and the recomputed path returns `1032.6299999999999`.
+
+The money itself was never wrong — the write rounds back with `Math.round(RM * 100)`, so the stored sen is exact. What was wrong is the **dry run**, and the dry run is the artefact a person approves before ~500 orders are rewritten. On the live scope it reported **351 changed lines**; an unknown share of those were lines that do not change at all, and each one still took an UPDATE.
+
+Fix: compare and sum in sen (`senOf` + `differs`), in both the SO and CO copies. Regression in `tests/repricer-total-height.test.mjs`, including the exact float that lied.
+
+Found in the same session as -161 and -162, all three in the path being prepared for the July/August price backfill.
+
+## BUG-2026-08-24-162 — the repricer dropped the total-height surcharge, in six places `pricing` `sales-orders` `data-integrity` 🟢
+
+> Owner, briefing the July/August price backfill: 「确保 BedFrame 包含 D1 price、leg price、**total height price**、special order price，再加上 Sofa 等等，全部都要有。你看一下，确保了解它的源代码是怎么计算 costing 的。」 He named the term that was missing.
+
+**Root cause.** `/api/import/recompute-so-sofa-prices` and its consignment twin built the unit price by hand — `priceSen + legPriceSen + divanPriceSen + specialOrderPriceSen` — while every WRITE path builds it through `calculateUnitPrice` (`src/lib/pricing.ts:38`), which also carries `totalHeightPriceSen`. Measured on prod the same day: of the live July/August lines carrying a height surcharge, **11 of 11** have `unitPriceSen = base + leg + divan + special + totalHeight`.
+
+So repricing a bedframe with a height surcharge **silently removed it** — a LOWER price on an order already sent to a customer, with nothing in the output naming the missing term. A 26" total height at RM 80 × 3 units is RM 240 off one line. Two of the surcharge sums also fed the combo residual, where the missing term would have been redistributed into the base and made each line's build-up stop adding up.
+
+**Six sites, not two.** SO repricer and CO repricer, each with a main pass and **two** combo-residual passes. The first sweep fixed four; the new guard went red on the remaining two, written on one line and so missed by the multi-line pattern. The site count is now asserted so a seventh cannot appear quietly.
+
+**Third instance of this exact term.** `src/api/lib/sofa-combo-pass.ts:228` still carries the comment from the last one ("Was a hardcoded 0. It feeds `surchargesPerUnitSen` … a zero here hands the surcharge's worth of the agreed combo total to the BASE price"), and the canonical engine `src/api/lib/sofa-combo.ts:318` has carried it correctly all along. The repricers were stale copies of a fixed bug — so they now CALL `calculateUnitPrice` / `calculateLineTotalWithDiscount` rather than restating them.
+
+`discountSen` was missing from the line total for the same reason: the line was `newUnit * quantity` with no discount term. Zero on every live line today (0 of 167 sampled), which is exactly how it would have stayed invisible until the first discounted line was repriced.
+
+**Verified.** `tests/repricer-total-height.test.mjs` — 8 tests, including the surcharge's effect priced in money, the six-site count, both queries actually selecting the new columns, and the row type declaring them so a missing column fails `tsc` rather than production. Full suite 4,356 pass / 0 fail. Found BEFORE the backfill ran; it would have repriced ~500 July/August orders with the surcharge stripped.
+
+## BUG-2026-08-24-161 — a same-day price correction could lose to the row it superseded `pricing` `data-integrity` 🟢
+
+🟢 Fixed. Clearing the sofa P3 prices for 2990 and Carress meant POSTing a corrected `customer_product_prices` row on the SAME `effectiveFrom` as the row it supersedes — the ordinary shape of a same-day correction. That left 60 products with two rows dated 2026-08-24, and the two readers of that table disagreed about which one wins:
+
+| reader | order | picks |
+|---|---|---|
+| `resolveCustomerPriceAsOf` (`customer-products.ts:1004`) | `effectiveFrom DESC, created_at DESC` | the correction — what the order screens show |
+| `pickActive` ×2 (`import-completion/sofa-pricing.ts`) | `effectiveFrom` only, over a query also ordered by `effectiveFrom` only | **whatever Postgres happened to return** |
+
+So the repricer could price an order off the **superseded** row while the SO screen showed the corrected one, and a re-run could disagree with itself. Nothing in the output would say so — both numbers are plausible prices, which is why it would have survived review. Fix: both copies share one comparator (`newestFirst`) and both queries select and order by `created_at`, mirroring the canonical resolver exactly.
+
+**Verified.** `tests/price-row-tiebreak.test.mjs` — the comparator is reproduced from source and executed (the same-day pair sorts to the correction regardless of input order) rather than merely asserted about, plus a guard that the canonical resolver still orders the way this one now copies. Found before the July/August backfill, which would have baked the arbitrary choice into ~500 orders.
+
+## BUG-2026-08-21-160 — a dropdown on the Inventory screen re-routes money between P&L accounts, and left no record that it had `accounting` `audit-logging` `data-integrity` 🟢
+
+> Found while answering what looked like a filing question — 「12 笔 B.FILLER 海绵要不要也并进 S.FILLER」 — and turned out to be an accounting one.
+
+**What `itemGroup` actually is.** It looks like a label on the raw-material form. It is the real AutoCount **stock-group code**, and four GL accounts hang off it:
+
+| | B.FILLER | S.FILLER |
+|---|---|---|
+| purchase | `703-0010` | `703-0020` |
+| stock | `330-2001` | `330-2002` |
+| opening / closing | `703-0001` / `703-9999` | `703-0002` / `703-9998` |
+
+Measured on prod the same day, both carrying real money: **703-0010 = RM 76,732.35 · 703-0020 = RM 92,768.43**.
+
+**The two halves of the routing disagree, and both surprise people.** The purchase account is decided when the invoice **posts** (`mapPurchaseLinesToAccounts`, `purchase-invoices.ts:170`, reads `raw_materials.item_group` as it stands at that moment), so already-posted journals keep the old account forever — moving a material **splits its own purchase history across two accounts**. The stock / opening / closing accounts are decided when the **report runs**, off the current group (`getStockMap`, `accounting.ts:5543`) — so those move **retroactively**, including for periods that already closed.
+
+**The defect.** `PUT /api/raw-materials/:id` wrote the new group and returned. No before-value, no actor, nothing. `updated_at` moved, and that was the entire trace. So "who moved this material, and when did its account change?" — a question nobody thinks to ask until a P&L comparison looks wrong — had no answer anywhere in the system. The bulk-import path was worse: it could re-group sixty materials in one request, and its pre-fetch selected only `id, itemCode`, so it could not have known a group changed even if it had wanted to record it.
+
+**How it surfaced.** I moved 11 sponges from `B.FILLER` to `S.FILLER` at 12:26 that morning on the owner's instruction (「全部都是sofa的海绵来的」). Six of them have purchase history — **RM 11,414.25 across 20 CONFIRMED (= posted) purchase invoices** — which now sits in `703-0010` while every future purchase of the same materials lands in `703-0020`. That is a defensible outcome and it may well be what he wants; what is not defensible is that nothing recorded it. I only knew which 11 they were because their `updated_at` happened to be one second apart.
+
+**Fix.** Both write paths now emit an audit event on a group change (`raw-materials.ts:533` single row, `:763` bulk), carrying old group, new group, **and the four accounts each resolves to** — snapshotted, because the owner's `coa_stock_map` override can be edited later and a bare group code is an archaeology problem six months on. The bulk pre-fetch now selects `itemGroup`, and emits **one** event for the whole sheet rather than one per row: a sheet that re-groups sixty materials is a single act by a single person, and sixty rows would bury it.
+
+New `src/api/lib/stock-group-accounts.ts` answers "which accounts does group G map to right now". It **owns no account codes** — the default maps stay with the code that posts and reports off them, and are imported — so there is no second copy to drift; a test asserts the file contains no `33x-xxxx` / `70x-xxxx` literal.
+
+**The precedence is pinned because the two readers disagree.** The purchase reader copies only `.purchase` across from the kv override, so a kv entry for another field does not shadow the built-in account. The stock reader **replaces the whole triple** — a kv row carrying only `stock` leaves opening and closing falling through to `rmDefault`, not to that group's built-in pair. `resolveGroupAccounts` mirrors both exactly; tidying either into the other would make the audit record disagree with the journal it describes.
+
+**Verified.** 12 tests (`tests/item-group-change-is-audited.test.mjs`), each guard proven red before green — removing the `itemGroup` column from the bulk pre-fetch fails, and deleting the single-row audit block fails. Full suite 4,336 pass / 0 fail. Prod figures above read live from `/api/accounting/trial-balance` and `/api/raw-materials`.
+
+**Class.** Same shape as BUG-2026-04-27-007 (audit-event write failures swallowed silently): a field that carries accounting meaning, edited through a screen that presents it as cosmetic. The generalisation worth keeping: **if a column feeds a GL account, changing it is a posting, and a posting leaves a record.**
+
+## BUG-2026-08-21-159 — nobody but an admin could attach a document: `files` was never a registered RBAC resource `security` `ui-frontend` `data-integrity` 🟢
+
+> Owner, after four separate fixes to "View original" had failed: 「fix了那么多次了」.
+> He was right. **The reason none of them worked was never in the code any of them touched.**
+
+**Root cause.** `POST /api/files` has gated on `files:create` since it shipped. `files` was
+**never listed in `ALL_RESOURCES`** (`src/api/lib/role-policy.ts`) — and `allExcept()` can
+only grant what that array contains. Measured:
+
+```
+OFFICE  files:create = DENIED   (66 perms)
+QA      files:create = DENIED   (23 perms)
+SALES   files:create = DENIED   (28 perms)
+```
+
+Only SUPER_ADMIN / ADMIN, on the legacy `*:*` wildcard, could attach anything. **The
+operators who scan the POs are OFFICE.** Every save 403'd, and the client swallowed it.
+
+**Why four fixes missed it.**
+
+| date | commit | what happened |
+|---|---|---|
+| 2026-05-06 | `a633b157` | the scanned page rode along on the SO row itself as `customerPOImageB64` — no upload, no permission. **Worked.** |
+| ~2 months | | fine, exactly as the owner remembered |
+| 2026-06-30 | `912db32b` | the OCR-queue rewrite gave queue rows a **zero-byte placeholder File**, so nothing rendered and the field went null. The commit says so in a comment — "Original PDF lives in the queue table only" — and nothing ever read it back |
+| 2026-07-15 | `8563f509` | re-fixed by uploading a durable attachment through `/api/files`: **a route the operators cannot reach** |
+| 2026-08-20 | PR #336 / #350 | my two fixes — which rows get sent, and making a failed save visible. Real defects, both CLIENT-side. The wall was on the server and I never reached it |
+
+**Measured on prod 2026-08-21:** 370 scanned SO documents in `po_scan_samples`, **zero** SO
+attachments in `files`. The same wall hits the supplier scan — owner: 「PI 也是全部OCR都是」.
+
+**How I nearly got it wrong again.** I probed `GET /api/scan-po/samples/by-po/<PO>` for three
+recent SOs, got 404 on all three, and almost concluded they had been typed by hand rather than
+scanned. Checking 25 POs gave 25 × 404 — against an OCR dashboard showing 370 documents. The
+lookup key simply is not `customerPOId`. **A 404 from a probe you have not validated is not
+evidence of absence.**
+
+**Fix.** `files` registered; granted **create + read** in the shared `EVERYONE` base rather
+than per role — the alternative is exactly what went wrong, one role quietly missing it.
+DELETE withheld: an attachment is evidence. Hence `files` in `NEVER_WILDCARD`, for a
+different reason than `users`.
+
+**The guard that matters** (`tests/rbac-files-attachable.test.mjs`): *every resource any route
+gates on must appear in `ALL_RESOURCES`.* A resource missing from that array is not a narrower
+permission — it is an **unreachable feature**, failing as a 403 raised far from the code that
+caused it. It would have failed for the whole of the last two months. Proven RED against three
+faults, including the real one.
+
+**Also recorded:** an SO carries no record of how it was created. The scan modal sends
+`source: "PO_SCAN_CLAUDE"` and the backend neither stores nor reads it, so nothing in the data
+distinguishes a scanned order from a hand-typed one — which is why "is it fixed?" could not be
+answered from the database at any point in this story. Worth adding.
+
+## BUG-2026-08-20-158 — the invoice price editor wrote RM 0 into every line the operator did not type into: 112 lines across 17 SENT invoices `invoices` `ui-frontend` `data-integrity` 🟢
+
+> Owner 2026-08-20: 「我edit了价格 然后没有edit的就被清空了」. He was exactly right, and it was
+> still happening while he asked — the most recent write was **08:40 that morning**.
+
+**Measured on prod** (500 invoices scanned, read-only): **17 invoices, 112 lines** priced at
+RM 0, **three reduced to a RM 0 total** (INV-2606-084, INV-2607-055, INV-2608-031). 14 of the
+17 were written that same day between 03:04 and 08:40. **None had taken a payment** — the only
+piece of luck here; no receipt, no reconciliation, no credit note.
+
+Every zeroed line carries `priceEdited = 1`, and exactly ONE code path writes that column
+(`invoices.ts`, the `priceEdits` branch of `PUT /:id`). So the client really did send them.
+
+**Root cause.** The invoice detail is served **stale-while-revalidate from localStorage**
+(`src/lib/cached-fetch.ts`), so `invoice.items` can **gain rows after** the price editor
+opened and seeded itself. Such a row has neither a draft nor a seed — and both fallbacks
+pointed the wrong way:
+
+```js
+const now = priceDraft[id] || ZERO;   // no draft -> the value is ZERO
+if (!was) return true;                // no seed  -> "the operator edited it"
+```
+
+Read together: **"the operator set this line to zero. Write it."** Two independent absences
+combining into a confident, wrong, money-changing assertion.
+
+**Why nobody saw it.** The table falls back to the STORED price when a line has no draft
+(`editingPrices && d`), so every row looked correct right up to the moment Save zeroed it.
+That is why the damage is patterned 16-of-18, 15-of-17, 10-of-13: the lines the operator typed
+into kept their values, every other line went to 0. An invoice where nothing was typed lost
+all of its lines.
+
+**And the test suite REQUIRED the defect.** `tests/invoice-price-buildup-rule.test.mjs`
+asserted:
+
+```js
+assert.match(body, /if \(!was\) return true/, "no seed means treat it as edited, not skipped");
+```
+
+The fault was not merely unnoticed — it was **protected**. Anyone who fixed it would have
+turned a test red and been told by a green-looking suite that they had broken the rule. It was
+a **source-shape** assertion (a regex against the component's text), which is exactly how a
+test comes to enshrine a wrong line: it can pin an implementation detail without being able to
+say whether the detail is right. Rewritten to forbid the line, with the history in place.
+
+**Fix — three layers.**
+1. The rule moved OUT of the 1,100-line component into
+   `src/lib/invoice-price-edit-payload.ts`, where a test can reach it. **No draft = UNKNOWN**,
+   never sent. A draft without a seed IS sent — over-correcting to "never write without a
+   seed" would silently drop what the operator typed.
+2. Typing into a line that has no draft now starts from what that line **actually charges**
+   rather than from zeros, so editing one component cannot drop the others.
+3. The server refuses an edit that prices a currently-charged line at RM 0 unless the client
+   flags the zero as **deliberate**. A free line is legitimate; a client that lost track of the
+   line is not, and the two arrived looking identical. It refuses the whole request — a partial
+   write leaves an invoice half-repriced with no record of which half.
+
+**Verified.** `tests/invoice-price-edit-no-implicit-zero.test.mjs` — 8 tests, 7 behavioural
+against the real exported rule. Proven RED against the original two lines (**they fail 6 of
+the 8**) and against removing either server guard. Full suite green, `tsc` strict + eslint
+clean.
+
+**The 112 lines are NOT repaired by this.** Upstream data is intact — the DO lines and the SO
+unit prices both survive, and yesterday's `so_item_id` backfill (BUG-2026-08-13-097) gives the
+per-line link — so they are recoverable. Rewriting money on 17 sent invoices is an owner
+decision and gets its own read-only dry-run first. **UNMEASURED:** the correct value for each
+of the 112 lines, until that dry-run runs.
+
+**The DISPLAY half, fixed separately (PR #350).** The owner sent a screenshot of the editor
+asking why a row showed five empty component boxes next to `Unit RM 600.00`. Both numbers were
+"right" and the row was a lie: `value={d ? d[k] : "0"}` — with no draft the boxes showed a
+literal zero while the unit price came from the stored charge. **The boxes were never a
+statement about the line**; they described what the editor happened to be holding, and nothing
+said so. Fixing only the write path would have left that trap in place — the operator still
+reads five zeroes as fact, which is the same absence-shown-as-a-value that caused the loss. The
+boxes now derive from the line (`invoicePriceEditSeed`) when there is no draft, and the
+onChange starts from those same values, one helper for both. The row's **Unit** deliberately
+still reads `item.unitPriceSen` until someone types: the charge is authoritative (rule 1 of
+`invoice-line-price.ts`), and re-deriving it from a seed that may not reconcile is the
+"Base 0 … = RM 305" bug again.
+
+**Now fixed, as rule 6 (PR #351).** `priceComponentApplies()` in
+`src/lib/invoice-line-price.ts`: divan and total height are bedframe geometry — total height
+IS divan + gap + leg — and the PDF spec line has refused to print them on a sofa since the
+owner's ruling of **2026-05-29**. The price editor never learned that rule and asked every line
+for all five.
+
+Reading the existing rule rather than guessing changed the answer: a **Leg** price DOES apply
+to a sofa (the same PDF rule prints one), so it stays. Guessing hides three boxes; the rule
+hides two. That is why it went into the shared file as a rule instead of being coded inline a
+second time.
+
+The safety property is the one that matters: **a component holding money is shown regardless of
+category.** Hiding a non-zero value would hide part of the charge and leave a Unit price the
+visible boxes cannot account for — worse than one question too many. Proven RED against four
+wrong versions of the rule, including that one.
+
+**Answered while we were there** (owner's questions on the same screenshot): the five component
+boxes render for EVERY line regardless of category, which is why a sofa shows Divan / Leg /
+T.Height — meaningless for that product, always 0, whole charge in Base. Not a data fault; a
+screen that asks five questions when the line only has one.
+
+**Class.** This is the third instance today of one shape: **an absence read as a value.**
+BUG-2026-08-19-155 (no queue id → save nothing, silently), -156 (same, purchasing side),
+and this one — which is the dangerous member of the family, because the other two only failed
+to store a file. This one changed what a customer owes.
 
 ## BUG-2026-08-19-157 — the packing sticker printed the OLD delivery hub after the order's hub moved: 3 of the 5 handlers that move a hub never told `fg_units` `delivery-orders` `data-integrity` `production-orders` 🟢
 
@@ -4515,6 +4801,37 @@ normal-punch paths unchanged). Full attendance/payroll suite green.
 **Fix** (`src/lib/cached-fetch.ts`). Add a bounded automatic retry (2 attempts, jittered 200–550ms backoff) for transient statuses 502/503/504 inside `joinInflight`, before it throws. Every URL through this path is an idempotent GET (SWR reads — writes use raw `fetch()`), so a retry can never double-apply a mutation. The abort signal short-circuits the backoff so an unmount/url-change still cancels cleanly. Non-retriable statuses (4xx/500) still throw on the first try, preserving the blank-page guard that keeps last-known-good cached data.
 
 **Verified.** `npx tsc -p tsconfig.app.json --noEmit` clean; `npx eslint` clean; behavioral test `tests/cached-fetch-503-retry.test.mjs` (503×2→200 retries and resolves; persistent 503 stops after the cap; 404 not retried; 200 no retry); full pre-commit suite green. PR to follow. Deeper root cause (cold daily snapshot key + concurrent-load connection pressure) noted for a later server-side pass — the client retry makes the symptom invisible to users now.
+## BUG-2026-07-27-003 — chat assistant refused every agent/scheduling command: SYSTEM_PROMPT predated the v1.9 agent tools `assistant` `agents` 🟡 (fix on PR canary, merges after supervisor's live test)
+
+**Symptom:** Production supervisor asked Hookka AI to re-arrange the framing schedule and
+change due dates; it replied "I'm strictly read-only — I cannot change due dates" and told
+him to do it himself（owner: 「教导了他…那个agent不做？罢工？」）. Teaching it standing
+rules was refused the same way.
+
+**Root cause:** the capabilities ALREADY EXISTED — `assistant-tools.ts` v1.9 ships
+`agent_overview`, `agent_control` (incl. run_now task=proposals = regenerate the production
+due-date proposals) and `teach_agent` (the persistent teaching notebook, injected into every
+future agent run). But the SYSTEM_PROMPT in `assistant.ts` was never updated when v1.9
+landed: its blanket "You are STRICTLY READ-ONLY… say you can't" clause outranked everything,
+so the model refused before ever considering those tools, and none of them were listed in
+the prompt's module map / tool reference either.
+
+**Fix (phase 1 of owner ruling 2026-07-27 「聊天全部可以更改的」):**
+1. Prompt rewritten: read-only stays for BUSINESS DOCUMENTS; explicit agent-workforce
+   exception + a 4-step scheduling flow (regenerate → list → user's explicit yes → decide);
+   v1.9+v2.0 tools added to the module map, intent table, and full tool reference.
+2. New tools `list_schedule_proposals` + `decide_schedule_proposals` (SUPER_ADMIN, hard
+   `confirmed:true` consent contract — the tool errors politely unless the operator
+   explicitly approved the exact shown set in-conversation).
+3. Both chat decide + the Planning tab route now share ONE core: new
+   `decideProposals` in `src/api/lib/schedule-proposals.ts` (route refactored onto it,
+   responses byte-identical; WAITING-only dueDate writes + one rollbackable
+   plan_snapshots batch, Agent Console rollback works on chat approvals too).
+
+**Verified:** `tests/assistant-schedule-decide.test.mjs` (prompt doctrine + registry +
+consent guard + route delegation) green; typecheck + eslint clean; full suite via hook.
+Live: supervisor tests on the PR canary URL (same DB as prod — approvals are real) before
+the merge to main.
 
 ---
 

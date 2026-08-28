@@ -5468,7 +5468,7 @@ function prevYm(ym: string | null): string | null {
 // via kv_config `coa_stock_map`. Unmapped groups fall to the generic
 // raw-material stock account; WIP & FG have fixed homes.
 type StockMapEntry = { stock: string; opening: string; closing: string };
-const DEFAULT_STOCK_MAP: {
+export const DEFAULT_STOCK_MAP: {
   rmDefault: StockMapEntry;
   rm: Record<string, StockMapEntry>;
   wip: StockMapEntry;

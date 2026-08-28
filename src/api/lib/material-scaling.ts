@@ -57,7 +57,23 @@ export type MaterialScalingDimension =
 export type MaterialScaling = {
   dimension: MaterialScalingDimension;
   baseValue: number;
+  /** Extra PIECES per inch over base. Right for discrete parts — a leg, a screw. */
   perUnit: number;
+  /**
+   * Extra CUT INCHES per inch over base, per axis. Added 2026-08-21.
+   *
+   * A cut material does not arrive in more pieces when the order grows; the
+   * same piece is cut bigger. Owner, on a sofa seat: 「通常是长度变而已」— so the
+   * two axes move independently and either may be zero.
+   *
+   * They ride on THIS rule rather than carrying their own baseline: two
+   * baselines for "over base" is a disagreement waiting to happen.
+   *
+   * Absent or zero means the cut is fixed, which is what every BOM written
+   * before today already means. No stored data changes behaviour.
+   */
+  cutLengthPerUnit?: number;
+  cutWidthPerUnit?: number;
 };
 
 /**
@@ -183,6 +199,43 @@ export function expandMaterialQty(
  *   dims  = { divanHeightInches: 10, gapInches: 2 }
  *   →     1.5 + (10−8)*0.2 + (2−0)*0.1 = 2.1
  */
+/**
+ * Grow a cut size by the scaling rules.
+ *
+ * Symmetric with {@link expandMaterialQty} on purpose: an order BELOW the
+ * baseline shrinks the cut on the same slope, because the BOM records a typical
+ * spec, not the smallest one. Both axes floor at 0 — a negative side is a bug,
+ * not a credit.
+ *
+ * Rules whose slopes are both zero are skipped entirely, so a BOM that only
+ * scales piece count is untouched.
+ */
+export function expandCutSize(
+  baseLengthIn: number,
+  baseWidthIn: number,
+  scaling: MaterialScaling | MaterialScaling[] | null | undefined,
+  dims: ProductionDimensions,
+): { lengthIn: number; widthIn: number } {
+  let lengthIn = baseLengthIn;
+  let widthIn = baseWidthIn;
+  if (!scaling) return { lengthIn, widthIn };
+  const rules = Array.isArray(scaling) ? scaling : [scaling];
+  for (const rule of rules) {
+    if (!rule) continue;
+    const dL = Number(rule.cutLengthPerUnit ?? 0);
+    const dW = Number(rule.cutWidthPerUnit ?? 0);
+    if (!Number.isFinite(dL) || !Number.isFinite(dW)) continue;
+    if (dL === 0 && dW === 0) continue;
+    if (typeof rule.baseValue !== "number" || !Number.isFinite(rule.baseValue)) continue;
+    const dimValue = pickDimension(rule.dimension, dims);
+    if (dimValue == null) continue;
+    const delta = dimValue - rule.baseValue;
+    lengthIn += delta * dL;
+    widthIn += delta * dW;
+  }
+  return { lengthIn: Math.max(0, lengthIn), widthIn: Math.max(0, widthIn) };
+}
+
 export function parseMaterialScaling(raw: unknown): MaterialScaling[] {
   if (raw == null) return [];
   // Array shape (new): filter each entry through parseOne.
@@ -216,7 +269,11 @@ function parseOneScaling(raw: unknown): MaterialScaling | null {
     typeof r.baseValue === "number" ? r.baseValue : Number(r.baseValue);
   const perUnit = typeof r.perUnit === "number" ? r.perUnit : Number(r.perUnit);
   if (!Number.isFinite(baseValue) || !Number.isFinite(perUnit)) return null;
-  return { dimension: dim, baseValue, perUnit };
+  // The two cut slopes are optional and default to 0, so every rule stored
+  // before 2026-08-21 parses to "the cut does not grow" — exactly what it meant.
+  const cutLengthPerUnit = Number((r as { cutLengthPerUnit?: unknown }).cutLengthPerUnit) || 0;
+  const cutWidthPerUnit = Number((r as { cutWidthPerUnit?: unknown }).cutWidthPerUnit) || 0;
+  return { dimension: dim, baseValue, perUnit, cutLengthPerUnit, cutWidthPerUnit };
 }
 
 /**

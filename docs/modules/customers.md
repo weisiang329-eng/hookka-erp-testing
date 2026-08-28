@@ -23,7 +23,7 @@ Owns **customers** (the debtor master) and the **platform plumbing** every other
 
 ## Entry points
 - Pages
-  - `/customers` → `src/pages/customers.tsx:3416` (`CustomersPage` — list/KPI/CRUD + nested pricing/maintenance/combo panels)
+  - `/customers` → `src/pages/customers.tsx:3424` (`CustomersPage` — list/KPI/CRUD + nested pricing/maintenance/combo panels)
   - Users/Org/Mailbox → `src/pages/settings/Users.tsx:226` (`UsersPage`; SUPER_ADMIN-gated account admin)
   - `src/pages/settings/index.tsx` (settings shell) · `src/pages/settings/organisations.tsx` (sister-company config)
   - Mail Center → `src/pages/mail-center/index.tsx` (Gmail-style shell) + `detail.tsx` / `compose.tsx`; client view prefs in `src/pages/mail-center/mail-prefs.ts`
@@ -57,7 +57,7 @@ Owns **customers** (the debtor master) and the **platform plumbing** every other
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
 |---|---|---|
-| `CustomersPage` | `src/pages/customers.tsx:3416` | List/KPI/columns/CRUD/context menu (default export) |
+| `CustomersPage` | `src/pages/customers.tsx:3424` | List/KPI/columns/CRUD/context menu (default export) |
 | `CustomerProductsPanel` | `src/pages/customers.tsx:193` | Per-customer pricing (mirrors Products bulk-edit) |
 | `CustomerMaintenancePanel` | `src/pages/customers.tsx:1639` | Per-customer config snapshot tabs |
 | `CustomerSofaCombosPanel` | `src/pages/customers.tsx:2403` | Per-customer combo pricing (config editor) |

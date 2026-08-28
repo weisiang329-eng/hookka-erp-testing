@@ -576,6 +576,21 @@ app.get("/", async (c) => {
           computePriceIndex,
           "price-index",
           c,
+          // Serve-stale, and ONLY here.
+          //
+          // This snapshot is a SELECT * over ~720 sales orders and all their
+          // items, and `sales_orders` / `sales_order_items` bump on every SO
+          // write — so a plain cache-aside recomputes it synchronously on the
+          // request path. Measured 30s cold on the live dashboard.
+          //
+          // The same snapshot table also backs the Sales LIST, and that one
+          // must NOT serve stale: a salesperson creates an order, reloads, and
+          // handing them the previous copy means their own order is missing.
+          // A slow dashboard tile is the cheaper problem. Hence the flag lives
+          // on this narrow `price-index` read (which only resolves unit prices
+          // for a Pending-Delivery figure nobody watches for their own edits)
+          // and not on the `computeFullList` call further down.
+          { staleWhileRevalidate: true },
         ),
       );
     }
@@ -1142,6 +1157,111 @@ app.get("/delivery-progress", async (c) => {
 //
 // Registered BEFORE /:id so Hono's trie picks the right handler.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GET /api/sales-orders/missing-original — which orders have no customer PO
+// document on file.
+//
+// The question this exists to answer, asked by the owner on 2026-08-21 and
+// unanswerable before today: 「OCR 进来的单在SO 要可以看到顾客的PO的 view
+// original的 为什么还没解决呢」.
+//
+// It had in fact worked, for three weeks: the operator (OFFICE) attached the
+// scan on every order from 2026-07-16 through 2026-08-04 — 149 of 188 orders
+// in that window carry one. Then it stopped dead. `role-policy.ts` landed at
+// 09:33 on 2026-08-05 and moved the department roles from the permission TABLE
+// into code, and `files` was never in `ALL_RESOURCES` — so `allExcept()` could
+// not grant it, `POST /api/files` began answering 403 to the only people who
+// scan POs, and 212 orders were created without their original before anyone
+// noticed. The permission is fixed (`#356`); the SILENCE is what this endpoint
+// is for.
+//
+// A missing attachment is invisible by construction: the order looks complete,
+// the button is simply absent, and nobody browses an order they are not
+// already working on. So the list has to be ASKED FOR, at the fleet level, or
+// the next regression buys another three weeks.
+//
+// Scan-queue bytes are NULLed on consume, so nothing here can be recovered by
+// the system — the output is a re-scan worklist for a human, which is why it
+// carries the customer and the reference rather than just a count.
+//
+// Registered BEFORE /:id so Hono's trie picks the right handler.
+// ---------------------------------------------------------------------------
+app.get("/missing-original", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  const since = (c.req.query("since") || "").trim();
+  if (since && !/^\d{4}-\d{2}-\d{2}$/.test(since)) {
+    return c.json({ success: false, error: "since must be YYYY-MM-DD" }, 400);
+  }
+
+  // LEFT JOIN, not NOT EXISTS with a subquery per row: this runs over the
+  // whole order table and the file side is small.
+  const binds: unknown[] = [orgId, orgId];
+  let sql = `
+    SELECT so.id            AS id,
+           so.reference     AS reference,
+           so.customerPOId  AS customerPOId,
+           so.customerName  AS customerName,
+           so.status        AS status,
+           so.createdAt     AS createdAt
+      FROM sales_orders so
+      LEFT JOIN file_assets fa
+             ON fa.resourceId = so.id
+            AND fa.resourceType = 'SO'
+            AND fa.orgId = ?
+     WHERE (so.orgId = ? OR so.orgId IS NULL)
+       AND fa.id IS NULL`;
+  if (since) {
+    sql += " AND so.createdAt >= ?";
+    binds.push(since);
+  }
+  // Capped, and the cap is REPORTED. Silent truncation is how a list like
+  // this lies: 1000 rows back with no flag reads as "that is all of them",
+  // and the first call (no ?since) hit the cap exactly.
+  const LIMIT = 1000;
+  sql += ` ORDER BY so.createdAt DESC LIMIT ${LIMIT + 1}`;
+
+  const res = await c.var.DB.prepare(sql)
+    .bind(...binds)
+    .all<{
+      id: string;
+      reference: string | null;
+      customerPOId: string | null;
+      customerName: string | null;
+      status: string | null;
+      createdAt: string | null;
+    }>();
+  const all = res.results ?? [];
+  const truncated = all.length > LIMIT;
+  const rows = truncated ? all.slice(0, LIMIT) : all;
+
+  // Grouped by day, because that is how the break showed itself: a clean edge
+  // on one date reads as a regression, a scatter reads as operator habit.
+  const byDay: Record<string, number> = {};
+  for (const r of rows) {
+    const d = String(r.createdAt ?? "").slice(0, 10) || "(unknown)";
+    byDay[d] = (byDay[d] ?? 0) + 1;
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      count: rows.length,
+      truncated,
+      // Orders predate the feature entirely before 2026-07-16, so an
+      // unfiltered call is mostly history that never had a document to lose.
+      // `?since=` is what makes the answer actionable.
+      note: truncated
+        ? `More than ${LIMIT} orders have no original; narrow with ?since=YYYY-MM-DD.`
+        : undefined,
+      byDay,
+      orders: rows,
+    },
+  });
+});
+
 app.get("/late-to-customer", async (c) => {
   const denied = await requirePermission(c, "sales-orders", "read");
   if (denied) return denied;

@@ -1,5 +1,7 @@
 import { useState, useMemo } from "react";
 import { useTimeout } from "@/lib/scheduler";
+import { buildPriceEditPayload } from "@/lib/invoice-price-edit-payload";
+import { priceComponentApplies } from "@/lib/invoice-line-price";
 import { humanizeError } from "@/lib/humanize-error";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { DocumentChainMap } from "@/components/ui/document-chain-map";
@@ -173,6 +175,7 @@ export default function InvoiceDetailPage() {
     setEditingPrices(true);
   };
 
+
   const saveEditPrices = async () => {
     if (!invoice) return;
     setSavingPrices(true);
@@ -184,32 +187,16 @@ export default function InvoiceDetailPage() {
     // overwrote the stored components on rows nobody opened the editor for.
     // Writing to a row the user never touched is not something a Save button
     // should do, whatever the value happens to be.
-    const ZERO = { base: "0", divan: "0", leg: "0", special: "0", totalHeight: "0" };
-    const touched = (id: string): boolean => {
-      const now = priceDraft[id] || ZERO;
-      const was = priceSeed[id];
-      if (!was) return true; // opened without a seed — treat as edited
-      if ((discountDraft[id] ?? 0) !== (discountSeed[id] ?? 0)) return true;
-      return (
-        sen(now.base) !== sen(was.base) ||
-        sen(now.divan) !== sen(was.divan) ||
-        sen(now.leg) !== sen(was.leg) ||
-        sen(now.special) !== sen(was.special) ||
-        sen(now.totalHeight) !== sen(was.totalHeight)
-      );
-    };
-    const priceEdits = invoice.items.filter((it) => touched(it.id)).map((it) => {
-      const d = priceDraft[it.id] || ZERO;
-      return {
-        id: it.id,
-        baseSen: sen(d.base),
-        divanSen: sen(d.divan),
-        legSen: sen(d.leg),
-        specialSen: sen(d.special),
-        totalHeightSen: sen(d.totalHeight),
-        // Per-line discount (migration 0179).
-        discountSen: discountDraft[it.id] ?? 0,
-      };
+    // ONE rule, in @/lib/invoice-price-edit-payload, shared with its tests.
+    // It was extracted OUT of this component after it wrote RM 0 into 112 lines
+    // across 17 SENT invoices (BUG-2026-08-20-158): a rule that decides whether
+    // a customer is billed cannot live somewhere no test can reach.
+    const priceEdits = buildPriceEditPayload({
+      items: invoice.items,
+      priceDraft,
+      priceSeed,
+      discountDraft,
+      discountSeed,
     });
     // Expected new invoice subtotal — sum of max(0, unit×qty − discount) per line.
     // Backend recomputes identically; comparing on totalAmount catches stale reads.
@@ -810,6 +797,11 @@ export default function InvoiceDetailPage() {
                       const ex = lineExtras[item.id];
                       const d = priceDraft[item.id];
                       const qty = Number(item.quantity) || 0;
+                      // NOTE: still keyed on `d`, deliberately. Before anyone
+                      // types, the row must show the CHARGE
+                      // (`item.unitPriceSen`), which is authoritative — not a
+                      // sum re-derived from a seed that may not reconcile.
+                      // Rule 1 of src/lib/invoice-line-price.ts.
                       const liveUnit =
                         editingPrices && d
                           ? invoiceLineUnitSen({
@@ -866,27 +858,69 @@ export default function InvoiceDetailPage() {
                             .filter(Boolean)
                             .join(" / ")
                         : "";
+                      // What the boxes must show. A line can exist without a
+                      // draft — the invoice is served stale-while-revalidate, so
+                      // `invoice.items` may gain rows after the editor seeded
+                      // itself. Showing "0" for those was the display half of
+                      // BUG-2026-08-20-158: five zeroes next to a "Unit RM 600.00"
+                      // on the same row, describing the editor's memory rather
+                      // than the line. Derive it from the line instead.
+                      const shownDraft =
+                        d ??
+                        (() => {
+                          const sd = invoicePriceEditSeed(
+                            lineExtras[item.id],
+                            Number(item.unitPriceSen) || 0,
+                          );
+                          return {
+                            base: rm(sd.baseSen),
+                            divan: rm(sd.divanSen),
+                            leg: rm(sd.legSen),
+                            special: rm(sd.specialSen),
+                            totalHeight: rm(sd.totalHeightSen),
+                          };
+                        })();
                       const setDraft = (
                         k: "base" | "divan" | "leg" | "special" | "totalHeight",
                         v: string,
                       ) =>
-                        setPriceDraft((p) => ({
-                          ...p,
-                          [item.id]: {
-                            ...(p[item.id] || {
-                              base: "0",
-                              divan: "0",
-                              leg: "0",
-                              special: "0",
-                              totalHeight: "0",
-                            }),
-                            [k]: v,
-                          },
-                        }));
+                        setPriceDraft((p) => {
+                          // A line can exist without a draft: the invoice is
+                          // served stale-while-revalidate, so `invoice.items`
+                          // may gain rows after the editor seeded itself. Start
+                          // such a row from what it ACTUALLY charges, never from
+                          // zeros — otherwise typing one component silently
+                          // drops the others. (The payload rule already refuses
+                          // to write a line with no draft at all; this is the
+                          // other half: once someone types, the rest of the line
+                          // must still be true.)
+                          // Same values the boxes are showing — typing must
+                          // start from what is on screen, never from zeros.
+                          const current = p[item.id] ?? shownDraft;
+                          return { ...p, [item.id]: { ...current, [k]: v } };
+                        });
+                      // Rule 6: a component that means nothing for this
+                      // category, and holds nothing, is not a question worth
+                      // asking. A component holding MONEY is always shown —
+                      // hiding part of the charge would be worse than one
+                      // question too many.
                       const priceInput = (
                         label: string,
                         k: "base" | "divan" | "leg" | "special" | "totalHeight",
-                      ) => (
+                      ) =>
+                        !priceComponentApplies(k, ex?.itemCategory, sen(shownDraft[k])) ? (
+                          <div
+                            key={k}
+                            className="flex items-center justify-end gap-1.5 opacity-40"
+                          >
+                            <span className="text-[10px] text-[#9CA3AF] w-12 text-right">
+                              {label}
+                            </span>
+                            <span className="text-[10px] text-[#9CA3AF] italic w-[92px] text-center">
+                              n/a
+                            </span>
+                          </div>
+                        ) : (
                         <div className="flex items-center justify-end gap-1.5">
                           <span className="text-[10px] text-[#9CA3AF] w-12 text-right">
                             {label}
@@ -895,7 +929,7 @@ export default function InvoiceDetailPage() {
                             type="number"
                             min="0"
                             step="0.01"
-                            value={d ? d[k] : "0"}
+                            value={shownDraft[k]}
                             onChange={(e) => setDraft(k, e.target.value)}
                             className="w-24 rounded border border-[#D8D2CC] px-2 py-1 text-right text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
                           />

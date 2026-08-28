@@ -24,6 +24,8 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
 import { fmtRM, fmtDate, drawLetterhead } from "@/lib/pdf-utils";
+import { sofaSeatHeights } from "./sofa-seat-heights";
+import { getVariantsConfigSync } from "./kv-config";
 
 // ---------------------------------------------------------------------------
 // Envelope types — must match the GET /api/customer-quotation response.
@@ -92,7 +94,11 @@ export type QuotationEnvelope = {
 // Helpers
 // ---------------------------------------------------------------------------
 const DASH = "—";
-const SEAT_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
+// Follows Maintenance -> Sofa -> Sizes, read from the shared kv-config cache
+// at render time. It used to be a five-entry literal missing 26", so a
+// customer priced at 26" simply had no column on their quotation.
+// Owner 2026-08-21. Not a hook: this runs outside React.
+const SEAT_HEIGHTS = sofaSeatHeights(getVariantsConfigSync());
 const TIERS_ORDER = ["PRICE_1", "PRICE_2", "PRICE_3"] as const;
 const TIER_LABEL: Record<string, string> = {
   PRICE_1: "P1",

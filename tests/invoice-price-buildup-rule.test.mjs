@@ -267,36 +267,54 @@ test("backend flags the contradicted line as not reconciling", async () => {
 
 test("Save Prices writes the lines the operator changed, and no others", () => {
   // Owner's rule, settled 2026-08-07: "Save Prices" means save MY edits, not
-  // freeze every line at whatever it currently reads. The payload used to carry
-  // all of them, so opening the editor to change one line's discount stamped
-  // priceEdited = 1 and overwrote the stored components on every other row.
+  // freeze every line at whatever it currently reads.
   //
-  // With the reconciling seed those rows saved back the same CHARGE, so this is
-  // no longer a repricing bug — but writing to a row nobody touched is still
-  // not something a Save button should do.
+  // ---------------------------------------------------------------------
+  // 2026-08-20 — THIS TEST USED TO PIN THE BUG IN PLACE. Read that twice.
+  //
+  // It asserted, as a REQUIREMENT:
+  //
+  //     assert.match(body, /if \(!was\) return true/,
+  //       "no seed means treat it as edited, not skipped");
+  //
+  // That line is the defect. Combined with `priceDraft[id] || ZERO` it wrote
+  // RM 0 into any line the editor held no values for — 112 lines across 17 SENT
+  // invoices (BUG-2026-08-20-158). So the fault was not merely unnoticed: it was
+  // PROTECTED. Anyone who fixed it would have turned this test red and been
+  // told, by a passing-looking suite, that they had broken the rule.
+  //
+  // Two lessons, both cheap:
+  //   1. This was a SOURCE-SHAPE assertion — it matched a regex against the
+  //      component's text. A test that pins an implementation detail can pin a
+  //      wrong one, and it cannot tell you which it is doing. The rule now lives
+  //      in src/lib/invoice-price-edit-payload.ts and is tested BEHAVIOURALLY in
+  //      tests/invoice-price-edit-no-implicit-zero.test.mjs.
+  //   2. "No baseline, so assume it was edited" reads like caution and is the
+  //      opposite. An absent value is not a value; the safe default is to write
+  //      nothing.
+  // ---------------------------------------------------------------------
   const src = readFileSync(resolve(process.cwd(), "src/pages/invoices/detail.tsx"), "utf8");
 
+  // The component must delegate to the shared rule rather than re-deriving one.
   assert.match(
     src,
-    /invoice\.items\.filter\(\(it\) => touched\(it\.id\)\)\.map/,
-    "the payload must be filtered to touched lines",
+    /buildPriceEditPayload\(\{/,
+    "the payload must come from @/lib/invoice-price-edit-payload, not from a local copy",
+  );
+  assert.doesNotMatch(
+    src,
+    /if \(!was\) return true/,
+    "the pinned defect must not come back: a line with no baseline is UNKNOWN, not edited",
+  );
+  assert.doesNotMatch(
+    src,
+    /priceDraft\[id\] \|\| ZERO/,
+    "a missing draft must never be read as a price of zero",
   );
 
-  // The seed snapshot is what "touched" is measured against — without it the
-  // filter has no baseline and would either pass everything or nothing.
+  // The seed snapshot is still what an edit is measured against.
   assert.match(src, /setPriceSeed\(/, "the editor must snapshot what it opened with");
   assert.match(src, /setDiscountSeed\(/, "including the discounts");
-
-  // A discount change alone counts as touched — it is the case that exposed
-  // this, and the one most likely to be edited on its own.
-  const fn = src.slice(src.indexOf("const touched = (id: string)"));
-  const body = fn.slice(0, fn.indexOf("\n    };"));
-  assert.match(
-    body,
-    /discountDraft\[id\] \?\? 0\) !== \(discountSeed\[id\] \?\? 0\)/,
-    "a discount-only edit must still save that line",
-  );
-  assert.match(body, /if \(!was\) return true/, "no seed means treat it as edited, not skipped");
 
   // The readback total must value untouched lines at their existing price, or
   // every partial edit would fail verification.

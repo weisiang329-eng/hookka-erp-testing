@@ -1470,9 +1470,18 @@ app.post("/recompute-pi-paid", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { piId?: string };
   const piId = String(body.piId ?? "").trim();
   if (!piId) return c.json({ success: false, error: "piId is required" }, 400);
+  // Tenant-scoped, and this one matters more than a read leak: the statement
+  // below OVERWRITES purchase_invoices.paid_amount_sen and status outright.
+  // Unscoped, a caller in one company could rewrite another company's payable
+  // balance by passing its PI id — a cross-tenant WRITE to the books.
+  //
+  // Ownership is settled HERE, once, on the lookup. Everything after this line
+  // is already known to be the caller's own invoice, so the repair statement
+  // does not need its own predicate — and adding one in two places is how the
+  // two eventually disagree.
   const before = await c.var.DB
-    .prepare("SELECT pi_no, amount_sen, paid_amount_sen, status FROM purchase_invoices WHERE id = ?")
-    .bind(piId)
+    .prepare("SELECT pi_no, amount_sen, paid_amount_sen, status FROM purchase_invoices WHERE id = ? AND org_id = ?")
+    .bind(piId, getOrgId(c))
     .first<{ pi_no?: string; piNo?: string; amount_sen?: number; amountSen?: number; paid_amount_sen?: number; paidAmountSen?: number; status: string }>();
   if (!before) return c.json({ success: false, error: "PI not found" }, 404);
   await ensurePartialPaymentColumns(c.var.DB);
@@ -1597,10 +1606,15 @@ app.post("/:paymentNo/restate", async (c) => {
       try {
         await c.var.DB
           .prepare(
-            `INSERT INTO kv_config (key, value, updated_at) VALUES ('last_supplier_restate_error', ?, ?)
+            // One key PER COMPANY. It used to be a single global key, so the
+            // last failure from any tenant overwrote every other tenant's, and
+            // the debug endpoint below handed it to whoever asked — payment
+            // numbers and raw error text from another company's books.
+            `INSERT INTO kv_config (key, value, updated_at) VALUES (?, ?, ?)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
           )
           .bind(
+            `last_supplier_restate_error:${getOrgId(c)}`,
             JSON.stringify({ paymentNo, msg: msg.slice(0, 2000), at: new Date().toISOString() }),
             new Date().toISOString(),
           )
@@ -1622,8 +1636,12 @@ app.post("/:paymentNo/restate", async (c) => {
 app.get("/debug/last-restate-error", async (c) => {
   const denied = await requirePermission(c, "invoices", "read");
   if (denied) return denied;
+  // Reads only this company's own last failure — see the write site above for
+  // why the key carries the org. A caller with no failure of their own gets
+  // null rather than somebody else's.
   const row = await c.var.DB
-    .prepare("SELECT value, updated_at FROM kv_config WHERE key = 'last_supplier_restate_error'")
+    .prepare("SELECT value, updated_at FROM kv_config WHERE key = ?")
+    .bind(`last_supplier_restate_error:${getOrgId(c)}`)
     .first<{ value: string; updated_at: string }>();
   return c.json({ success: true, data: row ?? null });
 });

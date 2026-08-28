@@ -14,6 +14,17 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-27 — 🔵 JV 行菜单全灭（Post 打 /journals/undefined）· BUG-2026-08-27-001 · PR 待合
+
+Owner:「每次 JV 都会 merge 不上」（JE-2608-0001 七月薪水 35,370.50 过不了账，
+toast「Journal entry not found」）。实测抓包：`PUT /api/accounting/journals/undefined`。
+根因=DataGrid context menu 统一用 `item.action({})` 调用，数组形式有绑行、
+**函数形式没绑** → 所有读参数的菜单动作拿到 `{}`（JournalsTab 的
+Post/Delete/Void/Duplicate 全死）。修=纯函数 `bindContextMenuRow`
+（src/lib/context-menu-bind.ts，3 测）两种形式统一绑，组件级一次修全站 ~24 张表。
+**待办**：owner 合并 PR → 部署后 owner 重按 Post 验证七月 JV 过账。
+（另：PR #362 非生产部门 forecast 仍挂着等 owner；main 保护规则未关。）
+
 ## 2026-08-14 — 🔵 Four owner-decided report/metric items (branch `fix/on-time-delivery-and-decisions`, **NOT deployed, NOT merged**)
 
 All four decisions were MADE by the owner before the work started; this branch implements

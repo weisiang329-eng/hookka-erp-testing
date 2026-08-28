@@ -23,6 +23,7 @@ import { useToast } from "@/components/ui/toast";
 import { Skeleton } from "@/components/ui/skeleton";
 import { buildListingAoa, exportFilename, type ExportColumn } from "@/lib/grid-export";
 import { exportReportCsv, exportReportXlsx, type Aoa } from "@/lib/export-report";
+import { bindContextMenuRow } from "@/lib/context-menu-bind";
 
 // Stable identifier for namespacing per-user grid preferences in localStorage.
 // Using email (lowercased) so column visibility / order / saved views are
@@ -2686,8 +2687,15 @@ export function DataGrid<T extends Record<string, any>>({
 
   const resolvedCtxItems = useMemo(() => {
     if (!ctxMenu || !contextMenuItems) return [];
-    if (typeof contextMenuItems === "function") return contextMenuItems(ctxMenu.row);
-    return contextMenuItems.map(item => ({ ...item, action: () => item.action(ctxMenu.row) }));
+    // BUG-2026-08-27-001: the menu invokes item.action({}) — every action must
+    // arrive pre-bound to its row. The function form used to pass through raw,
+    // so `(r) => handlePost(r.id)` received {} and JournalsTab's Post hit
+    // PUT /journals/undefined ("Journal entry not found" on every JV). Bind
+    // BOTH forms through the one tested seam.
+    if (typeof contextMenuItems === "function") {
+      return bindContextMenuRow(contextMenuItems(ctxMenu.row), ctxMenu.row);
+    }
+    return bindContextMenuRow(contextMenuItems, ctxMenu.row);
   }, [ctxMenu, contextMenuItems]);
 
   const alignClass = (col: Column<T>) => {

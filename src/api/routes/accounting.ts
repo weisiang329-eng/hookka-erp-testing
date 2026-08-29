@@ -30,7 +30,7 @@ import { parseDebtorCode } from "../../lib/debtor";
 import { defaultPnlBucket, pnlBucketFor } from "../../lib/pnl-bucket";
 import { bsSectionFor, bsSectionClass } from "../../lib/bs-section";
 import type { BsSection } from "../../lib/bs-section";
-import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
+import { buildStatement, splitByLargestRemainder } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
 import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "../lib/doc-number-service";
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
@@ -7778,6 +7778,7 @@ async function computeCashflowStatement(
   db: Env["Variables"]["DB"],
   period: string,
   editable: boolean,
+  orgId: string,
 ) {
   // Local alias so the extracted body reads exactly as it did in the route.
   const c: { var: { DB: Env["Variables"]["DB"] } } = { var: { DB: db } };
@@ -7798,8 +7799,8 @@ async function computeCashflowStatement(
   }
 
   const legRes = await c.var.DB.prepare(
-    "SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0",
-  ).all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>();
+    "SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt, description FROM ledger_journal_entries WHERE hidden = 0",
+  ).all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; description: string | null }>();
   const allLegs = (legRes.results ?? [])
     .filter((l) => !legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDate)) // pre-opening: not extracted
     .map((l) => ({
@@ -7809,6 +7810,7 @@ async function computeCashflowStatement(
       debitSen: l.debitSen,
       creditSen: l.creditSen,
       ym: docDate(l.sourceType, l.sourceId, l.postedAt).slice(0, 7), // by document date
+      description: l.description ?? "",
     }));
 
   const byEntry = new Map<string, typeof allLegs>();
@@ -7821,7 +7823,33 @@ async function computeCashflowStatement(
 
   const classified: ClassifiedLeg[] = [];
   const bankLegs: BankLeg[] = [];
-  const piIds = new Set<string>();
+  // Payment NUMBERS, not PI ids — a supplier_payment leg's sourceId is the
+  // voucher number (HPV-…). The old code fed these straight into
+  // `purchase_invoice_items WHERE pi_id = ?`, which matched nothing, so every
+  // raw-material payment fell to "Unallocated raw material" (owner
+  // 2026-08-27: 「unallocated raw material 要分出来」). Family match so
+  // EDITED payments (live legs = supplier_payment_restate_post:…) split too.
+  const paymentNos = new Set<string>();
+  // Other-creditor payments (Houzs Century repayments, GVP, transporters …)
+  // also settle a creditor-control contra and land in the Raw Materials
+  // section, but have no PI behind them. Measured 2026-08-27: they were the
+  // bulk of "Unallocated raw material" (Aug'26 RM 309,463.37 = supplier
+  // payments 62,133.10 + other-party payments 247,330.27, to the sen). Name
+  // each by its payee instead (owner: 「必须要知道还什么」).
+  // Other-creditor payments are NOT classified by their contra (the 405
+  // control) — the owner reads this statement as a receipts-and-payments
+  // report (2026-08-27 「根据purpose 放去相对应的account」), so each payment is
+  // re-routed to the counterAccounts of the bills it settled: transporter
+  // bills land in Transport expense, SMD's in Capex, Houzs Century's (bills
+  // that debit 400-0000, i.e. suppliers paid on our behalf) in Raw Materials.
+  // The legs are stashed here and re-injected as per-account pseudo-legs
+  // below, once the bill mixes are loaded.
+  const opLegs: (ClassifiedLeg & { description: string })[] = [];
+  // Salary settlements (DR 410-0010 · CR bank): the payment voucher's
+  // description names the payroll month it pays ("… Salaries - May'26"), which
+  // is the month whose payslip department mix splits the cash (owner
+  // 2026-08-27 「salary 那边也是要拆散成department」).
+  const salaryLegs: { sourceId: string; description: string; ym: string }[] = [];
   for (const legs of byEntry.values()) {
     const hasBank = legs.some((l) => bankCodes.has(l.code));
     if (!hasBank) continue;
@@ -7830,11 +7858,20 @@ async function computeCashflowStatement(
       if (bankCodes.has(l.code)) {
         bankLegs.push({ accountCode: l.code, debitSen: l.debitSen, creditSen: l.creditSen, ym: l.ym });
       } else if (!opening) {
+        if (l.sourceType.startsWith("other_party_payment")) {
+          opLegs.push({
+            accountCode: l.code, debitSen: l.debitSen, creditSen: l.creditSen,
+            ym: l.ym, sourceType: l.sourceType, sourceId: l.sourceId, description: l.description,
+          });
+          continue;
+        }
         classified.push({
           accountCode: l.code, debitSen: l.debitSen, creditSen: l.creditSen,
           ym: l.ym, sourceType: l.sourceType, sourceId: l.sourceId,
         });
-        if (l.sourceType === "supplier_payment") piIds.add(l.sourceId);
+        if (l.sourceType.startsWith("supplier_payment")) paymentNos.add(l.sourceId);
+        else if (l.code === LABOUR_ACCRUAL_ACCT)
+          salaryLegs.push({ sourceId: l.sourceId, description: l.description, ym: l.ym });
       }
     }
   }
@@ -7842,7 +7879,7 @@ async function computeCashflowStatement(
   const map = await getCashflowMap(c.var.DB);
   const sgOverride = await getCashflowStockGroupMap(c.var.DB);
   const rmSplit: RmSplit = {};
-  if (piIds.size) {
+  if (paymentNos.size || opLegs.length) {
     const rmRes = await c.var.DB.prepare("SELECT * FROM raw_materials").all<Record<string, unknown>>();
     const grpByCode = new Map<string, string>();
     for (const r of rmRes.results ?? []) {
@@ -7850,23 +7887,170 @@ async function computeCashflowStatement(
       const grp = String((r.item_group ?? r.itemGroup) ?? "");
       if (code) grpByCode.set(code, grp);
     }
-    for (const pi of piIds) {
-      const itRes = await c.var.DB.prepare("SELECT * FROM purchase_invoice_items WHERE pi_id = ?").bind(pi).all<Record<string, unknown>>();
-      const weights = new Map<string, number>();
+    // Per-PI material-line weights, computed once per PI and reused across
+    // every payment that touched it.
+    const piWeightCache = new Map<string, Map<string, number>>();
+    const piWeightsFor = async (piId: string): Promise<Map<string, number>> => {
+      const hit = piWeightCache.get(piId);
+      if (hit) return hit;
+      const w = new Map<string, number>();
+      const itRes = await c.var.DB.prepare("SELECT * FROM purchase_invoice_items WHERE pi_id = ?").bind(piId).all<Record<string, unknown>>();
       for (const it of itRes.results ?? []) {
         const lt = String((it.line_type ?? it.lineType) ?? "STOCKED");
         const amt = Number((it.line_total_sen ?? it.lineTotalSen) ?? 0);
         const mc = String((it.material_code ?? it.materialCode) ?? "");
         const grp = mc ? grpByCode.get(mc) ?? "" : "";
-        const line = lt === "TAX" ? "Purchase of Other & Packaging" : rawMaterialLineFor(grp, sgOverride);
-        weights.set(line, (weights.get(line) ?? 0) + Math.max(0, amt));
+        // Owner 2026-08-27 「拆散」: one row PER STOCK GROUP, not the four
+        // rolled-up lines. The stock-group override map still renames a group
+        // when set; tax rides its own line; a line with no resolvable group
+        // stays unallocated rather than hiding inside "Other".
+        const line = lt === "TAX" ? "SST / TAX" : grp ? (sgOverride[grp] ?? grp) : "Unallocated raw material";
+        w.set(line, (w.get(line) ?? 0) + Math.max(0, amt));
       }
-      rmSplit[pi] = [...weights.entries()].map(([line, weight]) => ({ line, weight }));
+      piWeightCache.set(piId, w);
+      return w;
+    };
+    // What one payment actually settled: its allocation rows, weighted by
+    // the BOOKED amount each row paid off. Rows the system can name but not
+    // split get their own labelled line (owner 2026-08-27 「必须要知道还
+    // 什么」): advances (no PI yet), opening-balance PIs (pi-ob-*, item
+    // lines predate the system), trade-finance repayments. Discount
+    // markers (CREDIT_NOTE) are not cash and stay out.
+    const weightsForPayment = async (payNo: string): Promise<Map<string, number>> => {
+      const rowsRes = await c.var.DB.prepare(
+        `SELECT sp.purchase_invoice_id AS purchase_invoice_id, sp.booked_sen AS booked_sen, sp.amount_sen AS amount_sen,
+                COALESCE(sp.method,'') AS method
+           FROM supplier_payments sp
+          WHERE sp.payment_no = ? AND COALESCE(sp.method,'') <> 'CREDIT_NOTE'`,
+      ).bind(payNo).all<Record<string, unknown>>();
+      const weights = new Map<string, number>();
+      const bump = (line: string, sen: number) => weights.set(line, (weights.get(line) ?? 0) + sen);
+      for (const row of rowsRes.results ?? []) {
+        const piId = String(row.purchaseInvoiceId ?? row.purchase_invoice_id ?? "");
+        const booked = Math.max(0, Number(row.bookedSen ?? row.booked_sen ?? row.amountSen ?? row.amount_sen) || 0);
+        if (!booked) continue;
+        if (String(row.method ?? "") === "TF_REPAYMENT") { bump("Trade finance repayment", booked); continue; }
+        if (!piId) { bump("Supplier advance / deposit", booked); continue; }
+        const w = await piWeightsFor(piId);
+        let totalW = 0;
+        for (const v of w.values()) totalW += v;
+        if (!totalW) { bump(piId.startsWith("pi-ob-") ? "Opening creditors settlement" : "Unallocated raw material", booked); continue; }
+        for (const [line, lw] of w) bump(line, (booked * lw) / totalW);
+      }
+      return weights;
+    };
+    for (const payNo of paymentNos) {
+      const weights = await weightsForPayment(payNo);
+      if (weights.size) {
+        rmSplit[payNo] = [...weights.entries()].map(([line, weight]) => ({ line, weight: Math.round(weight) }));
+      }
+    }
+    if (opLegs.length) {
+    // Purpose mix per other-party payment = its bill allocations × each bill's
+    // item counterAccount mix. A payment whose bills carry no usable items
+    // (opening bills, missing data) keeps its original contra and shows as a
+    // "<payee> (other creditor)" row instead — named, never silently smeared.
+    const allocRes = await c.var.DB.prepare(
+      "SELECT payment_no AS payment_no, bill_id AS bill_id, amount_sen AS amount_sen, party_name AS party_name FROM other_party_payments",
+    ).all<Record<string, unknown>>();
+    const itemsRes = await c.var.DB.prepare(
+      "SELECT billId AS bill_id, counterAccount AS counter_account, amountSen AS amount_sen FROM other_party_bill_items",
+    ).all<Record<string, unknown>>();
+    const billMix = new Map<string, Map<string, number>>();
+    for (const r of itemsRes.results ?? []) {
+      const bid = String(r.billId ?? r.bill_id ?? "");
+      const acct = String(r.counterAccount ?? r.counter_account ?? "").trim();
+      const sen = Math.max(0, Number(r.amountSen ?? r.amount_sen) || 0);
+      if (!bid || !acct || !sen) continue;
+      const m = billMix.get(bid) ?? new Map<string, number>();
+      m.set(acct, (m.get(acct) ?? 0) + sen);
+      billMix.set(bid, m);
+    }
+    const payMix = new Map<string, Map<string, number>>();
+    const partyByNo = new Map<string, string>();
+    for (const r of allocRes.results ?? []) {
+      const no = String(r.paymentNo ?? r.payment_no ?? "");
+      if (!no) continue;
+      const nm = String(r.partyName ?? r.party_name ?? "").trim();
+      if (nm && !partyByNo.has(no)) partyByNo.set(no, nm);
+      const alloc = Math.max(0, Number(r.amountSen ?? r.amount_sen) || 0);
+      const mix = billMix.get(String(r.billId ?? r.bill_id ?? ""));
+      if (!alloc || !mix) continue;
+      let tot = 0;
+      for (const v of mix.values()) tot += v;
+      if (!tot) continue;
+      const pm = payMix.get(no) ?? new Map<string, number>();
+      for (const [acct, w] of mix) pm.set(acct, (pm.get(acct) ?? 0) + (alloc * w) / tot);
+      payMix.set(no, pm);
+    }
+    const isCreditorControl = (code: string): boolean => {
+      const a2 = coa.get(code);
+      const b2 = parseInt(code.split("-")[0] ?? "0", 10) || 0;
+      return a2?.sat === "SCC" || b2 === 400 || b2 === 405;
+    };
+    for (const leg of opLegs) {
+      const mix = payMix.get(leg.sourceId);
+      const payee = partyByNo.get(leg.sourceId) ?? "Other creditor";
+      if (!mix || !mix.size) {
+        classified.push({
+          accountCode: leg.accountCode, debitSen: leg.debitSen, creditSen: leg.creditSen,
+          ym: leg.ym, sourceType: leg.sourceType, sourceId: leg.sourceId,
+        });
+        rmSplit[`${leg.sourceId}@${leg.accountCode}`] ??= [{ line: `${payee} (other creditor)`, weight: 1 }];
+        continue;
+      }
+      const buckets = [...mix.entries()].map(([acct, w]) => ({ key: acct, weight: Math.round(w) }));
+      const dParts = splitByLargestRemainder(leg.debitSen, buckets);
+      const cParts = splitByLargestRemainder(leg.creditSen, buckets);
+      for (const { key: acct } of buckets) {
+        const d = dParts[acct] ?? 0, cr = cParts[acct] ?? 0;
+        if (!d && !cr) continue;
+        const rc = resolveAcct(acct);
+        classified.push({
+          accountCode: rc, debitSen: d, creditSen: cr,
+          ym: leg.ym, sourceType: leg.sourceType, sourceId: leg.sourceId,
+        });
+        // Only the money whose purpose account is itself a creditor control
+        // (Houzs Century's bill lines on 400-0000: suppliers paid on our
+        // behalf — owner 2026-08-29: old pre-system fabric) needs a label;
+        // parts on real purchase/expense accounts keep the account's own
+        // line via the engine. Keyed per account so they don't mix.
+        if (isCreditorControl(rc))
+          rmSplit[`${leg.sourceId}@${rc}`] ??= [{ line: `Suppliers settled via ${payee}`, weight: 1 }];
+      }
+    }
+    }
+  }
+
+  // Salary → department rows. Weights come from aggregateLabour of the payroll
+  // month the voucher description names ("… - May'26"); a leg with no parseable
+  // month uses its own document month; a month with no payslips gets no split
+  // and the leg stays on the account line.
+  const deptSplit: RmSplit = {};
+  if (salaryLegs.length) {
+    if (!map[LABOUR_ACCRUAL_ACCT]) map[LABOUR_ACCRUAL_ACCT] = { section: "DIRECT_LABOUR", order: 10 };
+    const MONTHS3 = { Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06", Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12" } as const;
+    const payrollYm = (desc: string, fallback: string): string => {
+      const m = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'(\d{2})\b/.exec(desc);
+      return m ? `20${m[2]}-${MONTHS3[m[1] as keyof typeof MONTHS3]}` : fallback;
+    };
+    const mixCache = new Map<string, { line: string; weight: number }[]>();
+    for (const leg of salaryLegs) {
+      const ym = payrollYm(leg.description, leg.ym);
+      let mix = mixCache.get(ym);
+      if (!mix) {
+        try {
+          const { byDept } = await aggregateLabour(c.var.DB, ym, orgId);
+          mix = byDept.filter((d) => d.costSen > 0).map((d) => ({ line: d.departmentCode, weight: d.costSen }));
+        } catch { mix = []; }
+        mixCache.set(ym, mix);
+      }
+      if (mix.length && !deptSplit[leg.sourceId]) deptSplit[leg.sourceId] = mix;
     }
   }
 
   const statement = buildStatement({
-    classified, bankLegs, coa, map, rmSplit, stockGroupOverride: sgOverride,
+    classified, bankLegs, coa, map, rmSplit, deptSplit, stockGroupOverride: sgOverride,
     fyeMonth, period, editable,
   });
   // Money IN / OUT straight off the bank legs (DR = in, CR = out). Derived
@@ -7889,7 +8073,7 @@ app.get("/cashflow-statement", async (c) => {
   if (denied) return denied;
   const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
   const editable = c.req.query("editable") === "1";
-  const { bankByMonth: _bank, ...statement } = await computeCashflowStatement(c.var.DB, period, editable);
+  const { bankByMonth: _bank, ...statement } = await computeCashflowStatement(c.var.DB, period, editable, getOrgId(c));
   return c.json({ success: true, data: { period, ...statement } });
 });
 
@@ -10539,7 +10723,7 @@ app.get("/dashboard", async (c) => {
       pred: (r: { kind: string; label: string; section?: string }) => boolean,
     ) => rowsCf.filter(pred).reduce((s, r) => s + (Number(r.values[idx]) || 0), 0);
     for (const anchor of fyKeys.values()) {
-      const st = await computeCashflowStatement(db, anchor, false);
+      const st = await computeCashflowStatement(db, anchor, false, orgIdDash);
       const cols = (st.columns ?? []) as { key: string; accum?: boolean }[];
       const rowsCf = (st.rows ?? []) as { kind: string; label: string; section?: string; values: (number | null)[] }[];
       cols.forEach((col, i) => {

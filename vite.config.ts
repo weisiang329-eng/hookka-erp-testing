@@ -218,14 +218,39 @@ export default defineConfig({
     // tablets) can reach the dev server at http://<PC-IP>:3000 —
     // needed for the /worker shop-floor portal on personal phones.
     host: true,
-    // NO `/api` proxy. There used to be one pointing at http://localhost:3001,
-    // labelled "Hono API server" — that standalone Node server
-    // (`src/api/index.ts`, `npm run api`) was removed when the API moved to
-    // Cloudflare Pages Functions, and nothing in this repo has listened on 3001
-    // since. The line survived because a proxy to a dead port fails the same
-    // way as no proxy at all, so it never produced an error anyone could
-    // attribute to it — it just made `npm run dev` look like it had a backend.
-    // For a working API use `npm run dev:worker` (wrangler pages dev in front
-    // of Vite, which mounts functions/api/[[route]].ts → src/api/worker.ts).
+    // `/api` proxies to PRODUCTION (owner 2026-08-27: 「我要当场改，当场看到
+    // result，确定没问题才 push」) — layout iteration happens on localhost with
+    // HMR against the REAL figures, and only the approved result is pushed.
+    // History: an earlier proxy pointed at http://localhost:3001, a standalone
+    // Node API removed when the API moved to Cloudflare Pages Functions; it sat
+    // dead for months because a proxy to a dead port fails exactly like no
+    // proxy. `npm run dev:worker` (wrangler in front of Vite) still exists but
+    // has no DB credentials locally (.dev.vars is empty), so its data is blank
+    // — useless for reviewing a report layout.
+    //
+    // Cookie munging: prod sets its session cookie Secure + for its own
+    // domain; over http://localhost that cookie would be dropped, so the
+    // proxy rewrites Domain and strips Secure/SameSite on the way through.
+    // ⚠ This is the LIVE database — the local preview reads real books, and a
+    // write pressed here is a real write, exactly as on erp.hookka.com.
+    proxy: {
+      '/api': {
+        target: 'https://erp.hookka.com',
+        changeOrigin: true,
+        cookieDomainRewrite: 'localhost',
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            const sc = proxyRes.headers['set-cookie']
+            if (sc) {
+              proxyRes.headers['set-cookie'] = sc.map((c) =>
+                c
+                  .replace(/;\s*Secure/gi, '')
+                  .replace(/;\s*SameSite=\w+/gi, '; SameSite=Lax'),
+              )
+            }
+          })
+        },
+      },
+    },
   },
 })

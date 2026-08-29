@@ -74,12 +74,18 @@ export function defaultSectionFor(a: CoaLite): CfSection {
   if (a.sat === "SCC" || b === 400 || b === 405) return "RAW_MATERIALS";
   // Direct labour.
   if (b === 750) return "DIRECT_LABOUR";
+  // Material purchase accounts (701-x PURCHASE - FABRIC …) belong with the
+  // raw-material money, not overhead — cash paid straight against one shows
+  // under Raw Materials as its own named row.
+  if (b >= 700 && b <= 705 && /^PURCHASE\b/i.test(a.name)) return "RAW_MATERIALS";
   // Factory overhead (700-range manufacturing + 780 overhead).
   if (b === 780 || (b >= 700 && b <= 705)) return "FACTORY_OVERHEAD";
   // Fixed assets → capex.
   if (b >= 200 && b <= 299) return "CAPEX";
-  // Director / related-party advances & borrowings.
-  if (b >= 450 && b <= 459) return "LOAN";
+  // Director / related-party advances & borrowings, HP / related-party loans
+  // (440-x: e.g. 440-0030 LOAN FROM RELATED PARTY - HOUZS VENTURE;
+  // 480-x: HIRE PURCHASE CREDITOR + its interest suspense).
+  if ((b >= 440 && b <= 459) || b === 480) return "LOAN";
   // Generic expense.
   if (a.type === "EXPENSE" || b === 900) return "GENERAL_EXPENSE";
   return "UNALLOCATED";
@@ -106,6 +112,18 @@ export function rawMaterialLineFor(
     return "Purchase of Wooden";
   if (g.includes("FILLER")) return "Purchase of Filler";
   return "Purchase of Other & Packaging";
+}
+
+// Display order inside the Raw Materials block: stock-group rows first, then
+// the named non-material settlements (owner 2026-08-27 「必须要知道还什么」),
+// "Unallocated raw material" always last.
+export function rmLineOrder(line: string): number {
+  if (line === "Unallocated raw material") return 99;
+  if (line === "Supplier advance / deposit") return 14;
+  if (line === "Opening creditors settlement") return 13;
+  if (line === "Trade finance repayment" || line.endsWith("(other creditor)") || line.startsWith("Suppliers settled via ")) return 12;
+  if (line === "SST / TAX") return 11;
+  return 10;
 }
 
 // Distribute an integer total (sen) across weighted buckets so the parts sum
@@ -213,12 +231,15 @@ export function buildStatement(opts: {
   coa: Map<string, CoaLite>;
   map: CfMap;
   rmSplit: RmSplit;
+  // Salary settlements by department (owner 2026-08-27 「salary 那边也是要拆散
+  // 成department」): same shape as rmSplit, applied to DIRECT_LABOUR legs.
+  deptSplit?: RmSplit;
   stockGroupOverride: Record<string, string>;
   fyeMonth: number;
   period: string;
   editable?: boolean;
 }): CfStatement {
-  const { classified, bankLegs, coa, map, rmSplit, fyeMonth, period, editable } = opts;
+  const { classified, bankLegs, coa, map, rmSplit, deptSplit = {}, fyeMonth, period, editable } = opts;
   const months = fyMonths(period, fyeMonth);        // newest first
   const fyStart = months[months.length - 1];        // FY start ym
   const columns: CfColumn[] = [
@@ -255,7 +276,10 @@ export function buildStatement(opts: {
     const place = placement(leg.accountCode, a);
     const delta = cashDelta(leg); // signed; + = cash in
     if (place.section === "RAW_MATERIALS") {
-      const split = rmSplit[leg.sourceId];
+      // A split registered for this leg's exact account wins over the
+      // payment-wide one (an other-party payment can put SOME of its money on
+      // the creditor control and the rest on purchase accounts).
+      const split = rmSplit[`${leg.sourceId}@${leg.accountCode}`] ?? rmSplit[leg.sourceId];
       if (split && split.length) {
         const parts = splitByLargestRemainder(
           Math.abs(delta),
@@ -263,10 +287,26 @@ export function buildStatement(opts: {
         );
         const sign = delta < 0 ? -1 : 1;
         for (const [line, sen] of Object.entries(parts))
-          addToLine("RAW_MATERIALS", line, 10, leg.ym, sign * sen);
+          addToLine("RAW_MATERIALS", line, rmLineOrder(line), leg.ym, sign * sen);
+      } else if (a && !(a.sat === "SCC" || band(leg.accountCode) === 400 || band(leg.accountCode) === 405)) {
+        // A non-control account routed here (a PURCHASE - … account, or one
+        // the owner dragged in) keeps its own name as the line.
+        addToLine("RAW_MATERIALS", place.name, rmLineOrder(place.name), leg.ym, delta, leg.accountCode);
       } else {
         addToLine("RAW_MATERIALS", "Unallocated raw material", 99, leg.ym, delta);
       }
+    } else if (place.section === "DIRECT_LABOUR" && deptSplit[leg.sourceId]?.length) {
+      // Salary settlement split across departments (weights = that payroll
+      // month's payslip cost mix). Falls through to the account line when the
+      // caller had no payslip data for the month.
+      const split = deptSplit[leg.sourceId];
+      const parts = splitByLargestRemainder(
+        Math.abs(delta),
+        split.map((s) => ({ key: s.line, weight: s.weight })),
+      );
+      const sign = delta < 0 ? -1 : 1;
+      for (const [line, sen] of Object.entries(parts))
+        addToLine("DIRECT_LABOUR", line, 10, leg.ym, sign * sen);
     } else {
       addToLine(place.section, place.name, place.order, leg.ym, delta, leg.accountCode);
     }

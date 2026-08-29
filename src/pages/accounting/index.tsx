@@ -11075,7 +11075,459 @@ function CashFlowTab() {
   );
   const data = resp?.success ? resp.data : undefined;
   const cols = data?.columns ?? [];
-  const rows = data?.rows ?? [];
+
+  // DEV-ONLY preview of the raw-material split (owner 2026-08-27: 「本地那边给
+  // 我看不行吗」). The local vite server proxies /api to PRODUCTION, so the
+  // backend rmSplit fix isn't live here until deployed — this shim re-splits
+  // the lone "Unallocated raw material" row client-side from the same payment
+  // → PI → stock-group chain, per column, preserving every column total to
+  // the sen. `import.meta.env.DEV` means the whole block is dead-code in the
+  // production build; on prod the API serves the split and the shim never
+  // engages (the guard below sees more than one RM child).
+  const [devRp, setDevRp] = useState<{
+    rmRows: CfApiRow[];
+    movedOut: number[];
+    merges: { section: string; label: string; values: number[] }[];
+    below: { section: string; label: string; values: number[] }[];
+    surplusShift: number[];
+  } | null>(null);
+  useEffect(() => {
+    // Synchronous reset is deliberate: stale split rows must not render
+    // against a freshly-changed statement while the async rebuild runs.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDevRp(null);
+    if (!import.meta.env.DEV || !data) return;
+    const rm = data.rows.filter((r) => r.section === "RAW_MATERIALS");
+    const lone = rm.find((r) => r.kind === "line" && r.label === "Unallocated raw material");
+    if (!lone || rm.filter((r) => r.kind === "line").length !== 1) return;
+    let stale = false;
+    (async () => {
+      const g = async (p: string): Promise<{ data?: unknown }> =>
+        (await fetch(p, { cache: "no-store" })).json() as Promise<{ data?: unknown }>;
+      // Owner 2026-08-27, three stacked asks: 「拆散」(one row per stock group),
+      // 「必须要知道还什么」(name every ringgit), 「根据purpose 放去相对应的
+      // account · 当做receipts and payment report」— an other-creditor payment
+      // is re-routed to the counterAccounts of the bills it settled, so
+      // transporter money lands on TRANSPORT EXPENSE, SMD's on Capex, and the
+      // Houzs Century repayment (bills that debit 400-0000 = suppliers paid on
+      // our behalf) stays in Raw Materials, labelled as such. The deployed
+      // backend does the same split from the same tables; this preview may
+      // put a TAXATION/REVENUE-routed part under Unallocated instead (none
+      // exist in the data), the backend routes those exactly.
+      const OPENING = "Opening creditors settlement";
+      const ADVANCE = "Supplier advance / deposit";
+      const UNALLOC = "Unallocated raw material";
+      const lineFor = (grp: string) => (grp ? grp : UNALLOC);
+      type AnyRec = Record<string, unknown>;
+      const rmL = await g("/api/raw-materials");
+      const grpBy = new Map<string, string>();
+      for (const r of ((rmL?.data ?? []) as AnyRec[])) {
+        const code = String(r.itemCode ?? r.item_code ?? "");
+        if (code) grpBy.set(code, String(r.itemGroup ?? r.item_group ?? ""));
+      }
+      // Supplier payments funded by the Houzs trade-finance facility credit the
+      // TF liability account instead of a bank, never reach the statement, and
+      // must not shape the proportions either.
+      const tfGl = await g("/api/accounting/gl?account=310-0020&from=2000-01-01&to=9999-12-31");
+      const houzsFunded = new Set<string>();
+      for (const r of ((((tfGl?.data as AnyRec | undefined)?.rows as AnyRec[] | undefined) ?? []))) {
+        if (String(r.sourceType ?? "").startsWith("supplier_payment") && Number(r.creditSen ?? 0) > 0)
+          houzsFunded.add(String(r.sourceId ?? ""));
+      }
+      // Chart of accounts + the owner's section overrides → where a purpose
+      // account belongs (client replica of defaultSectionFor).
+      const [coaR, mapR, oppR, billsR] = await Promise.all([
+        g("/api/accounting/coa"),
+        g("/api/accounting/cashflow/map"),
+        g("/api/accounting/other-party-payments"),
+        g("/api/accounting/other-party-bills"),
+      ]);
+      const coaBy = new Map<string, { name: string; type: string; sat: string }>();
+      for (const a of ((coaR?.data ?? []) as AnyRec[])) {
+        coaBy.set(String(a.code ?? ""), {
+          name: String(a.name ?? a.code ?? ""),
+          type: String(a.type ?? ""),
+          sat: String(a.specialAccountType ?? ""),
+        });
+      }
+      const ownMap = (((mapR?.data as AnyRec | undefined)?.map as Record<string, { section?: string }> | undefined) ?? {});
+      const secFor = (code: string): string => {
+        const o = ownMap[code]?.section;
+        if (o) return o;
+        const a = coaBy.get(code);
+        const b = parseInt(code.split("-")[0] ?? "0", 10) || 0;
+        if (a?.sat === "SDC" || b === 300 || b === 305 || b === 350) return "REVENUE_COLLECTION";
+        if (a?.sat === "SCC" || b === 400 || b === 405) return "RAW_MATERIALS";
+        if (b === 750) return "DIRECT_LABOUR";
+        if (b >= 700 && b <= 705 && /^PURCHASE\b/i.test(a?.name ?? "")) return "RAW_MATERIALS";
+        if (b === 780 || (b >= 700 && b <= 705)) return "FACTORY_OVERHEAD";
+        if (b >= 200 && b <= 299) return "CAPEX";
+        if ((b >= 440 && b <= 459) || b === 480) return "LOAN";
+        if (a?.type === "EXPENSE" || b === 900) return "GENERAL_EXPENSE";
+        return "UNALLOCATED";
+      };
+      // Purpose mix per bill, then per payment (allocation-weighted).
+      const billMix = new Map<string, Map<string, number>>();
+      for (const b of ((billsR?.data ?? []) as AnyRec[])) {
+        const m = new Map<string, number>();
+        for (const it of ((b.items ?? []) as AnyRec[])) {
+          const acct = String(it.counterAccount ?? "").trim();
+          const sen = Math.max(0, Number(it.amountSen ?? 0));
+          if (acct && sen) m.set(acct, (m.get(acct) ?? 0) + sen);
+        }
+        if (m.size) billMix.set(String(b.id ?? ""), m);
+      }
+      const colYms = data.columns.map((cc) => cc.key);
+      const accumCi = colYms.indexOf("__accum__");
+      const zeroCols = () => colYms.map(() => 0);
+      // Destination buckets, all exact sen.
+      const rmExact = new Map<string, number[]>();   // rows staying inside Raw Materials
+      const mergeAgg = new Map<string, number[]>();  // "SECTION|label" → operating group merges
+      const belowAgg = new Map<string, number[]>();  // "SECTION|label" → below-result groups
+      const movedOut = zeroCols();
+      const surplusShift = zeroCols();
+      const opTotalByCol = zeroCols();
+      const bucket = (m: Map<string, number[]>, k: string) => {
+        let a = m.get(k);
+        if (!a) { a = zeroCols(); m.set(k, a); }
+        return a;
+      };
+      const OUTFLOW = new Set(["RAW_MATERIALS", "DIRECT_LABOUR", "FACTORY_OVERHEAD", "GENERAL_EXPENSE", "TAXATION", "FINANCE_COST", "CAPEX", "DEPOSIT"]);
+      const OPERATING = new Set(["REVENUE_COLLECTION", "RAW_MATERIALS", "DIRECT_LABOUR", "FACTORY_OVERHEAD", "GENERAL_EXPENSE", "TAXATION"]);
+      const sp = await g("/api/supplier-payments");
+      const piCache = new Map<string, Map<string, number>>();
+      const piW = async (id: string) => {
+        const hit = piCache.get(id);
+        if (hit) return hit;
+        const d = await g("/api/purchase-invoices/" + id);
+        const w = new Map<string, number>();
+        for (const it of ((((d?.data as AnyRec | undefined)?.items as AnyRec[] | undefined) ?? []))) {
+          const lt = String(it.lineType ?? it.line_type ?? "STOCKED");
+          const amt = Number(it.lineTotalSen ?? it.line_total_sen ?? 0);
+          const mc = String(it.materialCode ?? it.material_code ?? "");
+          const line = lt === "TAX" ? "SST / TAX" : lineFor(mc ? grpBy.get(mc) ?? "" : "");
+          w.set(line, (w.get(line) ?? 0) + Math.max(0, amt));
+        }
+        piCache.set(id, w);
+        return w;
+      };
+      // Per-month proportions from bank-funded supplier payments. Houzs-funded
+      // draws never touch a bank, so they stay out entirely.
+      const byYm = new Map<string, Map<string, number>>();
+      for (const p of ((sp?.data ?? []) as AnyRec[])) {
+        if ((String(p.lifecycleState ?? "ACTIVE") || "ACTIVE") !== "ACTIVE") continue;
+        if (houzsFunded.has(String(p.paymentNo ?? ""))) continue;
+        const ym = String(p.date ?? "").slice(0, 7);
+        if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+        const monthBucket = byYm.get(ym) ?? new Map<string, number>();
+        const put = (line: string, sen: number) => monthBucket.set(line, (monthBucket.get(line) ?? 0) + sen);
+        for (const l of ((p.lines ?? []) as AnyRec[])) {
+          const booked = Number(l.bookedSen ?? 0);
+          if (booked <= 0) continue;
+          const piId = String(l.purchaseInvoiceId ?? "");
+          if (!piId) { put(ADVANCE, booked); continue; }
+          const w = await piW(piId);
+          let tw = 0;
+          for (const v of w.values()) tw += v;
+          // pi-ob-* opening-balance invoices carry no item lines by design —
+          // the money is real, the material detail predates the system.
+          if (!tw) { put(piId.startsWith("pi-ob-") ? OPENING : UNALLOC, booked); continue; }
+          for (const [line, lw] of w) put(line, (booked * lw) / tw);
+        }
+        byYm.set(ym, monthBucket);
+      }
+      for (const p of ((oppR?.data ?? []) as AnyRec[])) {
+        if ((String(p.lifecycleState ?? "ACTIVE") || "ACTIVE") !== "ACTIVE") continue;
+        if (String(p.bankAccount ?? "") === "310-0020") continue;
+        const ym = String(p.date ?? "").slice(0, 7);
+        const ci = colYms.indexOf(ym);
+        if (ci < 0) continue;
+        const payee = String(p.partyName ?? "Other creditor").trim();
+        const total = Number(p.totalSen ?? 0);
+        if (!total) continue;
+        opTotalByCol[ci] += total;
+        // payment mix = Σ allocations × their bill's item mix
+        const mix = new Map<string, number>();
+        for (const l of ((p.lines ?? []) as AnyRec[])) {
+          const bm = billMix.get(String(l.billId ?? ""));
+          const alloc = Math.max(0, Number(l.amountSen ?? 0));
+          if (!bm || !alloc) continue;
+          let tot = 0;
+          for (const v of bm.values()) tot += v;
+          if (!tot) continue;
+          for (const [acct, w] of bm) mix.set(acct, (mix.get(acct) ?? 0) + (alloc * w) / tot);
+        }
+        if (!mix.size) { bucket(rmExact, `${payee} (other creditor)`)[ci] += total; continue; }
+        let wTot = 0;
+        for (const v of mix.values()) wTot += v;
+        const entries = [...mix.entries()];
+        let assigned = 0;
+        entries.forEach(([acct, w], i) => {
+          const part = i === entries.length - 1 ? total - assigned : Math.round((total * w) / wTot);
+          assigned += part;
+          if (!part) return;
+          const sec = secFor(acct);
+          if (sec === "RAW_MATERIALS") {
+            // Creditor-control money keeps the payee label; a real purchase
+            // account (701-x PURCHASE - FABRIC …) shows as its own named row.
+            const aa = coaBy.get(acct);
+            const bb = parseInt(acct.split("-")[0] ?? "0", 10) || 0;
+            const isCtl = aa?.sat === "SCC" || bb === 400 || bb === 405;
+            bucket(rmExact, isCtl ? `Suppliers settled via ${payee}` : (aa?.name || acct))[ci] += part;
+            return;
+          }
+          movedOut[ci] += part;
+          const label = coaBy.get(acct)?.name || acct;
+          if (sec === "FACTORY_OVERHEAD" || sec === "GENERAL_EXPENSE" || sec === "DIRECT_LABOUR") {
+            bucket(mergeAgg, `${sec}|${label}`)[ci] += part; // stays operating → surplus unchanged
+            return;
+          }
+          const below = OUTFLOW.has(sec) && !OPERATING.has(sec) ? sec : OPERATING.has(sec) ? "UNALLOCATED" : sec;
+          bucket(belowAgg, `${below}|${label}`)[ci] += OUTFLOW.has(below) ? part : -part;
+          surplusShift[ci] += part; // outflow left the operating block
+        });
+      }
+      if (stale) return;
+      const out = new Map<string, number[]>();
+      const rowFor = (line: string): number[] => bucket(out, line);
+      // Exact rows staying inside Raw Materials (other-creditor money whose
+      // purpose is trade creditors, plus whole payments with no bill detail).
+      for (const [line, vals] of rmExact) {
+        const a = rowFor(line);
+        vals.forEach((v, i) => { a[i] += v; });
+      }
+      colYms.forEach((ym, ci) => {
+        if (ym === "__accum__") return; // filled from the month cells below
+        const total = lone.values[ci];
+        if (total === null || total === 0) return;
+        // Remainder after the exact other-creditor money = bank-funded
+        // supplier payments, split by that month's booked proportions.
+        const rem = total - opTotalByCol[ci];
+        if (rem <= 0) return;
+        const props = byYm.get(ym);
+        const ptot = props ? [...props.values()].reduce((s, v) => s + v, 0) : 0;
+        if (!props || !ptot) { rowFor(UNALLOC)[ci] += rem; return; }
+        let assigned = 0;
+        const entries = [...props.entries()];
+        entries.forEach(([line, w], i) => {
+          const share = i === entries.length - 1 ? rem - assigned : Math.round((rem * w) / ptot);
+          assigned += share;
+          rowFor(line)[ci] += share;
+        });
+      });
+      // Accumulated = sum of the month cells so every row is self-consistent.
+      const fillAccum = (vals: number[]) => {
+        if (accumCi >= 0) vals[accumCi] = vals.reduce((s, v, i) => (i === accumCi ? s : s + v), 0);
+      };
+      for (const vals of out.values()) fillAccum(vals);
+      for (const vals of mergeAgg.values()) fillAccum(vals);
+      for (const vals of belowAgg.values()) fillAccum(vals);
+      fillAccum(movedOut);
+      fillAccum(surplusShift);
+      const rank = (n: string) =>
+        n === UNALLOC ? 6 : n === ADVANCE ? 5 : n === OPENING ? 4 : n.endsWith("(other creditor)") ? 3 : n.startsWith("Suppliers settled via ") ? 2 : n === "SST / TAX" ? 1 : 0;
+      const labels = [...out.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+      const rmRows: CfApiRow[] = labels
+        .filter((n) => (out.get(n) ?? []).some((v) => v !== 0))
+        .map((n) => ({ kind: "line" as const, label: n, section: "RAW_MATERIALS", depth: 2, groupId: "RAW_MATERIALS", values: out.get(n)! }));
+      const unpack = (m: Map<string, number[]>) => [...m.entries()]
+        .filter(([, v]) => v.some((x) => x !== 0))
+        .map(([k, values]) => ({ section: k.slice(0, k.indexOf("|")), label: k.slice(k.indexOf("|") + 1), values }));
+      if (!stale && rmRows.length)
+        setDevRp({ rmRows, movedOut, merges: unpack(mergeAgg), below: unpack(belowAgg), surplusShift });
+    })().catch(() => {});
+    return () => { stale = true; };
+  }, [data]);
+
+  // DEV-ONLY salary-by-department preview (owner 2026-08-27 「salary 那边也是
+  // 要拆散成department」). Prod still shows one "ACCRUAL - SALARY" line under
+  // Unallocated; the deployed backend will emit a Direct Labour group with one
+  // row per department instead. Until then this shim rebuilds that view
+  // client-side: GL legs on 410-0010 name the payroll month they pay
+  // ("… Salaries - May'26"), that month's payslip mix (labor/preview) splits
+  // the cash. Dead code in production builds.
+  const [devSalRows, setDevSalRows] = useState<CfApiRow[] | null>(null);
+  useEffect(() => {
+    // Same deliberate reset as devRp above.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDevSalRows(null);
+    if (!import.meta.env.DEV || !data) return;
+    const sal = data.rows.find((r) => r.kind === "line" && r.label === "ACCRUAL - SALARY");
+    if (!sal) return; // backend already splits → nothing to preview
+    let stale = false;
+    (async () => {
+      const g = async (p: string): Promise<{ data?: unknown }> =>
+        (await fetch(p, { cache: "no-store" })).json() as Promise<{ data?: unknown }>;
+      type AnyRec = Record<string, unknown>;
+      const M3: Record<string, string> = { Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06", Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12" };
+      const gl = await g("/api/accounting/gl?account=410-0010&from=2000-01-01&to=9999-12-31");
+      const legs = ((((gl?.data as AnyRec | undefined)?.rows as AnyRec[] | undefined) ?? []))
+        .filter((l) => Number(l.debitSen ?? 0) > 0);
+      // column month → payroll month → sen paid
+      const perCol = new Map<string, Map<string, number>>();
+      for (const l of legs) {
+        const colYm = String(l.postedAt ?? "").slice(0, 7);
+        const m = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'(\d{2})\b/.exec(String(l.description ?? ""));
+        const payYm = m ? `20${m[2]}-${M3[m[1]]}` : colYm;
+        const mm = perCol.get(colYm) ?? new Map<string, number>();
+        mm.set(payYm, (mm.get(payYm) ?? 0) + Number(l.debitSen ?? 0));
+        perCol.set(colYm, mm);
+      }
+      const mixCache = new Map<string, { dept: string; w: number }[]>();
+      const mixFor = async (ym: string) => {
+        const hit = mixCache.get(ym);
+        if (hit) return hit;
+        let mix: { dept: string; w: number }[] = [];
+        try {
+          const d = await g(`/api/accounting/labor/preview?month=${ym}`);
+          const by = (((d?.data as AnyRec | undefined)?.byDept as AnyRec[] | undefined) ?? []);
+          mix = by.map((b) => ({ dept: String(b.departmentCode ?? ""), w: Number(b.costSen ?? 0) }))
+            .filter((x) => x.dept && x.w > 0);
+        } catch { /* no payslips for that month → line stays unsplit */ }
+        mixCache.set(ym, mix);
+        return mix;
+      };
+      const colYms = data.columns.map((cc) => cc.key);
+      const out = new Map<string, number[]>();
+      const rowFor = (line: string): number[] => {
+        let a = out.get(line);
+        if (!a) { a = colYms.map(() => 0); out.set(line, a); }
+        return a;
+      };
+      const accumCi = colYms.indexOf("__accum__");
+      for (let ci = 0; ci < colYms.length; ci++) {
+        const ym = colYms[ci];
+        if (ym === "__accum__") continue;
+        const v = sal.values[ci];
+        if (!v) continue;
+        const outflow = -v; // display sign: outflow was a negative Unallocated line
+        const mm = perCol.get(ym);
+        const parts = mm ? [...mm.entries()] : [];
+        const legTot = parts.reduce((s, [, sen]) => s + sen, 0);
+        if (!parts.length || legTot <= 0 || outflow <= 0) { rowFor("ACCRUAL - SALARY")[ci] += outflow; continue; }
+        let assigned = 0;
+        for (let pi = 0; pi < parts.length; pi++) {
+          const [payYm, sen] = parts[pi];
+          const share = pi === parts.length - 1 ? outflow - assigned : Math.round((outflow * sen) / legTot);
+          assigned += share;
+          const mix = await mixFor(payYm);
+          const wTot = mix.reduce((s, x) => s + x.w, 0);
+          if (!mix.length || !wTot) { rowFor("ACCRUAL - SALARY")[ci] += share; continue; }
+          let dAssigned = 0;
+          mix.forEach((x, di) => {
+            const part = di === mix.length - 1 ? share - dAssigned : Math.round((share * x.w) / wTot);
+            dAssigned += part;
+            rowFor(x.dept)[ci] += part;
+          });
+        }
+      }
+      if (stale) return;
+      if (accumCi >= 0) for (const vals of out.values()) {
+        vals[accumCi] = vals.reduce((s, x, i) => (i === accumCi ? s : s + x), 0);
+      }
+      const labels = [...out.keys()].sort((a, b) => a.localeCompare(b));
+      const lines: CfApiRow[] = labels
+        .filter((n) => (out.get(n) ?? []).some((x) => x !== 0))
+        .map((n) => ({ kind: "line" as const, label: n, section: "DIRECT_LABOUR", depth: 2, groupId: "DIRECT_LABOUR", values: out.get(n)! }));
+      if (!lines.length) return;
+      const header: CfApiRow = {
+        kind: "group", label: "Direct Labour", section: "DIRECT_LABOUR", depth: 1, groupId: "DIRECT_LABOUR",
+        values: colYms.map((_, ci) => lines.reduce((s, r) => s + (r.values[ci] ?? 0), 0)),
+      };
+      if (!stale) setDevSalRows([header, ...lines]);
+    })().catch(() => {});
+    return () => { stale = true; };
+  }, [data]);
+
+  const rows = useMemo(() => {
+    let base = data?.rows ?? [];
+    if (devRp) {
+      const idx = base.findIndex((r) => r.kind === "line" && r.label === "Unallocated raw material" && r.section === "RAW_MATERIALS");
+      if (idx >= 0) {
+        base = [...base.slice(0, idx), ...devRp.rmRows, ...base.slice(idx + 1)];
+        // Money routed to other sections left this one: shrink the group head.
+        const gi = base.findIndex((r) => r.kind === "group" && r.groupId === "RAW_MATERIALS");
+        if (gi >= 0) base = base.map((r, i) => (i === gi ? { ...r, values: r.values.map((x, k) => (x ?? 0) - devRp.movedOut[k]) } : r));
+      }
+    }
+    if (devSalRows) {
+      const si = base.findIndex((r) => r.kind === "line" && r.label === "ACCRUAL - SALARY");
+      if (si >= 0) {
+        const sal = base[si];
+        base = base.filter((_, i) => i !== si);
+        // Shrink (or drop) the group the line came out of, so its subtotal
+        // stays honest.
+        const gi = base.findIndex((r) => r.kind === "group" && r.groupId === sal.groupId);
+        if (gi >= 0) {
+          const hasSiblings = base.some((r) => r.kind === "line" && r.groupId === sal.groupId);
+          base = hasSiblings
+            ? base.map((r, i) => (i === gi ? { ...r, values: r.values.map((x, k) => (x ?? 0) - (sal.values[k] ?? 0)) } : r))
+            : base.filter((_, i) => i !== gi);
+        }
+        // Salary moves above the operating result line, so the result shrinks
+        // by the outflow (sal.values are already display-negative).
+        base = base.map((r) => r.kind === "result" && /operation surplus/i.test(r.label)
+          ? { ...r, values: r.values.map((x, k) => (x ?? 0) + (sal.values[k] ?? 0)) } : r);
+        let ins = base.findIndex((r) =>
+          (r.kind === "group" && (r.section === "FACTORY_OVERHEAD" || r.section === "GENERAL_EXPENSE")) || r.kind === "result");
+        if (ins < 0) ins = base.length;
+        base = [...base.slice(0, ins), ...devSalRows, ...base.slice(ins)];
+      }
+    }
+    if (devRp && (devRp.merges.length || devRp.below.length)) {
+      // Receipts-and-payments routing: money that settled a bill booked to an
+      // expense/asset account joins that account's own line, creating the
+      // group when the statement had none.
+      const SEC_LABELS: Record<string, string> = {
+        DIRECT_LABOUR: "Direct Labour", FACTORY_OVERHEAD: "Factory Overhead", GENERAL_EXPENSE: "General Expense",
+        TAXATION: "Taxation", FINANCE_COST: "Finance Cost", CAPEX: "Capital Expenditure (CAPEX)",
+        DEPOSIT: "Deposit Incurred / (Repay)", LOAN: "Loan / (Repayment)", UNALLOCATED: "Unallocated",
+      };
+      const SEC_ORDER = ["FINANCE_COST", "CAPEX", "DEPOSIT", "LOAN", "UNALLOCATED"];
+      const addInto = (section: string, label: string, values: number[], belowResult: boolean) => {
+        let gi = base.findIndex((r) => r.kind === "group" && r.section === section);
+        if (gi < 0) {
+          let ins: number;
+          if (belowResult) {
+            const ti = base.findIndex((r) => r.kind === "total");
+            const ri = base.findIndex((r) => r.kind === "result");
+            ins = ti >= 0 ? ti : base.length;
+            if (ri >= 0 && ins <= ri) ins = ri + 1;
+          } else {
+            const ri = base.findIndex((r) => r.kind === "result");
+            ins = ri >= 0 ? ri : base.length;
+          }
+          const header: CfApiRow = {
+            kind: "group", label: SEC_LABELS[section] ?? section, section, depth: 1,
+            groupId: section, values: values.map(() => 0),
+          };
+          base = [...base.slice(0, ins), header, ...base.slice(ins)];
+          gi = ins;
+        }
+        base = base.map((r, i) => (i === gi ? { ...r, values: r.values.map((x, k) => (x ?? 0) + values[k]) } : r));
+        let li = -1, end = base.length;
+        for (let i = gi + 1; i < base.length; i++) {
+          const r = base[i];
+          if (r.kind !== "line" || r.groupId !== section) { if (end === base.length) end = i; break; }
+          if (r.label === label) { li = i; break; }
+          if (end === base.length && r.label.localeCompare(label) > 0) end = i;
+        }
+        if (li >= 0) {
+          base = base.map((r, i) => (i === li ? { ...r, values: r.values.map((x, k) => (x ?? 0) + values[k]) } : r));
+        } else {
+          const line: CfApiRow = { kind: "line", label, section, depth: 2, groupId: section, values: [...values] };
+          base = [...base.slice(0, end), line, ...base.slice(end)];
+        }
+      };
+      for (const m of devRp.merges) addInto(m.section, m.label, m.values, false);
+      for (const b of [...devRp.below].sort((a, z) => SEC_ORDER.indexOf(a.section) - SEC_ORDER.indexOf(z.section)))
+        addInto(b.section, b.label, b.values, true);
+      // Outflow that moved below the operating block lifts the surplus.
+      base = base.map((r) => r.kind === "result" && /operation surplus/i.test(r.label)
+        ? { ...r, values: r.values.map((x, k) => (x ?? 0) + devRp.surplusShift[k]) } : r);
+    }
+    return base;
+  }, [data, devRp, devSalRows]);
 
   useEffect(() => {
     if (!edit) return;
@@ -11184,11 +11636,29 @@ function CashFlowTab() {
           {!data ? (
             <div className="py-8 text-center text-[#6B7280] text-sm">No cash-flow data for {period}.</div>
           ) : (
+            <>
+            {/* Statement letterhead (owner 2026-08-27 排版 pass) — the report
+                reads as a REPORT, not a grid: company on the left, statement
+                title on the right, ruled off before the figures start. */}
+            <div className="flex flex-wrap justify-between items-start border-b-2 border-[#1F1D1B] pb-2 mb-3 gap-2">
+              <div>
+                <div className="text-[15px] font-extrabold tracking-wide text-[#1F1D1B]">HOOKKA INDUSTRIES SDN. BHD.</div>
+                <div className="text-[11px] text-[#6B7280]">Prepared on cash basis · all figures in RM</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[14px] font-extrabold tracking-[0.15em] text-[#6B5C32]">STATEMENT OF CASH FLOW</div>
+                <div className="text-[11px] text-[#6B7280]">Accumulated + trailing 12 months · view {period}</div>
+              </div>
+            </div>
             <table className="text-[13px]" style={{ minWidth: 760 }}>
               <thead>
-                <tr className="text-[12px] text-[#6B7280]">
-                  <td />
-                  {cols.map((c) => <td key={c.key} className="text-right px-2 pb-1 whitespace-nowrap">{c.label}</td>)}
+                {/* PERIOD row bold on top (house rule), Accumulated tinted so
+                    the cumulative column never reads as a 13th month. */}
+                <tr className="text-[12px] font-bold text-[#1F1D1B] border-b-2 border-[#1F1D1B] bg-[#F7F4EF]">
+                  <td className="px-2 py-1.5 text-left text-[11px] font-extrabold tracking-wide text-[#6B5C32]">PERIOD</td>
+                  {cols.map((c) => (
+                    <td key={c.key} className={`text-right px-2 py-1.5 whitespace-nowrap ${c.accum ? "bg-[#F6F1E7] text-[#6B5C32]" : ""}`}>{c.label}</td>
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -11201,10 +11671,12 @@ function CashFlowTab() {
                   const draggable = edit && r.kind === "line" && !!r.accountCode;
                   const dropHere = isDropTarget(r);
                   const rowCls =
-                    r.kind === "result" ? "bg-[#F0ECE9]/60 font-semibold" :
-                    r.kind === "total" ? "border-t-2 border-[#6B5C32] font-semibold" :
-                    r.kind === "cf" ? "border-b-2 border-[#6B5C32] bg-[#F0ECE9]/40 font-semibold" :
-                    r.kind === "section" ? "font-semibold text-[#1F1D1B]" : "";
+                    r.kind === "result" ? "bg-[#F0ECE9] font-bold border-t border-[#1F1D1B]" :
+                    r.kind === "total" ? "bg-[#EAF3DE] font-bold border-t-2 border-[#1F1D1B]" :
+                    r.kind === "cf" ? "font-bold border-t border-[#1F1D1B] [border-bottom:3px_double_#1F1D1B]" :
+                    r.kind === "bf" ? "text-[#6B7280] italic" :
+                    r.kind === "subtotal" ? "font-semibold border-t border-[#E2DDD8]" :
+                    r.kind === "section" ? "font-extrabold tracking-wide text-[#6B5C32] text-[12px]" : "";
                   return (
                     <tr key={i}
                       className={`${rowCls} ${isGroup ? "cursor-pointer hover:bg-[#F7F4EF] bg-[#F0ECE9]/30 font-semibold" : ""} ${draggable ? "cursor-move" : ""} ${dragCode === r.accountCode ? "opacity-40" : ""} ${dropHere && dragOverSec === r.section ? "ring-2 ring-inset ring-[#6B5C32]" : ""}`}
@@ -11224,13 +11696,14 @@ function CashFlowTab() {
                       onClick={isGroup && !edit ? () => { const n = new Set(collapsed); if (n.has(r.groupId!)) n.delete(r.groupId!); else n.add(r.groupId!); setCollapsed(n); } : undefined}>
                       <td className="py-1 whitespace-nowrap" style={pad}>{isGroup ? (isOpen ? "▾ " : "▸ ") : ""}{draggable ? "⠿ " : ""}{r.label}</td>
                       {r.values.map((v, j) => (
-                        <td key={j} className={`text-right px-2 tabular-nums whitespace-nowrap ${typeof v === "number" && v < 0 ? "text-[#9A3A2D]" : ""} ${strong ? "font-semibold" : ""}`}>{fmt(v)}</td>
+                        <td key={j} className={`text-right px-2 tabular-nums whitespace-nowrap ${typeof v === "number" && v < 0 ? "text-[#9A3A2D]" : ""} ${v === 0 ? "text-[#C7C1BA]" : ""} ${strong ? "font-semibold" : ""} ${cols[j]?.accum ? "bg-[#F6F1E7]" : ""}`}>{fmt(v)}</td>
                       ))}
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+            </>
           )}
           <p className="text-[11px] text-[#9CA3AF] mt-3">Cash basis · classified from bank/cash ledger movements · Raw Materials traced to PI stock groups · Bank c/f = b/f + Cash Surplus.</p>
         </CardContent>

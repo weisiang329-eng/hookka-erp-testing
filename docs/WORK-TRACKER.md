@@ -14,7 +14,37 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-08-24 — 🔵 Forecast/dashboard 开放非生产部门 key 工资，按人工映射表分段 · main（推送后验 prod）
+## 2026-08-29 — ✅ Cash Flow 重排成 Receipts & Payments + 工资按部门拆（branch `feat/cashflow-receipts-payments`）
+
+Owner 连环指令（08-27→08-29 迭代五轮）：①「排版重新改，我能当场看到 result，确定没问题才
+push」②「unallocated raw material 要分出来」③「拆散」（按料组一组一行）④「不应该还有这么多
+[unallocated]…必须要知道还什么」⑤「根据 purpose 放去相对应的 account，当做 receipts and
+payment report」+「salary 那边也是要拆散成 department」+「supplier settled via houzs century
+也是需要放去相对应的费用」。Owner 08-29 拍板「可以」→ push。
+
+实测根因（逐月对到一分）：RM 段=所有还 creditor 的银行腿；Aug 309,463.37 = supplier_payment
+62,133.10 + other_party_payment 247,330.27。旧拆链只认 supplier payment → other-party 整笔掉
+Unallocated；开账 PI（pi-ob-*，无 item 行）也拆不出组。
+
+最终口径（三层同规则）：
+- `cashflow-engine.ts`：`rmLineOrder()` 行序；`deptSplit`（DIRECT_LABOUR 按部门）；rmSplit 支持
+  `sourceId@account` 精确键；RM 段非 control 户口腿保留科目名行；`defaultSectionFor`：
+  70x「PURCHASE - *」→ RAW_MATERIALS、440-459+480 → LOAN。
+- `accounting.ts` `computeCashflowStatement`（+orgId，两调用点）：other_party_payment 按 bill
+  `counterAccount` 拆伪腿再分类（运输→TRANSPORT EXPENSE、SMD→CAPEX、Houzs Venture 440-0030→
+  Loan/(Repayment)；creditor-control 用途→RM 段 "Suppliers settled via <payee>"，按 @account 键）；
+  supplier 权重：TF_REPAYMENT→"Trade finance repayment"、无 PI→"Supplier advance / deposit"、
+  pi-ob→"Opening creditors settlement"；工资 410-0010 腿按 voucher 描述的工资月取 payslip 部门
+  costSen 权重（aggregateLabour），默认落 DIRECT_LABOUR。
+- `index.tsx` CashFlowTab：DEV-only shim 同规则（devRp+devSalRows，import.meta.env.DEV 死代码；
+  部署后后端出拆分行、shim 自动不触发）。vite.config.ts `/api`→prod 代理（⚠ 连真库）随本分支上。
+
+验证：本地逐列加总=组头、Cash Surplus 53,176.55 与银行腿分毫不差；tests 4,417 全过
+（+8 个 cashflow 回归）；tsc 0。**悬**：OCB-2608-008 五行科目 owner 说「到时我手动改」——改完
+"Suppliers settled via Houzs Century 129,080.07" 自动散（布料→701-0000 等，建议表已给）；
+7 月四张 Houzs 代付 94,822.92 仍挂 310-0020 未还，将来走 TF 通道。
+
+## 2026-08-24 — ✅ Forecast/dashboard 开放非生产部门 key 工资，按人工映射表分段（merged #362，prod 已验 14 部门）
 
 Owner 发现 forecast 只有 8 个生产部门能 key（种子来自 payslips），部门主档其实有 14 个
 （Warehouse/Repair/Maint/Shortfall/R&D 等 Non-prod）。Owner 拍板口径：**按人工映射表分段**
@@ -34,7 +64,7 @@ Owner（贴 Fund Transfer 截图）：「这个 fund transfer 没有办法 print
 但行上只有 void/delete，没有任何入口提示 → owner 找不到。修 = 行尾加 `print` 链接
 （同 JV 表的行内打印，走同一个 `printVoucher`/`print-voucher.ts` 渲染器），一行改动。
 本地已验：4 行都出链接，点击生成完整 FUND TRANSFER VOUCHER（抬头/单号/户口/金额/大写/签名栏）。
-**待办**：owner 用 weisiang329-eng approve 本 PR（连同 #378、#362 一起批）→ 部署后在 prod 点一次 print 验证。
+2026-08-29：**已合并（#379）、prod 已验**（4 行 print 全通，凭证单号/金额正确）。
 ## 2026-08-27 — 🔵 JV 行菜单全灭（Post 打 /journals/undefined）· BUG-2026-08-27-001 · PR 待合
 
 Owner:「每次 JV 都会 merge 不上」（JE-2608-0001 七月薪水 35,370.50 过不了账，

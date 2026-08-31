@@ -228,8 +228,11 @@ export default function ForecastPage() {
       ),
     };
   }, [accounts, override, deptInfo]);
+  // Owner 2026-08-31 「算法也要改」: the non-production salary dept rows sit
+  // between Direct Labour and Factory Overhead AND count inside TOTAL COGS
+  // (they reduce GROSS PROFIT, not TOTAL EXPENSES).
   const cogsRows = useMemo(
-    () => [...lines.materials, ...lines.direct, ...lines.labour, ...lines.labourOvhDepts, ...lines.labourAccounts, ...lines.overhead],
+    () => [...lines.materials, ...lines.direct, ...lines.labour, ...lines.labourExpDepts, ...lines.labourOvhDepts, ...lines.labourAccounts, ...lines.overhead],
     [lines],
   );
 
@@ -263,7 +266,7 @@ export default function ForecastPage() {
     const sumGuard = (rows: CoaAcct[]) => rows.reduce((s, r) => (superseded(r.code) ? s : s + amt(r.code)), 0);
     const cogs = sumGuard(cogsRows);
     const oi = sum(lines.otherIncome);
-    const exp = sumGuard([...lines.expenses, ...lines.labourExpDepts]);
+    const exp = sumGuard(lines.expenses);
     const gp = salesSen - cogs;
     return { salesSen, amt, cogs, gp, oi, exp, np: gp + oi - exp, superseded };
   };
@@ -613,13 +616,16 @@ export default function ForecastPage() {
                     ))}
                   </>
                 )}
+                {/* Owner 2026-08-31: the non-production salary rows sit between
+                    Direct Labour and Factory Overhead, and their money counts
+                    inside TOTAL COGS (「算法也要改」) — see cogsRows above. */}
+                {section("expDept", "NON-PRODUCTION SALARIES — BY DEPARTMENT", lines.labourExpDepts)}
                 {section("ovh", "FACTORY OVERHEAD", lines.overhead)}
                 {section("ovhDept", "OVERHEAD SALARIES — BY DEPARTMENT", lines.labourOvhDepts)}
                 {totalRow("TOTAL COGS", (c) => c.cogs)}
                 {totalRow("GROSS PROFIT", (c) => c.gp, true)}
                 {section("oi", "OTHER INCOME", lines.otherIncome)}
                 {section("exp", "OPERATING EXPENSES", lines.expenses)}
-                {section("expDept", "NON-PRODUCTION SALARIES — BY DEPARTMENT", lines.labourExpDepts)}
                 {totalRow("TOTAL EXPENSES", (c) => c.exp)}
                 {totalRow("NET PROFIT", (c) => c.np, true)}
               </tbody>

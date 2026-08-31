@@ -9783,10 +9783,25 @@ app.get("/labor/departments", async (c) => {
     const coaRes = await c.var.DB.prepare("SELECT code, type FROM chart_of_accounts")
       .all<{ code: string; type: string }>();
     const coaTypes = new Map((coaRes.results ?? []).map((a) => [a.code, a.type] as const));
+    // Owner 2026-08-29 「不想要改labour tab, 直接forecast 映射在non production」:
+    // the department master's is_production flag wins the SECTION a dept files
+    // under — a non-production dept sits in NON-PRODUCTION SALARIES even while
+    // its labour-map account (which still decides where wages POST) is 750-x.
+    const nonProd = new Set<string>();
+    try {
+      const flags = await c.var.DB.prepare(`SELECT code, is_production FROM departments`)
+        .all<{ code: string | null; isProduction: number | null; is_production: number | null }>();
+      for (const r of flags.results ?? []) {
+        const t = String(r.code ?? "").trim();
+        if (t && Number(r.isProduction ?? r.is_production ?? 1) === 0) nonProd.add(t);
+      }
+    } catch { /* master predates the flag — bucket logic decides alone */ }
     const departments = [...codes].sort().map((code) => {
       const account = map.byDept[code] ?? map.fallback;
       const type = coaTypes.get(account) ?? "COST";
-      const bucket = pnlBucketFor(account, type, override) ?? "DIRECT_LABOUR";
+      const bucket = nonProd.has(code)
+        ? "OPEX_SALARIES"
+        : pnlBucketFor(account, type, override) ?? "DIRECT_LABOUR";
       return { code, account, bucket };
     });
     return c.json({ success: true, data: { departments, mappedAccounts: labourMappedAccounts(map) } });
@@ -10370,7 +10385,7 @@ app.get("/dashboard", async (c) => {
   // Bump for a changed SHAPE *or* a changed default WINDOW: the stored copy is
   // keyed by the range string, and the default range's key is blank either way,
   // so a wider-or-narrower default would keep serving the old month list.
-  const DASH_PAYLOAD_V = "v9"; // v9: dept forecasts file by labour-map bucket; v8: + forecastSen; v7: + salaryByDept
+  const DASH_PAYLOAD_V = "v10"; // v10: master non-prod depts file under staff cost; v9: dept forecasts file by labour-map bucket; v8: + forecastSen; v7: + salaryByDept
   // The explicit window is part of the identity — otherwise two different
   // ranges would share one cached copy.
   const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
@@ -10770,10 +10785,22 @@ app.get("/dashboard", async (c) => {
   // wages to (owner 2026-08-24): production → DIRECT_LABOUR, warehouse/maint
   // → FACTORY_OVERHEAD, office/R&D → staff cost. A dept-mode month supersedes
   // every account that map can post to (or dept rows + those accounts would
-  // double-count).
+  // double-count). Owner 2026-08-29 refinement: a dept the MASTER flags
+  // non-production files under staff cost regardless of the labour map — the
+  // map keeps deciding where wages POST, not where the forecast SITS.
   const labourMapDash = await getLabourMap(db);
   const labourMappedDash = new Set(labourMappedAccounts(labourMapDash));
+  const nonProdDash = new Set<string>();
+  try {
+    const flags = await db.prepare(`SELECT code, is_production FROM departments`)
+      .all<{ code: string | null; isProduction: number | null; is_production: number | null }>();
+    for (const r of flags.results ?? []) {
+      const t = String(r.code ?? "").trim();
+      if (t && Number(r.isProduction ?? r.is_production ?? 1) === 0) nonProdDash.add(t);
+    }
+  } catch { /* master predates the flag */ }
   const deptBucketDash = (dept: string): string => {
+    if (nonProdDash.has(dept)) return "OPEX_SALARIES";
     const acct = labourMapDash.byDept[dept] ?? labourMapDash.fallback;
     const meta = coaDash.get(resolveDash(acct)) ?? coaDash.get(acct);
     return (meta ? pnlBucketFor(acct, meta.type, overrideDash) : null) ?? "DIRECT_LABOUR";

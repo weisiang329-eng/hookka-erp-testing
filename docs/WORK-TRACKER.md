@@ -14,6 +14,16 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-29 — ✅ Forecast/Dashboard：主档 Non-prod 标签直接决定分区（不动 Labour tab）
+
+Owner（贴 14 部门表截图）：「non production 的 warehouse, repair, maint, shortfall, r&d 有再
+forecast 表？」→ 实测有 14 部门但 REPAIR/MAINT/SHORTFALL/R&D 没映射 → fallback 750 → 挤在
+DIRECT LABOUR 区。Owner 追令：「我不想要改 labour tab，不能直接 forecast 映射在 non
+production 吗？」→ 新口径：**departments.is_production=0 的部门，分区一律 NON-PRODUCTION
+SALARIES（bucket 压成 OPEX_SALARIES），科目映射只管工资过账、不再管分区**。改两处：
+`/labor/departments`（forecast 分区源）+ dashboard `deptBucketDash`（forecast 切片同规则，
+`DASH_PAYLOAD_V` v9→v10）。Labour tab / 过账 / supersede 规则零改动。
+
 ## 2026-08-29 — ✅ Cash Flow 重排成 Receipts & Payments + 工资按部门拆（branch `feat/cashflow-receipts-payments`）
 
 Owner 连环指令（08-27→08-29 迭代五轮）：①「排版重新改，我能当场看到 result，确定没问题才

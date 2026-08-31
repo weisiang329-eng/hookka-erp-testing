@@ -38,6 +38,8 @@ import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { ensureFinanceOrgColumns } from "../lib/ensure-finance-org";
 import { apRowBeforeOpening, legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
 import { applyOpeningSlice, windowCoversMonth } from "../../lib/opening-slice";
+import { labourInjectMonths } from "../../lib/labour-inject";
+import { projectedLabourByDept } from "../lib/labour-projection";
 import { groupPayslipsByMonthDept, forecastEntryKind, monthHasDeptForecast, labourMappedAccounts } from "../../lib/salary-dept";
 import { ensureTfTables, getTfSources, saveTfSources, loadTfDraws } from "../lib/trade-finance";
 import type { TfSource } from "../lib/trade-finance";
@@ -6154,6 +6156,53 @@ interface DocDateCtx {
   // periodic-inventory stock chain re-reads overlapping windows; cached
   // results are shared and must be treated as READ-ONLY by callers.
   glMemo?: Map<string, { net: GlWindow; coa: Map<string, { name: string; type: CoaRow["type"] }> }>;
+  // Per-request memo for the report-layer labour injection (key = ym →
+  // debit lines). The dashboard walks many one-month windows on one ctx; a
+  // dry payroll projection must run at most once per month per request.
+  labourMemo?: Map<string, { account: string; sen: number }[]>;
+}
+
+// Report-layer labour for one month (owner 2026-08-31 「任何时候我看P&L 时你都
+// 自动提取」): the payslips' department costs if any were generated, else a
+// dry run of the same payroll engine; mapped to accounts exactly like the
+// Labour tab's Post would. Returns [] when the month has neither payslips nor
+// clock data. Callers must ALREADY have established the month is unrecorded
+// (no salary-accrual credit in the GL) via labourInjectMonths.
+async function labourInjectionLines(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  ym: string,
+  memo?: Map<string, { account: string; sen: number }[]>,
+): Promise<{ account: string; sen: number }[]> {
+  const hit = memo?.get(ym);
+  if (hit) return hit;
+  let byDept: LabourDeptAgg[] = [];
+  let map: LabourMap | null = null;
+  try {
+    const agg = await aggregateLabour(db, ym, orgId);
+    byDept = agg.byDept;
+    map = agg.map;
+  } catch { /* payslips table absent → dry-run below */ }
+  if (!byDept.length) {
+    try {
+      if (!map) map = await getLabourMap(db);
+      const proj = await projectedLabourByDept(db, ym);
+      byDept = proj.map((d) => ({
+        departmentCode: d.departmentCode,
+        account: (map as LabourMap).byDept[d.departmentCode] ?? (map as LabourMap).fallback,
+        workers: d.workers,
+        grossSen: d.grossSen,
+        employerSen: d.epfSen + d.socsoSen + d.eisSen,
+        costSen: d.grossSen + d.epfSen + d.socsoSen + d.eisSen,
+        epfSen: d.epfSen,
+        socsoSen: d.socsoSen,
+        eisSen: d.eisSen,
+      }));
+    } catch { byDept = []; }
+  }
+  const lines = byDept.length && map ? labourDebitLines(byDept, map) : [];
+  memo?.set(ym, lines);
+  return lines;
 }
 
 // Prior-cumulative P&L balances (the old accountant's TB as at the month-end
@@ -6189,6 +6238,7 @@ const PNL_TYPES: ReadonlySet<CoaRow["type"]> = new Set(["REVENUE", "COST", "EXPE
 
 async function glWindowSigned(
   db: Env["Variables"]["DB"],
+  orgId: string,
   startYm: string | null,
   endYm: string | null,
   dc: DocDateCtx,
@@ -6205,6 +6255,10 @@ async function glWindowSigned(
   const { docDate, openingDate: obDate } = dc;
   const net: GlWindow = new Map();
   const openingNet: GlWindow = new Map(); // opening_balance(+reversal) legs, netted
+  // Months whose salary accrual is ALREADY in the GL — a Labour-tab post OR a
+  // manual JV both credit 410-0010. Those months keep the recorded figures;
+  // only the rest get the report-layer labour injection below.
+  const recordedSalaryYms = new Set<string>();
   for (const l of legRes.results ?? []) {
     const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
     if (legBeforeOpening(l.sourceType, dd, obDate)) continue; // pre-opening: not extracted
@@ -6220,10 +6274,28 @@ async function glWindowSigned(
     // already supplies stock.
     if (l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal") continue;
     const ym = dd.slice(0, 7);
+    const code = resolve(l.accountCode);
+    if (code === LABOUR_ACCRUAL_ACCT && (Number(l.creditSen) || 0) > 0) recordedSalaryYms.add(ym);
     if (startYm && ym < startYm) continue;
     if (endYm && ym > endYm) continue;
-    const code = resolve(l.accountCode);
     net.set(code, (net.get(code) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
+  }
+  // Report-layer labour (owner 2026-08-31 「任何时候我看P&L 时你都自动提取」):
+  // an unrecorded month shows its payroll figures anyway — stored payslips if
+  // generated, else a dry run of the same engine. Display-only: TB/BS carry
+  // nothing until the owner actually posts (same trade-off as the opening
+  // slice). The moment a month gains a 410-0010 credit, the GL takes over.
+  for (const ym of labourInjectMonths({
+    startYm,
+    endYm,
+    openingYm: obDate ? obDate.slice(0, 7) : null,
+    nowYm: new Date().toISOString().slice(0, 7),
+    recordedYms: recordedSalaryYms,
+  })) {
+    dc.labourMemo ??= new Map();
+    for (const { account, sen } of await labourInjectionLines(db, orgId, ym, dc.labourMemo)) {
+      net.set(account, (net.get(account) ?? 0) + sen);
+    }
   }
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, { name: a.name, type: a.type }] as const));
   // Mid-year opening: the opening month's P&L = opening cumulative − prior
@@ -7122,7 +7194,7 @@ async function computePnlWindow(
   // All OTHER P&L lines (labour / overhead / carriage / SST / revenue / other
   // income / expenses) still come from the GL window untouched.
   const [gl, ratio] = await Promise.all([
-    glWindowSigned(db, startYm, endYm, dc),
+    glWindowSigned(db, orgId, startYm, endYm, dc),
     costByLineWindow(db, startYm, endYm),
   ]);
   // Material window derived synchronously from the single-replay checkpoints.
@@ -7536,6 +7608,7 @@ app.get("/cost-expense-classes", async (c) => {
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
   const byAcct = new Map<string, number[]>();
   const openingNetCec = new Map<string, number>(); // opening legs on COST/EXPENSE accounts
+  const recordedSalaryYmsCec = new Set<string>();
   for (const l of legRes.results ?? []) {
     const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
     if (legBeforeOpening(l.sourceType, dd, obDateCec)) continue; // pre-opening: not extracted
@@ -7546,8 +7619,9 @@ app.get("/cost-expense-classes", async (c) => {
     }
     if (l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal" || l.sourceType === "year_close") continue;
     const ym = dd.slice(0, 7);
-    if (ym < startYm || ym > endYm) continue;
     const code = resolve(l.accountCode);
+    if (code === LABOUR_ACCRUAL_ACCT && (Number(l.creditSen) || 0) > 0) recordedSalaryYmsCec.add(ym);
+    if (ym < startYm || ym > endYm) continue;
     const meta = coa.get(code);
     if (!meta || (meta.type !== "COST" && meta.type !== "EXPENSE")) continue;
     const idx = cols.indexOf(ym);
@@ -7555,6 +7629,26 @@ app.get("/cost-expense-classes", async (c) => {
     let arr = byAcct.get(code);
     if (!arr) { arr = new Array(12).fill(0); byAcct.set(code, arr); }
     arr[idx] += (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+  }
+  // Report-layer labour — same rule as glWindowSigned (owner 2026-08-31):
+  // unrecorded months show payroll figures (payslips, else dry engine run).
+  {
+    const injMemo = new Map<string, { account: string; sen: number }[]>();
+    for (const ym of labourInjectMonths({
+      startYm,
+      endYm,
+      openingYm: obDateCec ? obDateCec.slice(0, 7) : null,
+      nowYm: new Date().toISOString().slice(0, 7),
+      recordedYms: recordedSalaryYmsCec,
+    })) {
+      const idx = cols.indexOf(ym);
+      if (idx < 0) continue;
+      for (const { account, sen } of await labourInjectionLines(db, getOrgId(c), ym, injMemo)) {
+        let arr = byAcct.get(account);
+        if (!arr) { arr = new Array(12).fill(0); byAcct.set(account, arr); }
+        arr[idx] += sen;
+      }
+    }
   }
   // Mid-year opening: show the opening-month slice (opening cumulative − prior
   // month-end TB) in the opening month's column — same rule as glWindowSigned.
@@ -10385,7 +10479,7 @@ app.get("/dashboard", async (c) => {
   // Bump for a changed SHAPE *or* a changed default WINDOW: the stored copy is
   // keyed by the range string, and the default range's key is blank either way,
   // so a wider-or-narrower default would keep serving the old month list.
-  const DASH_PAYLOAD_V = "v10"; // v10: master non-prod depts file under staff cost; v9: dept forecasts file by labour-map bucket; v8: + forecastSen; v7: + salaryByDept
+  const DASH_PAYLOAD_V = "v11"; // v11: report-layer labour injection (unrecorded months); v10: master non-prod depts file under staff cost; v9: dept forecasts file by labour-map bucket; v8: + forecastSen; v7: + salaryByDept
   // The explicit window is part of the identity — otherwise two different
   // ranges would share one cached copy.
   const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
@@ -10412,6 +10506,12 @@ app.get("/dashboard", async (c) => {
         // salaryByDept reads payslips — without it a payroll edit leaves the
         // department stacks stale.
         "payslips",
+        // Report-layer labour injection (2026-08-31) dry-runs payroll from
+        // these when a month has no payslips yet — new clock entries, docks
+        // or a raise must refresh the injected P&L figures.
+        "working_hour_entries",
+        "payroll_hour_deductions",
+        "worker_salary_history",
       ],
     },
     dashOrgId,

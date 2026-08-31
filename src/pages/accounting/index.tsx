@@ -3292,9 +3292,9 @@ function JournalEntryForm({
   // Editor rows carry a client-only `_uid` so React keys stay stable as rows
   // are added / removed / reordered. The uid is stripped before POST in
   // handleSave().  See sprint 7 — replacing key={idx} on mutable rows.
-  // debitStr/creditStr keep the raw text being typed so the controlled
-  // inputs never reformat mid-entry (owner bug 2026-06-12).
-  type JournalLineRow = JournalLine & { _uid: string; debitStr?: string; creditStr?: string };
+  // (The old debitStr/creditStr raw-text fields are gone — MoneyInput owns
+  // the mid-typing display now, BUG-2026-08-31-171.)
+  type JournalLineRow = JournalLine & { _uid: string };
   const newRow = (): JournalLineRow => ({
     _uid: crypto.randomUUID(),
     accountCode: "",
@@ -3459,26 +3459,25 @@ function JournalEntryForm({
                         placeholder="Type code or name…"
                       />
                     </td>
+                    {/* Owner 2026-08-31 「按了一次就跑去分和sen」: the raw
+                        number inputs reformatted to .00 after every keystroke
+                        (updateLine never stored the raw text) and their 0.01
+                        spinner stepped by one sen. MoneyInput is the house
+                        answer — free typing while focused, commit on blur. */}
                     <td className="py-1.5 px-2">
-                      <input
-                        type="number" onFocus={(e) => e.currentTarget.select()}
-                        min="0"
-                        step="0.01"
+                      <MoneyInput
+                        value={line.debitSen ? line.debitSen / 100 : null}
+                        onChange={(v) => updateLine(idx, "debitSen", v ?? 0)}
                         placeholder="0.00"
-                        value={line.debitStr ?? (line.debitSen ? (line.debitSen / 100).toFixed(2) : "")}
-                        onChange={(e) => updateLine(idx, "debitSen", e.target.value)}
-                        className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                        className="h-auto rounded px-2 py-1.5"
                       />
                     </td>
                     <td className="py-1.5 px-2">
-                      <input
-                        type="number" onFocus={(e) => e.currentTarget.select()}
-                        min="0"
-                        step="0.01"
+                      <MoneyInput
+                        value={line.creditSen ? line.creditSen / 100 : null}
+                        onChange={(v) => updateLine(idx, "creditSen", v ?? 0)}
                         placeholder="0.00"
-                        value={line.creditStr ?? (line.creditSen ? (line.creditSen / 100).toFixed(2) : "")}
-                        onChange={(e) => updateLine(idx, "creditSen", e.target.value)}
-                        className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                        className="h-auto rounded px-2 py-1.5"
                       />
                     </td>
                     <td className="py-1.5 px-2">

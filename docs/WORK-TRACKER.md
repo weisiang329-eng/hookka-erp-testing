@@ -14,6 +14,17 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-31 — ✅ Dashboard 新增 Non-Production Salary 卡（和 Production 一模一样）
+
+Owner：「dashboard 多一个non production 的，和production 一模一样，只是变成non production
+的数据，然后拿forecast 的 non production」。做法：Production Salary 卡整块抽成
+`SalaryDeptCard` 组件（finance-dashboard.tsx，chips/图/Actual|Forecast 表全套，隐藏状态
+每卡自管；TOTAL/forecast 线/百分比都按**本卡部门子集**加总，无部门数据的期间 fallback 到
+base——生产卡用 labour bucket，非生产卡用 null 显 "-"，绝不借数）。两个实例：Production
+（8 生产部门+denominators+units 警示）/ Non-Production（主档 Non-prod 五部门，无
+per-head/per-unit）。后端 salaryByDept 每项加 `nonProd` 标签（departments.is_production），
+`DASH_PAYLOAD_V` v13。非生产卡只在有数据（payslips 或 forecast key 过）时出现。
+
 ## 2026-08-31 — ✅ FG 期末「别自动 capture」：fg_valuation_mode 开关（照 RM v3 同哲学）
 
 Owner 看完 FG 102,186.49 的来路（≈1,600 个自动算的小批）后拍板「让他别自动capture」（选项确认

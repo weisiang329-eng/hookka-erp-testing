@@ -10553,7 +10553,7 @@ app.get("/dashboard", async (c) => {
   // Bump for a changed SHAPE *or* a changed default WINDOW: the stored copy is
   // keyed by the range string, and the default range's key is blank either way,
   // so a wider-or-narrower default would keep serving the old month list.
-  const DASH_PAYLOAD_V = "v12"; // v12: non-prod dept forecasts count in COGS; v11: report-layer labour injection (unrecorded months); v10: master non-prod depts file under staff cost; v9: dept forecasts file by labour-map bucket; v8: + forecastSen; v7: + salaryByDept
+  const DASH_PAYLOAD_V = "v13"; // v13: salaryByDept carries nonProd flag; v12: non-prod dept forecasts count in COGS; v11: report-layer labour injection (unrecorded months); v10: master non-prod depts file under staff cost; v9: dept forecasts file by labour-map bucket; v8: + forecastSen; v7: + salaryByDept
   // The explicit window is part of the identity — otherwise two different
   // ranges would share one cached copy.
   const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
@@ -11112,7 +11112,10 @@ app.get("/dashboard", async (c) => {
       // fg_batches double-counts some completions (parked defect).
       labourBase: { headcount, unitsCompleted: units > 0 ? units : null },
       salaryByDept: [...new Set([...salDept.keys(), ...salDeptFc.keys()])]
-        .map((dept) => ({ dept, costSen: salDept.get(dept) ?? 0, forecastSen: salDeptFc.get(dept) ?? 0 }))
+        // nonProd = the departments master's is_production flag (owner
+        // 2026-08-31: the dashboard grows a Non-Production Salary twin card;
+        // the flag is what splits one dept list into the two cards).
+        .map((dept) => ({ dept, costSen: salDept.get(dept) ?? 0, forecastSen: salDeptFc.get(dept) ?? 0, nonProd: nonProdDash.has(dept) || undefined }))
         .filter((d) => d.costSen !== 0 || d.forecastSen !== 0)
         .sort((a, b2) => a.dept.localeCompare(b2.dept)),
       costStructure: {

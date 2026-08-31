@@ -3027,6 +3027,10 @@ function JournalsTab({
   const { confirm } = useConfirm();
   const { toast } = useToast();
   const [showForm, setShowForm] = useState(false);
+  // DRAFT journal being edited in place (owner 2026-08-31: a duplicated JV had
+  // no way to change its date/description before posting — the old Edit item
+  // was removed as a no-op in BUG-2026-08-13-090 and never rebuilt).
+  const [editingJv, setEditingJv] = useState<JournalEntry | null>(null);
   const [selectedJvs, setSelectedJvs] = useState<JournalEntry[]>([]);
 
   // Owner 2026-07-28 (JE-2607-0001): this used to ignore the response entirely
@@ -3187,6 +3191,7 @@ function JournalsTab({
       { label: "Print voucher", action: (r) => printVoucher(buildJvVoucher(r)) },
     ];
     if (row.status === "DRAFT") {
+      items.push({ label: "Edit", action: (r) => { setShowForm(false); setEditingJv(r); } });
       items.push({ label: "Post", action: (r) => handlePost(r.id) });
       items.push({ label: "Delete", danger: true, action: (r) => handleDelete(r.id) });
     } else {
@@ -3210,12 +3215,21 @@ function JournalsTab({
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Journal Entries</h2>
-        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+        <Button variant="primary" size="sm" onClick={() => { setEditingJv(null); setShowForm(!showForm); }}>
           <FileText className="h-4 w-4" /> New Journal Entry
         </Button>
       </div>
 
       {showForm && <JournalEntryForm accounts={accounts} onSave={() => { setShowForm(false); onRefresh(); }} onCancel={() => setShowForm(false)} />}
+      {editingJv && (
+        <JournalEntryForm
+          key={editingJv.id}
+          accounts={accounts}
+          editing={editingJv}
+          onSave={() => { setEditingJv(null); onRefresh(); }}
+          onCancel={() => setEditingJv(null)}
+        />
+      )}
 
       <BatchActionsBar
         count={selectedJvs.length}
@@ -3261,15 +3275,20 @@ function JournalsTab({
 
 function JournalEntryForm({
   accounts,
+  editing,
   onSave,
   onCancel,
 }: {
   accounts: ChartOfAccount[];
+  // A DRAFT journal to edit in place (PUT instead of POST). The backend has
+  // always supported draft edits; the form just never offered them (owner
+  // 2026-08-31: a duplicated JV was stuck with the template's date/text).
+  editing?: JournalEntry | null;
   onSave: () => void;
   onCancel: () => void;
 }) {
-  const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
-  const [description, setDescription] = useState("");
+  const [date, setDate] = useState(() => (editing?.date ?? "").slice(0, 10) || new Date().toISOString().split("T")[0]);
+  const [description, setDescription] = useState(editing?.description ?? "");
   // Editor rows carry a client-only `_uid` so React keys stay stable as rows
   // are added / removed / reordered. The uid is stripped before POST in
   // handleSave().  See sprint 7 — replacing key={idx} on mutable rows.
@@ -3284,7 +3303,11 @@ function JournalEntryForm({
     creditSen: 0,
     description: "",
   });
-  const [lines, setLines] = useState<JournalLineRow[]>([newRow(), newRow()]);
+  const [lines, setLines] = useState<JournalLineRow[]>(() =>
+    editing && editing.lines.length
+      ? editing.lines.map((l) => ({ ...l, _uid: crypto.randomUUID() }))
+      : [newRow(), newRow()],
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -3355,8 +3378,8 @@ function JournalEntryForm({
     });
 
     setSaving(true);
-    const res = await fetch("/api/accounting/journals", {
-      method: "POST",
+    const res = await fetch(editing ? `/api/accounting/journals/${editing.id}` : "/api/accounting/journals", {
+      method: editing ? "PUT" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ date, description, lines: payloadLines }),
     });
@@ -3373,7 +3396,7 @@ function JournalEntryForm({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle>New Journal Entry</CardTitle>
+        <CardTitle>{editing ? `Edit ${editing.entryNo ?? "Journal Entry"} (draft)` : "New Journal Entry"}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="space-y-4">

@@ -34,6 +34,28 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-31-170 — a DRAFT journal could be duplicated but never edited `accounting` `ui` 🟢
+
+Owner (JE-2608-0002 screenshot): 「我duplicate 了但是点不开edit」. He duplicated
+July's salary JV as an August template and could not change its date or
+description — the draft's ⋮ menu offered only Print/Post/Delete/Duplicate.
+
+Root cause: the old "Edit" menu item was a `() => {}` NO-OP and was correctly
+REMOVED in BUG-2026-08-13-090 — but a real editor was never built, leaving the
+Duplicate-as-template flow (Phase 3.1) advertising a workflow whose second
+step did not exist. The backend PUT `/journals/:id` has supported draft edits
+(date/description/lines, balance-checked) all along; only the UI was missing.
+
+Fix: `JournalEntryForm` gains an `editing` prop (prefills from the draft,
+saves via PUT instead of POST, title says "Edit JE-… (draft)"); the DRAFT
+branch of the Journal Entries context menu gains a real "Edit" item. No
+backend change. No automated UI harness covers this page — verified live on
+prod (menu shows Edit → form prefilled → Cancel leaves the draft untouched).
+
+Class link: same family as BUG-2026-08-13-090 (controls that advertise
+actions that do not exist) — this is the other half: removing the lying
+control without shipping the real one turns the lie into a dead end.
+
 ## BUG-2026-08-28-169 — a price-list refresh would have written per-BOX prices into a per-PIECE list `procurement` `money` 🟢
 
 🟢 Caught on the FIRST production dry run, before anything was written.

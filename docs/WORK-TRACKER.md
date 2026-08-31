@@ -14,6 +14,15 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-31 — ✅ Draft JV 可以 Edit 了（BUG-2026-08-31-170）+ Forecast non-prod 段进 COGS（PR #392）
+
+① Owner：「我 duplicate 了但是点不开 edit」——draft JV 从来没有编辑器（旧 Edit 是空壳被
+BUG-090 拆掉后没重建；后端 PUT /journals/:id 一直支持）。修：JournalEntryForm +`editing`
+prop（预填、PUT、标题 Edit JE-…），⋮ 菜单 DRAFT 加 Edit。
+② Owner：「把 non-production salaries 整个放在 direct labour 和 factory overhead 之间」+
+「算法也要改」——段位挪 + labourExpDepts 进 cogsRows/退 expenses（GP 承担、NP 不变）；
+dashboard forecast 切片同口径（v12）。均已上 prod 验证。
+
 ## 2026-08-31 — ✅ P&L 人工「看时自动提取」（report-layer，三层无缝）
 
 Owner：「任何时候我看 P&L 你都自动提取…当当月我已经记录 salary 了，就以我记录的为准」+

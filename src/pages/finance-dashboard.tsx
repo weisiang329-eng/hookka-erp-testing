@@ -66,7 +66,7 @@ type Row = {
   labourBase?: { headcount: number | null; unitsCompleted: number | null };
   /** Wage bill per department (payslips-sourced) for the stacked salary card,
       with each department's forecast (dept: rows) beside it. */
-  salaryByDept?: { dept: string; costSen: number; forecastSen?: number }[];
+  salaryByDept?: { dept: string; costSen: number; forecastSen?: number; nonProd?: boolean }[];
   cashFlow: {
     operating: number; investing: number; financing: number; net: number; freeCashFlow: number;
     inflow?: number; outflow?: number;
@@ -143,6 +143,282 @@ function ChartTip(props: {
         );
       })}
     </div>
+  );
+}
+
+// ---- Production / Non-Production salary card (owner 2026-08-31: 「dashboard
+// 多一个non production 的，和production 一模一样，只是变成non production 的
+// 数据，然后拿forecast 的 non production」). One component, two instances —
+// `depts` decides which departments it draws, and every total / forecast /
+// percentage on the card is the sum of ITS OWN departments. Where a period has
+// no dept data at all it falls back to the `base` row (the production card
+// passes the P&L labour bucket so pre-payroll months stay alive; the
+// non-production card passes nulls so it shows "-", never borrowed figures).
+type SalCardBase = {
+  label: string; amount: number | null; forecast: number | null;
+  pct: number | null; forecastPct: number | null;
+  headcount: number | null; units: number | null; perHead: number | null; perUnit: number | null;
+};
+function SalaryDeptCard({
+  title,
+  subtitle,
+  depts,
+  data,
+  base,
+  showDenominators,
+}: {
+  title: string;
+  subtitle: string;
+  depts: string[];
+  data: Record<string, number | string | null>[];
+  base: SalCardBase[];
+  showDenominators: boolean;
+}) {
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const shownCount = depts.filter((d) => !hidden.has(d)).length;
+  const tdc = "px-2 py-1 text-right tabular-nums text-[12px] whitespace-nowrap";
+  const rowsData = useMemo(
+    () =>
+      data.map((rec, i) => {
+        const sales = (rec.__sales__ as number | null) ?? null;
+        const fcSales = (rec.__fcsales__ as number | null) ?? null;
+        let amt: number | null = null;
+        let fc: number | null = null;
+        let drawn = 0;
+        for (const d of depts) {
+          const v = rec[d];
+          if (typeof v === "number") {
+            amt = (amt ?? 0) + v;
+            if (!hidden.has(d)) drawn += v;
+          }
+          const f = rec[`__fc__${d}`];
+          if (typeof f === "number") fc = (fc ?? 0) + f;
+        }
+        const b = base[i];
+        const amount = amt === null && fc === null ? (b?.amount ?? null) : amt;
+        const forecast = amt === null && fc === null ? (b?.forecast ?? null) : fc;
+        const pctOf = (v: number | null, s: number | null) =>
+          v !== null && s !== null && s !== 0 ? Math.round((v / s) * 10000) / 100 : null;
+        return {
+          ...rec,
+          __cardamt__: amount,
+          __cardfc__: forecast,
+          __cardpct__: pctOf(amount, sales),
+          __cardfcpct__: pctOf(forecast, fcSales),
+          __drawnpct__: sales && sales !== 0 ? Math.round((drawn / sales) * 10000) / 100 : null,
+        } as Record<string, number | string | null>;
+      }),
+    [data, base, depts, hidden],
+  );
+  if (!rowsData.length) return null;
+  return (
+    <Card>
+      <CardContent className="p-4 space-y-3">
+        <div className="flex flex-wrap items-baseline gap-2">
+          <h3 className="text-sm font-semibold text-[#1F1D1B] mr-2">{title}</h3>
+          <span className="text-[11px] text-[#9CA3AF]">{subtitle}</span>
+          <span className="ml-1 text-[11px] text-[#9CA3AF]">RM + % of sales</span>
+        </div>
+        {depts.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-[#6B7280] mr-0.5">Show</span>
+            {depts.map((dept, i) => {
+              const colour = CS_COLOURS[i % CS_COLOURS.length];
+              const on = !hidden.has(dept);
+              return (
+                <button
+                  key={dept}
+                  onClick={() =>
+                    setHidden((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(dept)) next.delete(dept);
+                      else next.add(dept);
+                      return next;
+                    })
+                  }
+                  className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] cursor-pointer ${
+                    on ? "border-[#E2DDD8] bg-white text-[#1F1D1B]" : "border-[#E2DDD8] bg-[#F0ECE9] text-[#9CA3AF]"
+                  }`}
+                  title={on ? `Hide ${dept} from the chart` : `Show ${dept} on the chart`}
+                >
+                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: on ? colour : "#D8D3CE" }} />
+                  {dept}
+                </button>
+              );
+            })}
+            {hidden.size > 0 && (
+              <button onClick={() => setHidden(new Set())}
+                className="rounded-md border border-[#E2DDD8] px-2 py-0.5 text-[11px] text-[#3E6570] cursor-pointer hover:bg-[#F0ECE9]">
+                Show all
+              </button>
+            )}
+            {hidden.size < depts.length && (
+              <button onClick={() => setHidden(new Set(depts))}
+                className="rounded-md border border-[#E2DDD8] px-2 py-0.5 text-[11px] text-[#6B7280] cursor-pointer hover:bg-[#F0ECE9]">
+                Clear
+              </button>
+            )}
+          </div>
+        )}
+        <div className="h-64">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={rowsData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke="#F0ECE9" vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
+              <YAxis yAxisId="amt" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false}
+                tickFormatter={(v: number) => rm(v)} />
+              {showDenominators && (
+                <YAxis yAxisId="unit" orientation="right" tick={{ fontSize: 11, fill: "#9A3A2D" }} axisLine={false} tickLine={false}
+                  tickFormatter={(v: number) => rm(v)} />
+              )}
+              <Tooltip content={<ChartTip shares />} />
+              {depts.length === 0 ? (
+                <Bar yAxisId="amt" dataKey="__cardamt__" name={title} fill={GOLD} radius={[3, 3, 0, 0]} maxBarSize={38} />
+              ) : (
+                depts.map((dept, i) =>
+                  hidden.has(dept) ? null : (
+                    <Bar key={dept} yAxisId="amt" dataKey={dept} name={dept} stackId="sal" maxBarSize={38}
+                      fill={CS_COLOURS[i % CS_COLOURS.length]}>
+                      {shownCount === 1 && (
+                        <LabelList dataKey="__drawnpct__" position="top" offset={6}
+                          formatter={(v: unknown) => (typeof v === "number" ? `${v.toFixed(2)}%` : "")}
+                          style={{ fontSize: 10, fill: "#6B5C32" }} />
+                      )}
+                    </Bar>
+                  ),
+                )
+              )}
+              <Line yAxisId="amt" type="monotone" dataKey="__cardfc__" name="Forecast" stroke={RUST}
+                strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls={false} />
+              {showDenominators && (
+                <Line yAxisId="unit" type="monotone" dataKey="perHead" name="RM / head" stroke="#3E6570"
+                  strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+              )}
+              {showDenominators && (
+                <Line yAxisId="unit" type="monotone" dataKey="perUnit" name="RM / unit" stroke="#4F7C3A"
+                  strokeWidth={2} strokeDasharray="2 3" dot={{ r: 2 }} connectNulls={false} />
+              )}
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <tbody>
+              <tr className="border-b border-[#E2DDD8] bg-[#F7F4EF]">
+                <td className="px-2 py-1.5 text-left text-[11px] font-bold text-[#6B5C32] tracking-wide">PERIOD</td>
+                {rowsData.map((d) => (
+                  <td key={String(d.label)} colSpan={2}
+                    className="px-2 py-1.5 text-center text-[12px] font-bold text-[#1F1D1B] whitespace-nowrap border-l border-[#E2DDD8]">
+                    {String(d.label)}
+                  </td>
+                ))}
+              </tr>
+              <tr className="border-b-2 border-[#E2DDD8] bg-[#F7F4EF]">
+                <td className="px-2 py-1 text-left text-[10px] text-[#9CA3AF]"></td>
+                {rowsData.map((d) => (
+                  <Fragment key={String(d.label)}>
+                    <td className="px-2 py-1 text-right text-[10px] font-semibold text-[#6B5C32] border-l border-[#E2DDD8]">Actual</td>
+                    <td className="px-2 py-1 text-right text-[10px] font-semibold text-[#9A3A2D]">Forecast</td>
+                  </Fragment>
+                ))}
+              </tr>
+              <tr className="border-b border-[#E2DDD8] bg-[#F6F1E7]">
+                <td className={`${tdc} text-left font-semibold`}>REVENUE</td>
+                {rowsData.map((d) => (
+                  <Fragment key={String(d.label)}>
+                    <td className={`${tdc} font-semibold border-l border-[#E2DDD8]`}>{rm(d.__sales__ as number | null)}</td>
+                    <td className={`${tdc} font-semibold text-[#9A3A2D]`}>{rm(d.__fcsales__ as number | null)}</td>
+                  </Fragment>
+                ))}
+              </tr>
+              {depts.map((dept) => (
+                <tr key={dept} className="border-b border-[#F0ECE9]">
+                  <td className={`${tdc} text-left font-medium`}>{dept}</td>
+                  {rowsData.map((d) => {
+                    const amt = (d[dept] as number | null) ?? null;
+                    const p = (d[`__pct__${dept}`] as number | null) ?? null;
+                    const fc = (d[`__fc__${dept}`] as number | null) ?? null;
+                    const fp = (d[`__fcpct__${dept}`] as number | null) ?? null;
+                    const over = p !== null && fp !== null && p > fp;
+                    return (
+                      <Fragment key={String(d.label)}>
+                        <td className={`${tdc} border-l border-[#E2DDD8]`}>
+                          {amt === null || amt === 0 ? "-" : (
+                            <>
+                              {rm(amt)}
+                              <span className={`ml-1.5 text-[10px] ${fp === null ? "text-[#6B5C32]" : over ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>
+                                {p === null ? "" : `${p.toFixed(2)}%`}
+                              </span>
+                            </>
+                          )}
+                        </td>
+                        <td className={`${tdc} text-[#9A3A2D]`}>
+                          {fc === null ? "-" : (
+                            <>
+                              {rm(fc)}
+                              <span className="ml-1.5 text-[10px]">{fp === null ? "" : `${fp.toFixed(2)}%`}</span>
+                            </>
+                          )}
+                        </td>
+                      </Fragment>
+                    );
+                  })}
+                </tr>
+              ))}
+              <tr className="border-b border-[#E2DDD8] bg-[#F7F4EF] font-semibold">
+                <td className={`${tdc} text-left`}>TOTAL</td>
+                {rowsData.map((d) => (
+                  <Fragment key={String(d.label)}>
+                    <td className={`${tdc} border-l border-[#E2DDD8]`}>
+                      {rm(d.__cardamt__ as number | null)}
+                      {d.__cardpct__ !== null && <span className="ml-1.5 text-[10px] text-[#6B5C32]">{(d.__cardpct__ as number).toFixed(2)}%</span>}
+                    </td>
+                    <td className={`${tdc} text-[#9A3A2D]`}>
+                      {rm(d.__cardfc__ as number | null)}
+                      {d.__cardfcpct__ !== null && <span className="ml-1.5 text-[10px]">{(d.__cardfcpct__ as number).toFixed(2)}%</span>}
+                    </td>
+                  </Fragment>
+                ))}
+              </tr>
+              {showDenominators && (
+                <>
+                  <tr className="border-b border-[#F0ECE9]">
+                    <td className={`${tdc} text-left font-medium text-[#3E6570]`}>Headcount</td>
+                    {base.map((d) => (
+                      <td key={d.label} colSpan={2} className={`${tdc} text-[#3E6570] border-l border-[#E2DDD8]`}>{d.headcount ?? "-"}</td>
+                    ))}
+                  </tr>
+                  <tr className="border-b border-[#F0ECE9]">
+                    <td className={`${tdc} text-left font-medium text-[#3E6570]`}>RM / head</td>
+                    {base.map((d) => (
+                      <td key={d.label} colSpan={2} className={`${tdc} text-[#3E6570] border-l border-[#E2DDD8]`}>{rm(d.perHead)}</td>
+                    ))}
+                  </tr>
+                  <tr className="border-b border-[#F0ECE9]">
+                    <td className={`${tdc} text-left font-medium text-[#4F7C3A]`}>Units completed</td>
+                    {base.map((d) => (
+                      <td key={d.label} colSpan={2} className={`${tdc} text-[#4F7C3A] border-l border-[#E2DDD8]`}>{d.units ?? "-"}</td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td className={`${tdc} text-left font-medium text-[#4F7C3A]`}>RM / unit</td>
+                    {base.map((d) => (
+                      <td key={d.label} colSpan={2} className={`${tdc} text-[#4F7C3A] border-l border-[#E2DDD8]`}>{rm(d.perUnit)}</td>
+                    ))}
+                  </tr>
+                </>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {showDenominators && (
+          <p className="text-[11px] text-[#9A3A2D]">
+            ⚠ RM / unit uses completed-batch quantities, which are known to double-count some
+            completions — the unit count runs high, so this cost runs low. RM / head is unaffected.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -322,17 +598,17 @@ export default function FinanceDashboardPage() {
       }),
     [rows],
   );
-  // Department stacks for the Production Salary card (owner 2026-08-11:
-  // 「弄到像 cost structure 这样」). Chips = the union of departments in the
-  // window; every point carries __pct__<dept> so ChartTip shares prints
-  // RM + % of sales per band, exactly like the cost-structure chart.
-  const salDepts = useMemo(() => {
-    const s = new Set<string>();
-    for (const r of rows ?? []) for (const d of r.salaryByDept ?? []) s.add(d.dept);
-    return [...s].sort();
+  // Department stacks for the two salary cards (owner 2026-08-11: 「弄到像
+  // cost structure 这样」; owner 2026-08-31: 「dashboard 多一个non production
+  // 的」). One shared data array carries every department's keys; each card
+  // draws only ITS list, split by the master's nonProd flag.
+  const salDeptSplit = useMemo(() => {
+    const flags = new Map<string, boolean>();
+    for (const r of rows ?? [])
+      for (const d of r.salaryByDept ?? []) flags.set(d.dept, (flags.get(d.dept) ?? false) || !!d.nonProd);
+    const all = [...flags.keys()].sort();
+    return { prod: all.filter((d) => !flags.get(d)), non: all.filter((d) => flags.get(d)) };
   }, [rows]);
-  const [salHidden, setSalHidden] = useState<Set<string>>(new Set());
-  const salShownCount = salDepts.filter((d) => !salHidden.has(d)).length;
   const salData = useMemo(
     () =>
       (rows ?? []).map((r, i) => {
@@ -341,12 +617,11 @@ export default function FinanceDashboardPage() {
         const fcSales = r.forecast?.sales ?? null;
         const rec: Record<string, number | string | null> = { ...base };
         rec.__sales__ = sales;
-        let drawn = 0;
+        rec.__fcsales__ = fcSales;
         for (const d of r.salaryByDept ?? []) {
           if (d.costSen !== 0) {
             rec[d.dept] = d.costSen;
             if (sales && sales !== 0) rec[`__pct__${d.dept}`] = Math.round((d.costSen / sales) * 10000) / 100;
-            if (!salHidden.has(d.dept)) drawn += d.costSen;
           }
           const fc = d.forecastSen ?? 0;
           if (fc !== 0) {
@@ -355,11 +630,15 @@ export default function FinanceDashboardPage() {
           }
         }
         if (base?.forecastPct !== null && base?.forecastPct !== undefined) rec.__pct__forecast = base.forecastPct;
-        // The share printed on top of the stack while a single band is drawn.
-        rec.__drawnpct__ = sales && sales !== 0 ? Math.round((drawn / sales) * 10000) / 100 : null;
         return rec;
       }),
-    [rows, labourData, salHidden],
+    [rows, labourData],
+  );
+  // Null totals for the non-production card: where it has no dept data at
+  // all it must show "-", never borrow the production labour bucket.
+  const nullBase = useMemo(
+    () => labourData.map((d) => ({ ...d, amount: null, forecast: null, pct: null, forecastPct: null, headcount: null, units: null, perHead: null, perUnit: null })),
+    [labourData],
   );
 
   const cfData = useMemo(
@@ -710,205 +989,28 @@ export default function FinanceDashboardPage() {
               Owner 2026-08-06: 「我要把 production salary 也另外分出来一个
               diagram」, sitting under the P&L because it is part of COGS. The
               total alone says nothing — 91,631 reads very differently against
-              20 heads than against 40. */}
+              20 heads than against 40. Owner 2026-08-31: a Non-Production twin
+              card follows it — same layout, the master-flagged non-production
+              departments, forecast from the Forecast page's non-prod section. */}
           {labourData.some((d) => d.amount !== null) && (
-            <Card>
-              <CardContent className="p-4 space-y-3">
-                <div className="flex flex-wrap items-baseline gap-2">
-                  <h3 className="text-sm font-semibold text-[#1F1D1B] mr-2">Production Salary</h3>
-                  <span className="text-[11px] text-[#9CA3AF]">
-                    750-0010 SALARIES · 750-0020 EPF · 750-0030 SOCSO · 750-0040 EIS
-                  </span>
-                  <span className="ml-1 text-[11px] text-[#9CA3AF]">RM + % of sales</span>
-                </div>
-                {/* Which departments the stack draws (owner 2026-08-11: 「像
-                    cost structure 这样选择」). Colours match the bands. */}
-                {salDepts.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[11px] text-[#6B7280] mr-0.5">Show</span>
-                    {salDepts.map((dept, i) => {
-                      const colour = CS_COLOURS[i % CS_COLOURS.length];
-                      const on = !salHidden.has(dept);
-                      return (
-                        <button
-                          key={dept}
-                          onClick={() =>
-                            setSalHidden((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(dept)) next.delete(dept);
-                              else next.add(dept);
-                              return next;
-                            })
-                          }
-                          className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] cursor-pointer ${
-                            on ? "border-[#E2DDD8] bg-white text-[#1F1D1B]" : "border-[#E2DDD8] bg-[#F0ECE9] text-[#9CA3AF]"
-                          }`}
-                          title={on ? `Hide ${dept} from the chart` : `Show ${dept} on the chart`}
-                        >
-                          <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: on ? colour : "#D8D3CE" }} />
-                          {dept}
-                        </button>
-                      );
-                    })}
-                    {salHidden.size > 0 && (
-                      <button onClick={() => setSalHidden(new Set())}
-                        className="rounded-md border border-[#E2DDD8] px-2 py-0.5 text-[11px] text-[#3E6570] cursor-pointer hover:bg-[#F0ECE9]">
-                        Show all
-                      </button>
-                    )}
-                    {salHidden.size < salDepts.length && (
-                      <button onClick={() => setSalHidden(new Set(salDepts))}
-                        className="rounded-md border border-[#E2DDD8] px-2 py-0.5 text-[11px] text-[#6B7280] cursor-pointer hover:bg-[#F0ECE9]">
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                )}
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={salData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                      <CartesianGrid stroke="#F0ECE9" vertical={false} />
-                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false} />
-                      {/* Two scales: the wage bill is in tens of thousands, the
-                          unit costs in hundreds. One axis would flatten them. */}
-                      <YAxis yAxisId="amt" tick={{ fontSize: 11, fill: "#6B7280" }} axisLine={false} tickLine={false}
-                        tickFormatter={(v: number) => rm(v)} />
-                      <YAxis yAxisId="unit" orientation="right" tick={{ fontSize: 11, fill: "#9A3A2D" }} axisLine={false} tickLine={false}
-                        tickFormatter={(v: number) => rm(v)} />
-                      <Tooltip content={<ChartTip shares />} />
-                      {salDepts.length === 0 ? (
-                        // No dept data yet (pre-payroll months / fresh org) —
-                        // the original single-total bar keeps the card alive.
-                        <Bar yAxisId="amt" dataKey="amount" name="Production Salary" fill={GOLD} radius={[3, 3, 0, 0]} maxBarSize={38} />
-                      ) : (
-                        salDepts.map((dept, i) =>
-                          salHidden.has(dept) ? null : (
-                            <Bar key={dept} yAxisId="amt" dataKey={dept} name={dept} stackId="sal" maxBarSize={38}
-                              fill={CS_COLOURS[i % CS_COLOURS.length]}>
-                              {/* The share printed ON the stack, but only while a
-                                  single department is drawn — the tooltip already
-                                  carries every band's share. */}
-                              {salShownCount === 1 && (
-                                <LabelList dataKey="__drawnpct__" position="top" offset={6}
-                                  formatter={(v: unknown) => (typeof v === "number" ? `${v.toFixed(2)}%` : "")}
-                                  style={{ fontSize: 10, fill: "#6B5C32" }} />
-                              )}
-                            </Bar>
-                          ),
-                        )
-                      )}
-                      <Line yAxisId="amt" type="monotone" dataKey="forecast" name="Forecast" stroke={RUST}
-                        strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls={false} />
-                      <Line yAxisId="unit" type="monotone" dataKey="perHead" name="RM / head" stroke="#3E6570"
-                        strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
-                      <Line yAxisId="unit" type="monotone" dataKey="perUnit" name="RM / unit" stroke="#4F7C3A"
-                        strokeWidth={2} strokeDasharray="2 3" dot={{ r: 2 }} connectNulls={false} />
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <tbody>
-                      {/* Same split layout as the Cost Structure table (owner
-                          2026-08-11): every period = actual RM+% | forecast
-                          RM+%, one row per department. */}
-                      {periodHeadSplit(salData.map((d) => String(d.label)))}
-                      <tr className="border-b border-[#E2DDD8] bg-[#F6F1E7]">
-                        <td className={`${td} text-left font-semibold`}>REVENUE</td>
-                        {salData.map((d, i) => (
-                          <Fragment key={String(d.label)}>
-                            <td className={`${td} font-semibold border-l border-[#E2DDD8]`}>{rm(d.__sales__ as number | null)}</td>
-                            <td className={`${td} font-semibold text-[#9A3A2D]`}>
-                              {(rows ?? [])[i]?.forecast?.sales != null ? rm((rows ?? [])[i]!.forecast!.sales!) : "-"}
-                            </td>
-                          </Fragment>
-                        ))}
-                      </tr>
-                      {salDepts.map((dept) => (
-                        <tr key={dept} className="border-b border-[#F0ECE9]">
-                          <td className={`${td} text-left font-medium`}>{dept}</td>
-                          {salData.map((d) => {
-                            const amt = (d[dept] as number | null) ?? null;
-                            const p = (d[`__pct__${dept}`] as number | null) ?? null;
-                            const fc = (d[`__fc__${dept}`] as number | null) ?? null;
-                            const fp = (d[`__fcpct__${dept}`] as number | null) ?? null;
-                            const over = p !== null && fp !== null && p > fp;
-                            return (
-                              <Fragment key={String(d.label)}>
-                                <td className={`${td} border-l border-[#E2DDD8]`}>
-                                  {amt === null || amt === 0 ? "-" : (
-                                    <>
-                                      {rm(amt)}
-                                      <span className={`ml-1.5 text-[10px] ${fp === null ? "text-[#6B5C32]" : over ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>
-                                        {p === null ? "" : `${p.toFixed(2)}%`}
-                                      </span>
-                                    </>
-                                  )}
-                                </td>
-                                <td className={`${td} text-[#9A3A2D]`}>
-                                  {fc === null ? "-" : (
-                                    <>
-                                      {rm(fc)}
-                                      <span className="ml-1.5 text-[10px]">{fp === null ? "" : `${fp.toFixed(2)}%`}</span>
-                                    </>
-                                  )}
-                                </td>
-                              </Fragment>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                      <tr className="border-b border-[#E2DDD8] bg-[#F7F4EF] font-semibold">
-                        <td className={`${td} text-left`}>TOTAL</td>
-                        {labourData.map((d) => (
-                          <Fragment key={d.label}>
-                            <td className={`${td} border-l border-[#E2DDD8]`}>
-                              {rm(d.amount)}
-                              {d.pct !== null && <span className="ml-1.5 text-[10px] text-[#6B5C32]">{d.pct.toFixed(2)}%</span>}
-                            </td>
-                            <td className={`${td} text-[#9A3A2D]`}>
-                              {rm(d.forecast)}
-                              {d.forecastPct !== null && <span className="ml-1.5 text-[10px]">{d.forecastPct.toFixed(2)}%</span>}
-                            </td>
-                          </Fragment>
-                        ))}
-                      </tr>
-                      <tr className="border-b border-[#F0ECE9]">
-                        <td className={`${td} text-left font-medium text-[#3E6570]`}>Headcount</td>
-                        {labourData.map((d) => (
-                          <td key={d.label} colSpan={2} className={`${td} text-[#3E6570] border-l border-[#E2DDD8]`}>{d.headcount ?? "-"}</td>
-                        ))}
-                      </tr>
-                      <tr className="border-b border-[#F0ECE9]">
-                        <td className={`${td} text-left font-medium text-[#3E6570]`}>RM / head</td>
-                        {labourData.map((d) => (
-                          <td key={d.label} colSpan={2} className={`${td} text-[#3E6570] border-l border-[#E2DDD8]`}>{rm(d.perHead)}</td>
-                        ))}
-                      </tr>
-                      <tr className="border-b border-[#F0ECE9]">
-                        <td className={`${td} text-left font-medium text-[#4F7C3A]`}>Units completed</td>
-                        {labourData.map((d) => (
-                          <td key={d.label} colSpan={2} className={`${td} text-[#4F7C3A] border-l border-[#E2DDD8]`}>{d.units ?? "-"}</td>
-                        ))}
-                      </tr>
-                      <tr>
-                        <td className={`${td} text-left font-medium text-[#4F7C3A]`}>RM / unit</td>
-                        {labourData.map((d) => (
-                          <td key={d.label} colSpan={2} className={`${td} text-[#4F7C3A] border-l border-[#E2DDD8]`}>{rm(d.perUnit)}</td>
-                        ))}
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-                {/* The owner parked the duplicate-completion defect on
-                    2026-07-29; saying so here is the difference between a
-                    figure he can weigh and one that quietly misleads. */}
-                <p className="text-[11px] text-[#9A3A2D]">
-                  ⚠ RM / unit uses completed-batch quantities, which are known to double-count some
-                  completions — the unit count runs high, so this cost runs low. RM / head is unaffected.
-                </p>
-              </CardContent>
-            </Card>
+            <SalaryDeptCard
+              title="Production Salary"
+              subtitle="750-0010 SALARIES · 750-0020 EPF · 750-0030 SOCSO · 750-0040 EIS"
+              depts={salDeptSplit.prod}
+              data={salData}
+              base={labourData}
+              showDenominators
+            />
+          )}
+          {salDeptSplit.non.length > 0 && (
+            <SalaryDeptCard
+              title="Non-Production Salary"
+              subtitle="Warehouse · Repair · Maintenance · Shortfall · R&D — by department"
+              depts={salDeptSplit.non}
+              data={salData}
+              base={nullBase}
+              showDenominators={false}
+            />
           )}
 
           {/* ---- Cost structure: composition + single-material trend ---- */}

@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-31-171 — JV amount cells reformatted to ".00" on every keystroke `accounting` `ui` `money-input` 🟢
+
+Owner (editing JE-2608-0002): 「这里输入amount这里很不友好，按了一次就跑去分和sen」.
+Typing in the journal form's Debit/Credit cells was fighting the user twice
+over: ① the controlled value re-rendered `(sen/100).toFixed(2)` after every
+keystroke — the `debitStr`/`creditStr` raw-text fields existed (added for the
+2026-06-12 reformat bug) but `updateLine` NEVER WROTE THEM, so the "raw text"
+path was dead code and one keypress became "5.00"; ② `type="number"
+step="0.01"` gave the field spinner arrows that stepped one SEN at a time.
+
+Fix: both cells are now `MoneyInput` (the house money field — free typing
+while focused, commit on blur/Enter, no mid-type reformatting), and the dead
+`debitStr`/`creditStr` fields are deleted. Same reformat family as
+BUG-2026-06-12 (payment dialog) and BUG-2026-08-13-095; note the accounting
+page still carries many raw money `<input>`s (see money-input.tsx header) —
+this closes the instance the owner hit, the class sweep remains open.
+
 ## BUG-2026-08-31-170 — a DRAFT journal could be duplicated but never edited `accounting` `ui` 🟢
 
 Owner (JE-2608-0002 screenshot): 「我duplicate 了但是点不开edit」. He duplicated

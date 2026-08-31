@@ -14,7 +14,7 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-08-31 — ✅ Draft JV 可以 Edit 了（BUG-2026-08-31-170）+ Forecast non-prod 段进 COGS（PR #392）
+## 2026-08-31 — ✅ Draft JV 可以 Edit 了（BUG-170）+ JV 金额格换 MoneyInput（BUG-171）+ Forecast non-prod 段进 COGS（PR #392）
 
 ① Owner：「我 duplicate 了但是点不开 edit」——draft JV 从来没有编辑器（旧 Edit 是空壳被
 BUG-090 拆掉后没重建；后端 PUT /journals/:id 一直支持）。修：JournalEntryForm +`editing`

@@ -6436,6 +6436,15 @@ type MaterialCostData = {
   // nonzero stock figure is verifiably the owner's own number. 'auto' →
   // FIFO/BOM behaviour unchanged.
   rmValuationMode: "auto" | "stock_take_only";
+  // Same rule for FINISHED GOODS (owner 2026-08-31 「让他别自动capture」, kv
+  // `fg_valuation_mode`): 'stock_take_only' → the FG month-end value is only
+  // what the owner keyed (stock_take pseudo-group "FG"; the 30/04 opening seed
+  // counts as its month's number), 0 otherwise — the ~1,600-batch automatic
+  // valuation stops feeding the statements. 'auto' → batch computation as
+  // before. WIP is untouched either way.
+  fgValuationMode: "auto" | "stock_take_only";
+  fgSeedSen: number;
+  fgSeedYm: string | null;
   // Opening seed value per group (material_opening_stock, qty × unitCost) and
   // the month it belongs to (the cutover month) — the one "import" that exists
   // before any stock_take rows.
@@ -6882,6 +6891,12 @@ async function loadMaterialCostData(
     .catch(() => null);
   const rmValuationMode: "auto" | "stock_take_only" =
     (modeRow?.value ?? "").trim() === "stock_take_only" ? "stock_take_only" : "auto";
+  const fgModeRow = await db
+    .prepare("SELECT value FROM kv_config WHERE key = 'fg_valuation_mode'")
+    .first<{ value: string | null }>()
+    .catch(() => null);
+  const fgValuationMode: "auto" | "stock_take_only" =
+    (fgModeRow?.value ?? "").trim() === "stock_take_only" ? "stock_take_only" : "auto";
   const seedByGroup = new Map<string, number>();
   for (const r of openingRows) {
     const g = groupOf.get(r.rmId) ?? "OTHER";
@@ -6922,6 +6937,9 @@ async function loadMaterialCostData(
     piPurchaseCum,
     stockTakeByGroupYm,
     rmValuationMode,
+    fgValuationMode,
+    fgSeedSen: invSeed.fgSen,
+    fgSeedYm: invSeed.asOfDate ? invSeed.asOfDate.slice(0, 7) : null,
     seedByGroup,
     seedYm,
     wipByYm,
@@ -6993,8 +7011,23 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
   const wipOpenSen = (prevKey && wipSt?.has(prevKey)) ? (wipSt.get(prevKey) as number) : wipOpenSenAuto;
   const wipCloseSen = wipSt?.has(endKey) ? (wipSt.get(endKey) as number) : wipCloseSenAuto;
   const fgSt = data.stockTakeByGroupYm.get("FG");
-  const fgOpenSen = (prevKey && fgSt?.has(prevKey)) ? (fgSt.get(prevKey) as number) : fgOpenSenAuto;
-  const fgCloseSen = fgSt?.has(endKey) ? (fgSt.get(endKey) as number) : fgCloseSenAuto;
+  // FG periodic mode (owner 2026-08-31 「让他别自动capture」, same v3 rule as
+  // RM): the month-end FG value is exactly the owner's keyed number for that
+  // month (stock_take pseudo-group "FG"; the opening seed counts as its own
+  // month's number), 0 otherwise. 'auto' keeps the per-batch computation.
+  const noAutoFg = data.fgValuationMode === "stock_take_only";
+  const fgImported = (ym: string | null): number => {
+    if (!ym) return 0;
+    if (fgSt?.has(ym)) return fgSt.get(ym) as number;
+    if (data.fgSeedYm && ym === data.fgSeedYm) return data.fgSeedSen;
+    return 0;
+  };
+  const fgOpenSen = noAutoFg
+    ? fgImported(prevKey)
+    : (prevKey && fgSt?.has(prevKey)) ? (fgSt.get(prevKey) as number) : fgOpenSenAuto;
+  const fgCloseSen = noAutoFg
+    ? fgImported(endKey)
+    : fgSt?.has(endKey) ? (fgSt.get(endKey) as number) : fgCloseSenAuto;
   return { rmGroups, wipOpenSen, wipCloseSen, fgOpenSen, fgCloseSen, warnings: data.warnings };
 }
 
@@ -13117,7 +13150,46 @@ app.get("/stock-take", async (c) => {
     .first<{ value: string | null }>()
     .catch(() => null);
   const rmValuationMode = (modeRow?.value ?? "").trim() === "stock_take_only" ? "stock_take_only" : "auto";
-  return c.json({ success: true, data, total: data.length, rmValuationMode });
+  const fgModeRow = await c.var.DB
+    .prepare("SELECT value FROM kv_config WHERE key = 'fg_valuation_mode'")
+    .first<{ value: string | null }>()
+    .catch(() => null);
+  const fgValuationMode = (fgModeRow?.value ?? "").trim() === "stock_take_only" ? "stock_take_only" : "auto";
+  return c.json({ success: true, data, total: data.length, rmValuationMode, fgValuationMode });
+});
+
+// PUT /api/accounting/fg-valuation-mode — the FG twin of the RM switch below
+// (owner 2026-08-31 「让他别自动capture」): 'stock_take_only' → the FG closing
+// on every statement is only what the owner keyed (stock_take pseudo-group
+// "FG"; the opening seed stays); no per-batch auto valuation. 'auto' →
+// batch computation as before.
+app.put("/fg-valuation-mode", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { mode?: string };
+  const mode = String(body.mode ?? "").trim();
+  if (mode !== "auto" && mode !== "stock_take_only") {
+    return c.json(
+      { success: false, error: "mode must be 'auto' or 'stock_take_only'" },
+      400,
+    );
+  }
+  await c.var.DB.prepare(
+    `INSERT INTO kv_config (key, value, updated_at)
+       VALUES ('fg_valuation_mode', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+  )
+    .bind(mode, new Date().toISOString())
+    .run();
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: "fg_valuation_mode",
+    action: "update",
+    after: { mode },
+  });
+  return c.json({ success: true, data: { mode } });
 });
 
 // PUT /api/accounting/rm-valuation-mode — periodic-inventory switch (owner rule

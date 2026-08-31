@@ -1382,19 +1382,22 @@ function StockTakeTab() {
   // Periodic-inventory switch (owner rule 2026-07-03): 'stock_take_only' turns
   // OFF the BOM/FIFO auto-consumption — closing = latest count + purchases since.
   const [rmMode, setRmMode] = useState<"auto" | "stock_take_only" | null>(null);
+  // FG twin of the switch (owner 2026-08-31 「让他别自动capture」).
+  const [fgMode, setFgMode] = useState<"auto" | "stock_take_only" | null>(null);
   const [modeSaving, setModeSaving] = useState(false);
 
   useEffect(() => {
     let stale = false;
     Promise.all([
       fetch("/api/accounting/material-opening-stock").then((r) => r.json() as Promise<{ data?: { itemGroup: string }[] }>),
-      fetch("/api/accounting/stock-take").then((r) => r.json() as Promise<{ data?: { itemGroup: string; ym: string; valueSen: number }[]; rmValuationMode?: "auto" | "stock_take_only" }>),
+      fetch("/api/accounting/stock-take").then((r) => r.json() as Promise<{ data?: { itemGroup: string; ym: string; valueSen: number }[]; rmValuationMode?: "auto" | "stock_take_only"; fgValuationMode?: "auto" | "stock_take_only" }>),
     ])
       .then(([mos, st]) => {
         if (stale) return;
         setGroups([...new Set((mos.data ?? []).map((r) => r.itemGroup).filter(Boolean))].sort());
         setEntries(st.data ?? []);
         setRmMode(st.rmValuationMode ?? "auto");
+        setFgMode(st.fgValuationMode ?? "auto");
       })
       .catch(() => {});
     return () => { stale = true; };
@@ -1420,6 +1423,31 @@ function StockTakeTab() {
       } else toast.error(j?.error || "Failed to switch valuation mode");
     } catch {
       toast.error("Failed to switch valuation mode");
+    } finally {
+      setModeSaving(false);
+    }
+  };
+
+  const saveFgMode = async (mode: "auto" | "stock_take_only") => {
+    if (mode === fgMode) return;
+    setModeSaving(true);
+    try {
+      const res = await fetch("/api/accounting/fg-valuation-mode", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) {
+        setFgMode(mode);
+        toast.success(
+          mode === "stock_take_only"
+            ? "Finished-goods valuation switched to stock-take only — no automatic per-batch value; months without your FG figure show 0."
+            : "Finished-goods valuation switched back to automatic (per completed batch).",
+        );
+      } else toast.error(j?.error || "Failed to switch FG valuation mode");
+    } catch {
+      toast.error("Failed to switch FG valuation mode");
     } finally {
       setModeSaving(false);
     }
@@ -1768,6 +1796,36 @@ function StockTakeTab() {
               onClick={() => void saveMode("auto")}
             >
               Automatic (BOM/FIFO)
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="p-4 flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-[16rem] flex-1">
+            <div className="text-sm font-medium text-[#1F1D1B]">Finished-goods source</div>
+            <p className="text-xs text-[#6B7280] mt-0.5 max-w-3xl">
+              {fgMode === "stock_take_only"
+                ? "Stock take only: month-end finished goods shows exactly the FG figure you keyed for that month (the FG row below) — 0 when you haven't keyed one (the 30/04 opening seed counts as April). No automatic per-batch valuation."
+                : "Automatic: the system values every completed, undelivered production batch (qty × batch unit cost); an FG stock-take entry overrides that month where present."}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              size="sm"
+              variant={fgMode === "stock_take_only" ? "default" : "outline"}
+              disabled={modeSaving || fgMode === null}
+              onClick={() => void saveFgMode("stock_take_only")}
+            >
+              Stock take only
+            </Button>
+            <Button
+              size="sm"
+              variant={fgMode === "auto" ? "default" : "outline"}
+              disabled={modeSaving || fgMode === null}
+              onClick={() => void saveFgMode("auto")}
+            >
+              Automatic (per batch)
             </Button>
           </div>
         </CardContent>

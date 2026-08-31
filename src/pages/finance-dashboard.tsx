@@ -1005,7 +1005,7 @@ export default function FinanceDashboardPage() {
           {salDeptSplit.non.length > 0 && (
             <SalaryDeptCard
               title="Non-Production Salary"
-              subtitle="Warehouse · Repair · Maintenance · Shortfall · R&D — by department"
+              subtitle="Warehouse · Repair · Maintenance · Shortfall · R&D — actual = clocked-hours share of payroll"
               depts={salDeptSplit.non}
               data={salData}
               base={nullBase}

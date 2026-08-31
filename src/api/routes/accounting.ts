@@ -10553,7 +10553,7 @@ app.get("/dashboard", async (c) => {
   // Bump for a changed SHAPE *or* a changed default WINDOW: the stored copy is
   // keyed by the range string, and the default range's key is blank either way,
   // so a wider-or-narrower default would keep serving the old month list.
-  const DASH_PAYLOAD_V = "v13"; // v13: salaryByDept carries nonProd flag; v12: non-prod dept forecasts count in COGS; v11: report-layer labour injection (unrecorded months); v10: master non-prod depts file under staff cost; v9: dept forecasts file by labour-map bucket; v8: + forecastSen; v7: + salaryByDept
+  const DASH_PAYLOAD_V = "v14"; // v14: non-prod actuals = clocked-hours share of payroll; v13: salaryByDept carries nonProd flag; v12: non-prod dept forecasts count in COGS; v11: report-layer labour injection (unrecorded months); v10: master non-prod depts file under staff cost; v9: dept forecasts file by labour-map bucket; v8: + forecastSen; v7: + salaryByDept
   // The explicit window is part of the identity — otherwise two different
   // ranges would share one cached copy.
   const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
@@ -10771,6 +10771,80 @@ app.get("/dashboard", async (c) => {
   } catch {
     /* payslips table absent → card simply shows no dept split */
   }
+  // Non-production ACTUALS (owner 2026-08-31 「actual资料不是能从payroll 提取
+  // 出来吗」): a payslip files the worker's whole month under his MASTER
+  // (production) department, so the non-prod card had no actuals. Instead,
+  // each worker's payroll cost (gross + employer statutory — the same ringgit
+  // the Labour tab posts) is split across the departments he actually CLOCKED
+  // in, and the shares landing on master-flagged non-production departments
+  // become that card's actuals. Deliberate overlap with the production card:
+  // a borrowed worker's R&D days are inside his production dept's payslip AND
+  // shown as R&D activity — two views of one wage bill, disclosed on the card.
+  const nonProdDash = new Set<string>();
+  try {
+    const flags = await db.prepare(`SELECT code, is_production FROM departments`)
+      .all<{ code: string | null; isProduction: number | null; is_production: number | null }>();
+    for (const r of flags.results ?? []) {
+      const t = String(r.code ?? "").trim();
+      if (t && Number(r.isProduction ?? r.is_production ?? 1) === 0) nonProdDash.add(t);
+    }
+  } catch { /* master predates the flag */ }
+  const nonProdActualByYm = new Map<string, Map<string, number>>();
+  if (nonProdDash.size) {
+    try {
+      const psW = await db
+        .prepare(
+          `SELECT period, employeeId, grossPaySen, epfEmployerSen, socsoEmployerSen, eisEmployerSen
+             FROM payslips WHERE orgId = ? AND status != 'CANCELLED'`,
+        )
+        .bind(orgIdDash)
+        .all<Record<string, unknown>>();
+      const costByYmWorker = new Map<string, number>();
+      for (const r of psW.results ?? []) {
+        const ym = String(r.period ?? "").slice(0, 7);
+        const wid = String(r.employeeId ?? r.employee_id ?? "");
+        if (!/^\d{4}-\d{2}$/.test(ym) || !wid) continue;
+        const cost =
+          (Number(r.grossPaySen ?? r.gross_pay_sen) || 0) +
+          (Number(r.epfEmployerSen ?? r.epf_employer_sen) || 0) +
+          (Number(r.socsoEmployerSen ?? r.socso_employer_sen) || 0) +
+          (Number(r.eisEmployerSen ?? r.eis_employer_sen) || 0);
+        const k = `${ym}::${wid}`;
+        costByYmWorker.set(k, (costByYmWorker.get(k) ?? 0) + cost);
+      }
+      const earliestIso = allMonths.length ? `${allMonths[0]}-01` : "2000-01-01";
+      const wheRes = await db
+        .prepare("SELECT workerId, departmentCode, date, hours FROM working_hour_entries WHERE date >= ?")
+        .bind(earliestIso)
+        .all<Record<string, unknown>>();
+      const hoursByYmWorker = new Map<string, { total: number; byDept: Map<string, number> }>();
+      for (const r of wheRes.results ?? []) {
+        const ym = String(r.date ?? "").slice(0, 7);
+        const wid = String(r.workerId ?? r.worker_id ?? "");
+        const dept = String(r.departmentCode ?? r.department_code ?? "").trim();
+        const h = Number(r.hours) || 0;
+        if (!wid || !dept || h <= 0 || !/^\d{4}-\d{2}$/.test(ym)) continue;
+        const k = `${ym}::${wid}`;
+        let rec = hoursByYmWorker.get(k);
+        if (!rec) { rec = { total: 0, byDept: new Map<string, number>() }; hoursByYmWorker.set(k, rec); }
+        rec.total += h;
+        rec.byDept.set(dept, (rec.byDept.get(dept) ?? 0) + h);
+      }
+      for (const [k, rec] of hoursByYmWorker) {
+        const cost = costByYmWorker.get(k);
+        if (!cost || rec.total <= 0) continue;
+        const ym = k.slice(0, 7);
+        for (const [dept, h] of rec.byDept) {
+          if (!nonProdDash.has(dept)) continue;
+          const sen = Math.round((cost * h) / rec.total);
+          if (!sen) continue;
+          let m = nonProdActualByYm.get(ym);
+          if (!m) { m = new Map<string, number>(); nonProdActualByYm.set(ym, m); }
+          m.set(dept, (m.get(dept) ?? 0) + sen);
+        }
+      }
+    } catch { /* hours/payslips unavailable → non-prod actuals stay blank */ }
+  }
   const BEDFRAME_SALES = "500-0000";
   const csLineOf = (name: string): "bedframe" | "sofa" | "shared" => {
     const t = name.toUpperCase();
@@ -10964,15 +11038,7 @@ app.get("/dashboard", async (c) => {
   // map keeps deciding where wages POST, not where the forecast SITS.
   const labourMapDash = await getLabourMap(db);
   const labourMappedDash = new Set(labourMappedAccounts(labourMapDash));
-  const nonProdDash = new Set<string>();
-  try {
-    const flags = await db.prepare(`SELECT code, is_production FROM departments`)
-      .all<{ code: string | null; isProduction: number | null; is_production: number | null }>();
-    for (const r of flags.results ?? []) {
-      const t = String(r.code ?? "").trim();
-      if (t && Number(r.isProduction ?? r.is_production ?? 1) === 0) nonProdDash.add(t);
-    }
-  } catch { /* master predates the flag */ }
+  // nonProdDash is loaded once, earlier, beside the hours-share actuals.
   const deptBucketDash = (dept: string): string => {
     if (nonProdDash.has(dept)) return "OPEX_SALARIES";
     const acct = labourMapDash.byDept[dept] ?? labourMapDash.fallback;
@@ -11100,6 +11166,10 @@ app.get("/dashboard", async (c) => {
     const salDeptFc = new Map<string, number>();
     for (const ym of b.months) {
       for (const d of salByMonth.get(ym) ?? []) salDept.set(d.dept, (salDept.get(d.dept) ?? 0) + d.costSen);
+      // Non-production actuals: clocked-hours share of payroll (see the
+      // hours-share block above) — the master-dept payslip sums carry nothing
+      // for these departments.
+      for (const [dept, sen] of nonProdActualByYm.get(ym) ?? []) salDept.set(dept, (salDept.get(dept) ?? 0) + sen);
       for (const [dept, sen] of fcDeptByMonth.get(ym) ?? []) salDeptFc.set(dept, (salDeptFc.get(dept) ?? 0) + sen);
     }
     return {

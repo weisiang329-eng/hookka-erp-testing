@@ -14,6 +14,21 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-31 — ✅ P&L 人工「看时自动提取」（report-layer，三层无缝）
+
+Owner：「任何时候我看 P&L 你都自动提取…当当月我已经记录 salary 了，就以我记录的为准」+
+先解剖了他抓到的同刻两数（钟点页 68,563.26 vs Labour tab 70,833.22 = 归属方式
+[小时在哪 vs 人属哪] × 算法 [粗估 vs 完整 payroll] 之差，两个都对）。三层规则：
+**GL 有 410-0010 贷方（Post 或手工 JV）→ 读 GL；有 payslips（含 DRAFT）→ 注入工资单数；
+都没有 → `projectedLabourByDept`（新 api/lib/labour-projection.ts，与 Generate 同引擎
+干算：computeMonthlyLabor + 效率津贴 + 雇主 EPF/SOCSO/EIS，PCB 关闭）**。
+纯月份规则 `src/lib/labour-inject.ts`（labourInjectMonths，5 测：开账月/今天/已记录月裁剪）。
+注入点：glWindowSigned（+orgId，收集 recordedSalaryYms，dc.labourMemo 每月一次）+
+/cost-expense-classes 自己的循环镜像；dashboard snapshot sourceTables +working_hour_entries/
+payroll_hour_deductions/worker_salary_history，`DASH_PAYLOAD_V` v11。TB/BS 不含注入
+（与开账切片同性质，owner 已知情）；月份一旦记录（Post/JV）注入自动让位。
+副作用修复：May'26 人工从未过账 → P&L 自动补上（payslips 层）。
+
 ## 2026-08-29 — ✅ Forecast/Dashboard：主档 Non-prod 标签直接决定分区（不动 Labour tab）
 
 Owner（贴 14 部门表截图）：「non production 的 warehouse, repair, maint, shortfall, r&d 有再

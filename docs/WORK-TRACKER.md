@@ -14,6 +14,16 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-31 — ✅ FG 期末「别自动 capture」：fg_valuation_mode 开关（照 RM v3 同哲学）
+
+Owner 看完 FG 102,186.49 的来路（≈1,600 个自动算的小批）后拍板「让他别自动capture」（选项确认
+= Finished Goods 期末）。镜像 RM 的 stock_take_only：新 kv `fg_valuation_mode`——
+'stock_take_only' 时 FG 月末=业主 key 的数（stock_take 伪组 "FG"；30/04 期初种子算 4 月的数），
+没 key = 0，不逐批推算；'auto'（默认）照旧。改点：MaterialCostData +fgValuationMode/fgSeed、
+materialWindow FG 分支、GET /stock-take 回传、新 PUT /fg-valuation-mode（audit）、Stock Take 页
+新「Finished-goods source」卡二键切换。WIP 不动。⚠ 开了之后没 key 的月份 GP 会掉
+（少了 −FG closing 冲减）——owner 已知情选择。开关本身不动数据，他自己按。
+
 ## 2026-08-31 — ✅ Draft JV 可以 Edit 了（BUG-170）+ JV 金额格换 MoneyInput（BUG-171）+ Forecast non-prod 段进 COGS（PR #392）
 
 ① Owner：「我 duplicate 了但是点不开 edit」——draft JV 从来没有编辑器（旧 Edit 是空壳被

@@ -34,6 +34,25 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-31-172 — one office-salary JV silenced a whole month's labour auto-extract `accounting` `pnl` 🟢
+
+Owner (Monthly P&L screenshot, hours after the auto-extract shipped):
+「monthly p&L direct labour 没有salary」— Aug'26 DIRECT LABOUR read 0.00 while
+May (injected) and Jun/Jul (recorded) were fine. Measured: he had just posted
+a manual JV (je-1643c94b, 31/08, CR 410-0010 RM 55,000 — office salaries to
+900-S00x). The injection's guard was MONTH-level ("any 410-0010 credit → the
+GL owns the month"), so his office JV switched off the production 750-x
+injection along with it — a mixed month (office recorded, production not)
+was flagged as a known simplification at design time and the owner hit it the
+same day.
+
+Fix: the guard is per (month, ACCOUNT). Entries crediting 410-0010 mark the
+accounts their DEBIT legs touched; injection then skips exactly those lines
+and still fills the rest. Jun/Jul stay owner-figures (their postings debit
+the labour accounts, which now individually match); Aug shows his 55k office
+JV AND the injected production payroll side by side. Applied in both
+glWindowSigned and /cost-expense-classes' mirrored loop.
+
 ## BUG-2026-08-31-171 — JV amount cells reformatted to ".00" on every keystroke `accounting` `ui` `money-input` 🟢
 
 Owner (editing JE-2608-0002): 「这里输入amount这里很不友好，按了一次就跑去分和sen」.

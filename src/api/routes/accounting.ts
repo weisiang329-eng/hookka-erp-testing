@@ -6255,10 +6255,30 @@ async function glWindowSigned(
   const { docDate, openingDate: obDate } = dc;
   const net: GlWindow = new Map();
   const openingNet: GlWindow = new Map(); // opening_balance(+reversal) legs, netted
-  // Months whose salary accrual is ALREADY in the GL — a Labour-tab post OR a
-  // manual JV both credit 410-0010. Those months keep the recorded figures;
-  // only the rest get the report-layer labour injection below.
-  const recordedSalaryYms = new Set<string>();
+  // Salary accruals ALREADY in the GL, per month and ACCOUNT: any entry that
+  // credits 410-0010 (a Labour-tab post OR a manual JV) marks the accounts its
+  // debit legs touched. Those (month, account) pairs keep the owner's figures;
+  // everything else still gets the report-layer labour injection below.
+  // Account-level, not month-level (BUG-2026-08-31-172): the owner's Aug'26
+  // office-salary JV (CR 410-0010 55,000 → DR 900-S00x) used to silence the
+  // WHOLE month, wiping the production 750-x auto-extract with it.
+  const salaryEntryYm = new Map<string, string>(); // sourceType::sourceId → ym of its 410-0010 credit
+  for (const l of legRes.results ?? []) {
+    if ((Number(l.creditSen) || 0) <= 0) continue;
+    if (resolve(l.accountCode) !== LABOUR_ACCRUAL_ACCT) continue;
+    const dd = docDate(l.sourceType, l.sourceId, l.postedAt);
+    if (legBeforeOpening(l.sourceType, dd, obDate) || isOpeningSource(l.sourceType)) continue;
+    salaryEntryYm.set(`${l.sourceType}::${l.sourceId}`, dd.slice(0, 7));
+  }
+  const recordedSalaryAccts = new Map<string, Set<string>>(); // ym → debited accounts
+  for (const l of legRes.results ?? []) {
+    if ((Number(l.debitSen) || 0) <= 0) continue;
+    const ym = salaryEntryYm.get(`${l.sourceType}::${l.sourceId}`);
+    if (!ym) continue;
+    let set = recordedSalaryAccts.get(ym);
+    if (!set) { set = new Set(); recordedSalaryAccts.set(ym, set); }
+    set.add(resolve(l.accountCode));
+  }
   for (const l of legRes.results ?? []) {
     const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
     if (legBeforeOpening(l.sourceType, dd, obDate)) continue; // pre-opening: not extracted
@@ -6274,26 +6294,28 @@ async function glWindowSigned(
     // already supplies stock.
     if (l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal") continue;
     const ym = dd.slice(0, 7);
-    const code = resolve(l.accountCode);
-    if (code === LABOUR_ACCRUAL_ACCT && (Number(l.creditSen) || 0) > 0) recordedSalaryYms.add(ym);
     if (startYm && ym < startYm) continue;
     if (endYm && ym > endYm) continue;
+    const code = resolve(l.accountCode);
     net.set(code, (net.get(code) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
   }
   // Report-layer labour (owner 2026-08-31 「任何时候我看P&L 时你都自动提取」):
-  // an unrecorded month shows its payroll figures anyway — stored payslips if
-  // generated, else a dry run of the same engine. Display-only: TB/BS carry
-  // nothing until the owner actually posts (same trade-off as the opening
-  // slice). The moment a month gains a 410-0010 credit, the GL takes over.
+  // the payroll figures show up without waiting for a post — stored payslips
+  // if generated, else a dry run of the same engine. Per line: an account the
+  // owner already recorded that month keeps HIS figure (以我记录的为准), the
+  // rest inject. Display-only: TB/BS carry nothing until an actual post (same
+  // trade-off as the opening slice).
   for (const ym of labourInjectMonths({
     startYm,
     endYm,
     openingYm: obDate ? obDate.slice(0, 7) : null,
     nowYm: new Date().toISOString().slice(0, 7),
-    recordedYms: recordedSalaryYms,
+    recordedYms: new Set(), // recording is handled per account below
   })) {
     dc.labourMemo ??= new Map();
+    const recorded = recordedSalaryAccts.get(ym);
     for (const { account, sen } of await labourInjectionLines(db, orgId, ym, dc.labourMemo)) {
+      if (recorded?.has(account)) continue;
       net.set(account, (net.get(account) ?? 0) + sen);
     }
   }
@@ -7608,7 +7630,24 @@ app.get("/cost-expense-classes", async (c) => {
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
   const byAcct = new Map<string, number[]>();
   const openingNetCec = new Map<string, number>(); // opening legs on COST/EXPENSE accounts
-  const recordedSalaryYmsCec = new Set<string>();
+  // Same account-level recorded-salary map as glWindowSigned (BUG-2026-08-31-172).
+  const salaryEntryYmCec = new Map<string, string>();
+  for (const l of legRes.results ?? []) {
+    if ((Number(l.creditSen) || 0) <= 0) continue;
+    if (resolve(l.accountCode) !== LABOUR_ACCRUAL_ACCT) continue;
+    const dd = docDate(l.sourceType, l.sourceId, l.postedAt);
+    if (legBeforeOpening(l.sourceType, dd, obDateCec) || isOpeningSource(l.sourceType)) continue;
+    salaryEntryYmCec.set(`${l.sourceType}::${l.sourceId}`, dd.slice(0, 7));
+  }
+  const recordedSalaryAcctsCec = new Map<string, Set<string>>();
+  for (const l of legRes.results ?? []) {
+    if ((Number(l.debitSen) || 0) <= 0) continue;
+    const ym = salaryEntryYmCec.get(`${l.sourceType}::${l.sourceId}`);
+    if (!ym) continue;
+    let set = recordedSalaryAcctsCec.get(ym);
+    if (!set) { set = new Set(); recordedSalaryAcctsCec.set(ym, set); }
+    set.add(resolve(l.accountCode));
+  }
   for (const l of legRes.results ?? []) {
     const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
     if (legBeforeOpening(l.sourceType, dd, obDateCec)) continue; // pre-opening: not extracted
@@ -7619,9 +7658,8 @@ app.get("/cost-expense-classes", async (c) => {
     }
     if (l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal" || l.sourceType === "year_close") continue;
     const ym = dd.slice(0, 7);
-    const code = resolve(l.accountCode);
-    if (code === LABOUR_ACCRUAL_ACCT && (Number(l.creditSen) || 0) > 0) recordedSalaryYmsCec.add(ym);
     if (ym < startYm || ym > endYm) continue;
+    const code = resolve(l.accountCode);
     const meta = coa.get(code);
     if (!meta || (meta.type !== "COST" && meta.type !== "EXPENSE")) continue;
     const idx = cols.indexOf(ym);
@@ -7631,7 +7669,8 @@ app.get("/cost-expense-classes", async (c) => {
     arr[idx] += (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
   }
   // Report-layer labour — same rule as glWindowSigned (owner 2026-08-31):
-  // unrecorded months show payroll figures (payslips, else dry engine run).
+  // payroll figures inject per line; an account the owner recorded that month
+  // keeps his figure.
   {
     const injMemo = new Map<string, { account: string; sen: number }[]>();
     for (const ym of labourInjectMonths({
@@ -7639,11 +7678,13 @@ app.get("/cost-expense-classes", async (c) => {
       endYm,
       openingYm: obDateCec ? obDateCec.slice(0, 7) : null,
       nowYm: new Date().toISOString().slice(0, 7),
-      recordedYms: recordedSalaryYmsCec,
+      recordedYms: new Set(),
     })) {
       const idx = cols.indexOf(ym);
       if (idx < 0) continue;
+      const recorded = recordedSalaryAcctsCec.get(ym);
       for (const { account, sen } of await labourInjectionLines(db, getOrgId(c), ym, injMemo)) {
+        if (recorded?.has(account)) continue;
         let arr = byAcct.get(account);
         if (!arr) { arr = new Array(12).fill(0); byAcct.set(account, arr); }
         arr[idx] += sen;

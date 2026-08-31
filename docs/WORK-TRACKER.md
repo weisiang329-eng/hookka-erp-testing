@@ -14,6 +14,14 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-31 — ✅ Non-Production 卡的 actual 从 payroll 按钟点摊（追加）
+
+Owner：「non-production 的 actual 资料不是能从 payroll 提取出来吗？」——能：payslip 把人整月
+记在所属生产部门，但钟点记着他被借去哪。规则：**每个工人的 payroll 成本（毛薪+雇主统筹，
+与 Labour tab 同一条钱）× 该部门时数占比**，落在主档 Non-prod 部门的份 = 非生产卡 actual。
+与生产卡刻意重叠（借调天数同时在生产 payslip 里和 R&D 活动里——一笔工资两个视角，卡副标已注明
+"actual = clocked-hours share of payroll"）。v14；没生成工资单的月份非生产 actual 留空。
+
 ## 2026-08-31 — ✅ Dashboard 新增 Non-Production Salary 卡（和 Production 一模一样）
 
 Owner：「dashboard 多一个non production 的，和production 一模一样，只是变成non production

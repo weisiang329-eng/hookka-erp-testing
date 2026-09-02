@@ -9762,7 +9762,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
   // pulled in so last month's in-transit cheques can still be ticked off.
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
   const [includeEarlier, setIncludeEarlier] = useState(true);
-  const [data, setData] = useState<{ migrationMissing: boolean; legs: RecoLeg[]; statementLines: RecoLine[] } | null>(null);
+  const [data, setData] = useState<{ migrationMissing: boolean; openingDate?: string | null; legs: RecoLeg[]; statementLines: RecoLine[] } | null>(null);
   const [report, setReport] = useState<RecoReport | null>(null);
   const [showImport, setShowImport] = useState(false);
   const [csv, setCsv] = useState("");
@@ -9785,7 +9785,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     if (from) p.set("from", from);
     if (to) p.set("to", to);
     fetch(`/api/accounting/bank-reco?${p.toString()}`)
-      .then((r) => r.json() as Promise<{ success?: boolean; data?: { migrationMissing: boolean; legs: RecoLeg[]; statementLines: RecoLine[] } }>)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { migrationMissing: boolean; openingDate?: string | null; legs: RecoLeg[]; statementLines: RecoLine[] } }>)
       .then((j) => { if (j?.success && j.data) setData(j.data); })
       .catch(() => {});
     fetch(`/api/accounting/bank-reco/report?account=${encodeURIComponent(account)}&month=${month}`)
@@ -10009,12 +10009,18 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const stmt = data?.statementLines ?? [];
   // Dual-key read of the ignore stamp (BUG class C1 — adapter camelCases).
   const ignAt = (s: RecoLine) => s.ignoredAt ?? s.ignored_at ?? null;
+  // Bank lines dated before the opening date are already inside the keyed
+  // opening balance — they live in their own section, out of the matching
+  // and the report (BUG-2026-09-02-174).
+  const obDate = data?.openingDate ?? null;
+  const isPre = (s: RecoLine) => !!obDate && s.txnDate < obDate;
   const legsSorted = [...legs].sort((a, b) => a.day.localeCompare(b.day));
   const stmtSorted = [...stmt].sort((a, b) => a.txnDate.localeCompare(b.txnDate));
   const unmatchedLegs = legsSorted.filter((l) => !l.matched);
-  const unmatchedStmt = stmtSorted.filter((s) => !s.matchedLegId && !ignAt(s));
-  const matchedStmt = stmtSorted.filter((s) => !!s.matchedLegId);
-  const ignoredStmt = stmtSorted.filter((s) => !s.matchedLegId && !!ignAt(s));
+  const preStmt = stmtSorted.filter(isPre);
+  const unmatchedStmt = stmtSorted.filter((s) => !isPre(s) && !s.matchedLegId && !ignAt(s));
+  const matchedStmt = stmtSorted.filter((s) => !isPre(s) && !!s.matchedLegId);
+  const ignoredStmt = stmtSorted.filter((s) => !isPre(s) && !s.matchedLegId && !!ignAt(s));
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
   // Owner 2026-09-01 「现在太乱了」: signed red numbers everywhere read as a
   // wall of errors. Split into positive In / Out columns instead.
@@ -10060,7 +10066,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
           </label>
           {data && !data.migrationMissing && (
             <div className="text-sm text-[#6B7280] pb-1">
-              Statement {stmt.length} lines ({unmatchedStmt.length} open{ignoredStmt.length > 0 ? ` · ${ignoredStmt.length} ignored` : ""}) · Book {legs.length} legs ({unmatchedLegs.length} open)
+              Statement {stmt.length} lines ({unmatchedStmt.length} open{ignoredStmt.length > 0 ? ` · ${ignoredStmt.length} ignored` : ""}{preStmt.length > 0 ? ` · ${preStmt.length} before opening` : ""}) · Book {legs.length} legs ({unmatchedLegs.length} open)
             </div>
           )}
         </CardContent>
@@ -10112,7 +10118,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 <span className="rounded-full bg-[#EAF3DE] text-[#27500A] text-xs font-semibold px-2.5 py-0.5">Balanced ✓</span>
               ) : (
                 <span className="rounded-full bg-[#F7E5E1] text-[#9A3A2D] text-xs font-semibold px-2.5 py-0.5">
-                  Out by {formatCurrency((report.computedGlSen ?? 0) - report.glSen)}
+                  Out by {formatCurrency(Math.abs((report.computedGlSen ?? 0) - report.glSen))} · book {(report.computedGlSen ?? 0) - report.glSen < 0 ? "above" : "below"} bank
                 </span>
               )}
             </div>
@@ -10200,7 +10206,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                           {s.txnDate}
                           {earlier && <span className="ml-1 rounded bg-[#F0ECE9] px-1 text-[10px]">earlier</span>}
                         </td>
-                        <td className="px-3 py-1.5 text-xs">{s.description}</td>
+                        <td className="px-3 py-1.5 text-xs"><div className="max-w-[420px] truncate" title={s.description ?? ""}>{s.description}</div></td>
                         <td className="px-3 py-1.5 text-right tabular-nums">{tdIn(s.amountSen)}</td>
                         <td className="px-3 py-1.5 text-right tabular-nums">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1.5 text-right whitespace-nowrap">
@@ -10246,7 +10252,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   {unmatchedLegs.map((l) => (
                     <tr key={l.id} className="border-b border-[#F0ECE9]">
                       <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{l.day}</td>
-                      <td className="px-3 py-1.5 text-xs">{l.description}</td>
+                      <td className="px-3 py-1.5 text-xs"><div className="max-w-[420px] truncate" title={l.description}>{l.description}</div></td>
                       <td className="px-3 py-1.5 text-right tabular-nums">{tdIn(l.amountSen)}</td>
                       <td className="px-3 py-1.5 text-right tabular-nums">{tdOut(l.amountSen)}</td>
                     </tr>
@@ -10261,7 +10267,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
         </div>
       )}
 
-      {account && data && !data.migrationMissing && (matchedStmt.length > 0 || ignoredStmt.length > 0) && (
+      {account && data && !data.migrationMissing && (matchedStmt.length > 0 || ignoredStmt.length > 0 || preStmt.length > 0) && (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
           {matchedStmt.length > 0 && (
             <details className="rounded-lg border border-[#E2DDD8] bg-white">
@@ -10272,11 +10278,39 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     {matchedStmt.map((s) => (
                       <tr key={s.id} className="border-b border-[#F0ECE9] bg-[#EAF3DE]/30">
                         <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
-                        <td className="px-3 py-1 text-xs">{s.description}</td>
+                        <td className="px-3 py-1 text-xs"><div className="max-w-[420px] truncate" title={s.description ?? ""}>{s.description}</div></td>
                         <td className="px-3 py-1 text-right tabular-nums text-xs">{tdIn(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right tabular-nums text-xs">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right whitespace-nowrap">
                           <button onClick={() => handleUnmatch(s.id)} className="text-[#6B7280] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">✓ unmatch</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+          {preStmt.length > 0 && (
+            <details className="rounded-lg border border-[#E2DDD8] bg-white">
+              <summary className="cursor-pointer px-4 py-2 text-sm font-medium text-[#1F1D1B]">
+                Before opening ({preStmt.length}) <span className="font-normal text-[#6B7280]">— already inside the opening balance</span>
+              </summary>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {preStmt.map((s) => (
+                      <tr key={s.id} className="border-b border-[#F0ECE9] opacity-60">
+                        <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
+                        <td className="px-3 py-1 text-xs"><div className="max-w-[420px] truncate" title={s.description ?? ""}>{s.description}</div></td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdOut(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right whitespace-nowrap">
+                          {s.matchedLegId ? (
+                            <button onClick={() => handleUnmatch(s.id)} className="text-[#9A3A2D] hover:text-[#1F1D1B] text-[11px] underline decoration-dotted cursor-pointer" title="This match double-counts money that is already in the opening balance — unmatch it">wrong match — undo</button>
+                          ) : (
+                            <span className="text-[11px] text-[#9CA3AF]">in opening</span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -10294,7 +10328,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     {ignoredStmt.map((s) => (
                       <tr key={s.id} className="border-b border-[#F0ECE9] opacity-60">
                         <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
-                        <td className="px-3 py-1 text-xs">{s.description}</td>
+                        <td className="px-3 py-1 text-xs"><div className="max-w-[420px] truncate" title={s.description ?? ""}>{s.description}</div></td>
                         <td className="px-3 py-1 text-right tabular-nums text-xs">{tdIn(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right tabular-nums text-xs">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right whitespace-nowrap">

@@ -38,6 +38,14 @@ automatch 可能按金额误抓开账腿。修：`isOpeningSource` 腿三处排�
 候选 / report 未达 walk），glSen 保留。修后 prod 实测 Out by 4,936.17 → 3,336.17
 （= 7 月账单期初 4,286.17 − 开账记的 1,600 + 6 月测试行 650，一分不差）。
 守卫 `tests/bank-reco-opening-legs.test.mjs`。
+⑤ 下午连环：owner 给了 5 月真账单 → 解析 41 笔零错、**21/05 收盘 4,742.72 = 真开账数**；owner
+裁决差挂欠 HKMFG，并配平开账页红字 3,559.40（YSL 三张四月账单 1,516.60 按行科目 + 采购净少
+5,076.00 从 701-0030 减）→ owner 亲手 9 格 Re-post → 验收：批平 303,197.12、TB 平、7 月 Out by
+**193.45 命中预测**。随后 owner 自传 5 月账单撞出 **BUG-2026-09-02-174**（「无法 tally」−6,948.84
+= 4 笔开账后真支出被 ignore −9,183.84 − 4 条开账前银行行被错配 −2,235.00，拆到分）：开账月里
+22/05 前的银行行本属开账数，系统却当普通行。修：match 拒收 / automatch 跳过 / report 作废其配对
++ 不计未达 / GET 回 openingDate；UI 新「Before opening」折叠区（错配行带 undo）、描述截一行、
+Out by 徽章标方向（book above/below bank）。
 
 ## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
 

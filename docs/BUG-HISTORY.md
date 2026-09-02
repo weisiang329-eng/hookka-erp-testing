@@ -34,7 +34,11 @@ Entries themselves stay newest-first.
 
 ---
 
-## BUG-2026-09-02-174 — an outsourced worker logged 4 hours against a 9-hour day and was paid the full day `payroll` `outsourced` 🟢
+## BUG-2026-09-02-174b — an outsourced worker logged 4 hours against a 9-hour day and was paid the full day `payroll` `outsourced` 🟢
+
+> id note: originally logged as -174 in the same hour as the bank-reco -174
+> below; renamed with the `b` suffix (zero inbound references) per the
+> duplicate-id convention. Real discovery date unchanged: 2026-09-02.
 
 - **Symptom (owner, 2026-08-31)**: CHAU (OSC-001, RM 85 for a 9-hour day)
   logged **four hours on 17 Aug 2026** and August paid the full RM 85 — 24 days
@@ -69,6 +73,29 @@ Entries themselves stay newest-first.
   pinned the OLD policy were rewritten rather than deleted, each carrying the
   date and the quote that changed it, plus CHAU's August as an end-to-end case.
 
+## BUG-2026-09-02-174 — pre-opening statement lines treated as reconcilable `accounting` `bank-reco` 🟢
+
+Owner uploaded the May'26 statement (the opening month: statement covers
+01–31/05, the books start 22/05) and could not tally: "Out by −RM 6,948.84".
+Measured composition, exact to the sen: he had to hand-ignore 23 pre-opening
+bank lines (their money is inside the keyed opening balance 4,742.72), FOUR
+pre-opening lines got matched to 22/05-keyed book legs (−2,235.00 — each
+match pairs a bank movement that is inside the opening with a post-opening
+book leg, a double count), and in the confusion four REAL post-opening
+outflows were ignored (−9,183.84: JomPAY 152.25, petty cash 6,521.59, Big
+Green 1,560.00, GVP 950.00). −9,183.84 − (−2,235.00) = −6,948.84.
+
+Fix ([accounting.ts](../src/api/routes/accounting.ts)): statement lines dated
+before kv `opening_date` are floored everywhere — POST /bank-reco/match
+refuses them, automatch skips them, the report voids stored matches on them
+and excludes them from unbookedStmt, and GET /bank-reco flags a leg matched
+only when its line is post-opening (response now carries `openingDate`). UI:
+pre-opening lines live in their own collapsed "Before opening — already
+inside the opening balance" section (no ignore/match actions; a stored wrong
+match shows "wrong match — undo"); descriptions truncate to one line; the
+Out-by badge states the direction (book above/below bank). Guard:
+`tests/bank-reco-opening-legs.test.mjs` (4 new assertions).
+
 **Follow-up the same hour — the money was right and the REASON was invisible.**
 The regenerated August paid CHAU RM 1,997.50 and showed a **RM 0.00 deduction**
 beside it. The payslip LIST and DETAIL endpoints each re-derived the day rate
@@ -78,6 +105,7 @@ less than days × rate and cannot say why is worse than one that pays wrong —
 nobody can check it. Fixed by exporting `workerPayrollDayRateSen` as the ONE
 definition and routing all three callers through it; a test forbids either
 screen from deriving that rate from a salary again.
+
 
 ## BUG-2026-09-02-173 — opening legs counted as 未达账项 made the reco report blind to the opening figure `accounting` `bank-reco` 🟢
 

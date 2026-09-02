@@ -49,3 +49,36 @@ test("report keeps opening legs in glSen but out of the uncleared walk", () => {
   // …and the uncleared line carries BOTH conditions.
   assert.match(body, /!matchedIds\.has\(l\.id\) && !isOpeningSource\(l\.sourceType\)/);
 });
+
+// ---------------------------------------------------------------------------
+// BUG-2026-09-02-174 — the statement-side mirror of the same idea: bank lines
+// dated BEFORE the opening date are already inside the keyed opening balance.
+// They must not be matchable (a match pairs a pre-boundary bank movement with
+// a post-boundary book leg = double count), must not count as unbooked, and a
+// stored match on one is void for the report. Found on the owner's first
+// opening-month (May) session: he had to hand-ignore 23 pre-opening lines,
+// 4 got matched, and "Out by −6,948.84" was exactly those two distortions.
+// ---------------------------------------------------------------------------
+
+test("match refuses a pre-opening statement line", () => {
+  const body = handler('app.post("/bank-reco/match", async (c) => {');
+  assert.match(body, /line\.txnDate < obDateM/);
+  assert.match(body, /already inside the opening balance/);
+});
+
+test("automatch never offers a pre-opening statement line", () => {
+  const body = handler('app.post("/bank-reco/automatch", async (c) => {');
+  assert.match(body, /matchableLines = \(lineRes\.results \?\? \[\]\)\.filter\(\(l\) => !obDateAm \|\| l\.txnDate >= obDateAm\)/);
+  assert.doesNotMatch(body, /for \(const line of lineRes\.results/);
+});
+
+test("report voids pre-opening matches and floors unbooked at the opening date", () => {
+  const body = handler('app.get("/bank-reco/report", async (c) => {');
+  assert.match(body, /\.filter\(\(r\) => !obDateRp \|\| r\.txnDate >= obDateRp\)/);
+  assert.match(body, /if \(obDateRp && r\.txnDate < obDateRp\) continue;/);
+});
+
+test("GET /bank-reco only flags legs matched by post-opening lines", () => {
+  const body = handler('app.get("/bank-reco", async (c) => {');
+  assert.match(body, /if \(!obDateBr \|\| r\.txnDate >= obDateBr\) matchedLegIds\.add/);
+});

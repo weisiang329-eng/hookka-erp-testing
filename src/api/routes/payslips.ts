@@ -19,6 +19,7 @@ import {
   computeAttendanceDayDetail,
   absenceCutoffDay,
   effectiveSalarySenForMonth,
+  workerPayrollDayRateSen,
   type AttendanceDayDetail,
 } from "../../lib/labor-engine";
 import {
@@ -32,7 +33,10 @@ import {
   // caller silently prices a month against the wrong effective-dated rules.
   // Both callers resolve their own rates as of the period's last day.
   resolvePayRulesAsOf,
-  payrollDayRateSen,
+  // payrollDayRateSen is deliberately NOT imported here any more: this file
+  // used to call it twice, straight from basicSalarySen, and both calls read 0
+  // for an outsourced person. The day rate now comes from
+  // labor-engine's workerPayrollDayRateSen, which knows about pay mode.
   payrollHourDivisor,
   type PayRulesConfig,
 } from "../../lib/pay-rules";
@@ -642,8 +646,8 @@ app.get("/", async (c) => {
         // Priced with the SAME rate the engine docks at: the contractual day
         // rate over the worker's day SPAN (hours + lunch), resolved per period.
         const wRes = await c.var.DB.prepare(
-          "SELECT id, basicSalarySen, workingDaysPerMonth, workingHoursPerDay FROM workers",
-        ).all<{ id: string; basicSalarySen: number; workingDaysPerMonth: number; workingHoursPerDay: number }>();
+          "SELECT id, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, payMode, dailyRateSen FROM workers",
+        ).all<{ id: string; basicSalarySen: number; workingDaysPerMonth: number; workingHoursPerDay: number; payMode: string | null; dailyRateSen: number | null }>();
         const wById = new Map((wRes.results ?? []).map((w) => [w.id, w]));
         const cfg = resolvePayRulesAsOf(
           await loadPayRuleVersions(c.var.DB),
@@ -657,8 +661,12 @@ app.get("/", async (c) => {
           lateByWorker.set(d.workerId, arr);
           const w = wById.get(d.workerId);
           if (!w) continue;
-          const dayRate = payrollDayRateSen(
-            Number(w.basicSalarySen) || 0,
+          const dayRate = workerPayrollDayRateSen(
+            {
+              basicSalarySen: Number(w.basicSalarySen) || 0,
+              payMode: w.payMode,
+              dailyRateSen: w.dailyRateSen,
+            },
             {
               workingDaysPerMonth: Number(w.workingDaysPerMonth) || 26,
               calendarDays: 30,
@@ -1570,8 +1578,19 @@ app.get("/:id", async (c) => {
       .bind(payslip.employeeId, `${payslip.period}-%`)
       .all<{ date: string; hours: number }>();
     const cfg = resolvePayRulesAsOf(await loadPayRuleVersions(c.var.DB), `${payslip.period}-28`);
-    const dayRate = payrollDayRateSen(
-      Number(payslip.basicSalarySen) || 0,
+    // The pay MODE lives on the worker, not on the stored payslip — without it
+    // an outsourced person's day rate reads as salary/26 = 0, and the deduction
+    // renders RM 0.00 beneath a gross that has visibly dropped.
+    const payWorker = await c.var.DB
+      .prepare("SELECT payMode, dailyRateSen FROM workers WHERE id = ?")
+      .bind(payslip.employeeId)
+      .first<{ payMode: string | null; dailyRateSen: number | null }>();
+    const dayRate = workerPayrollDayRateSen(
+      {
+        basicSalarySen: Number(payslip.basicSalarySen) || 0,
+        payMode: payWorker?.payMode,
+        dailyRateSen: payWorker?.dailyRateSen,
+      },
       { workingDaysPerMonth: Number(payslip.workingDays) || 26, calendarDays: 30, workingDaysInMonth: 26 },
       cfg,
     );

@@ -683,17 +683,15 @@ export function computeMonthlyLabor(
   // salary ÷ 26; theirs is simply the agreed figure. Everything downstream —
   // the hour rate, the short-hour dock, the day-typed overtime — then falls out
   // of the identical formulas instead of needing a parallel set.
-  const payrollDailyRateSen = isDailyPaid
-    ? Math.max(0, worker.dailyRateSen ?? 0)
-    : payrollDayRateSen(
-        basicSalarySen,
-        {
-          workingDaysPerMonth,
-          calendarDays: daysInMonth,
-          workingDaysInMonth: costingDivisor,
-        },
-        cfgMonthEnd,
-      );
+  const payrollDailyRateSen = workerPayrollDayRateSen(
+    { basicSalarySen, payMode: worker.payMode, dailyRateSen: worker.dailyRateSen },
+    {
+      workingDaysPerMonth,
+      calendarDays: daysInMonth,
+      workingDaysInMonth: costingDivisor,
+    },
+    cfgMonthEnd,
+  );
   // Hourly divisor (owner 2026-06-11): default = the worker's OWN day span —
   // daily hours + lunch (9h + 1h = ÷10; 7.5h → ÷8.5); mode can switch it to
   // hours-only or a fixed number. No hours set → rateHoursPerDay fallback.
@@ -969,6 +967,31 @@ export function productionCostRatePerMinuteSen(
 // however many hours or departments that day was split across — which is also
 // exactly what payroll pays them, so the reports and the payslip agree.
 // ---------------------------------------------------------------------------
+
+/**
+ * A worker's PAYROLL day rate — the one number every hourly figure divides
+ * from (overtime, the short-hour dock, the absence deduction).
+ *
+ * Exported because it was being re-derived on the payslip LIST and DETAIL
+ * screens, each straight from `basicSalarySen`. That is 0 for an outsourced
+ * person, so both showed a RM 0.00 deduction against a gross that had visibly
+ * dropped — the money was right and the reason was invisible, which is the
+ * exact failure this repo keeps paying for. One definition, three callers.
+ */
+export function workerPayrollDayRateSen(
+  worker: {
+    basicSalarySen?: number | null;
+    payMode?: string | null;
+    dailyRateSen?: number | null;
+  },
+  ctx: { workingDaysPerMonth: number; calendarDays: number; workingDaysInMonth: number },
+  cfg: PayRulesConfig,
+): number {
+  // A per-day person's day rate is not derived from anything — it IS the
+  // agreed figure (owner 2026-08-31: 「这个是没有 monthly rate 直接 daily rate」).
+  if (isDailyPaidWorker(worker)) return Math.max(0, worker.dailyRateSen ?? 0);
+  return payrollDayRateSen(Math.max(0, worker.basicSalarySen ?? 0), ctx, cfg);
+}
 
 /** True when this person is paid per day worked rather than a monthly salary. */
 export function isDailyPaidWorker(worker: {

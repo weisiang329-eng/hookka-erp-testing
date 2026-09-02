@@ -6558,64 +6558,85 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
                     </td>
                   </tr>
                   {openBill === b.id && (
-                    /* Full bill detail (owner 2026-08-31: 「点开无法看到
-                       detail. 我要看bill 的全部detail」) — the old expander was
-                       a cramped grey list with account CODES only; five
-                       400-0000 lines were indistinguishable. */
+                    /* Full bill detail (owner 2026-08-31: 「我要看bill 的全部
+                       detail」+「做好看一点」) — a voucher-style card: header
+                       strip with status pill, airy lines table with account
+                       NAMES, and a summary column for the money. */
                     <tr className="border-b border-[#F0ECE9] bg-[#FAF8F5]">
-                      <td colSpan={10} className="px-8 py-3">
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-1 text-xs mb-2">
-                          <div><span className="text-[#9CA3AF]">Bill</span> <span className="font-mono">{b.billNo}</span>{b.isOpening ? <span className="ml-1.5 text-[10px] rounded bg-[#F0ECE9] px-1 py-0.5 text-[#6B7280]">OPENING</span> : null}</div>
-                          <div><span className="text-[#9CA3AF]">Party</span> <span className="text-[#1F1D1B]">{b.partyName}</span></div>
-                          <div><span className="text-[#9CA3AF]">Date</span> {b.billDate}</div>
-                          <div><span className="text-[#9CA3AF]">Status</span> {b.status}{(b.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? ` · ${b.lifecycleState}` : ""}</div>
-                          {b.referenceNo ? <div className="col-span-2"><span className="text-[#9CA3AF]">Reference</span> {b.referenceNo}</div> : null}
-                          {b.description ? <div className="col-span-2"><span className="text-[#9CA3AF]">Description</span> {b.description}</div> : null}
-                        </div>
-                        <table className="w-full max-w-3xl text-xs border border-[#E2DDD8] rounded">
-                          <thead>
-                            <tr className="bg-[#F7F4EF] text-[#6B5C32]">
-                              <th className="px-2 py-1 text-left w-8">#</th>
-                              <th className="px-2 py-1 text-left">Account</th>
-                              <th className="px-2 py-1 text-left">Line description</th>
-                              <th className="px-2 py-1 text-right w-28">Amount</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {b.items.map((it, i) => {
-                              const acct = accounts.find((a) => a.code === it.counterAccount);
-                              return (
-                                <tr key={i} className="border-t border-[#F0ECE9]">
-                                  <td className="px-2 py-1 text-[#9CA3AF]">{i + 1}</td>
-                                  <td className="px-2 py-1"><span className="font-mono text-[11px] text-[#9CA3AF] mr-1.5">{it.counterAccount}</span>{acct?.name ?? ""}</td>
-                                  <td className="px-2 py-1">{it.description || <span className="text-[#C7C1BA]">—</span>}</td>
-                                  <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(it.amountSen)}</td>
-                                </tr>
-                              );
-                            })}
-                            {b.taxSen ? (
-                              <tr className="border-t border-[#F0ECE9]">
-                                <td className="px-2 py-1"></td>
-                                <td className="px-2 py-1" colSpan={2}>Tax / SST</td>
-                                <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(b.taxSen)}</td>
-                              </tr>
+                      <td colSpan={10} className="px-6 py-4">
+                        <div className="max-w-4xl rounded-lg border border-[#E2DDD8] bg-white shadow-sm overflow-hidden">
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 bg-[#F7F4EF] border-b border-[#E2DDD8]">
+                            <span className="font-mono text-sm font-semibold text-[#1F1D1B]">{b.billNo}</span>
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${
+                              (b.lifecycleState ?? "ACTIVE") !== "ACTIVE"
+                                ? "bg-[#F0ECE9] text-[#6B7280]"
+                                : b.outstandingSen <= 0
+                                  ? "bg-[#EAF3DE] text-[#27500A]"
+                                  : "bg-[#FBEED9] text-[#9C6F1E]"
+                            }`}>
+                              {(b.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? b.lifecycleState : b.status}
+                            </span>
+                            {b.isOpening ? (
+                              <span className="rounded-full bg-[#F0ECE9] px-2 py-0.5 text-[10px] font-semibold tracking-wide text-[#6B7280]">OPENING</span>
                             ) : null}
-                          </tbody>
-                          <tfoot>
-                            <tr className="border-t-2 border-[#E2DDD8] bg-[#F7F4EF] font-semibold">
-                              <td className="px-2 py-1" colSpan={3}>Total</td>
-                              <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(b.totalSen)}</td>
-                            </tr>
-                            <tr className="text-[#6B7280]">
-                              <td className="px-2 py-1" colSpan={3}>Paid</td>
-                              <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(b.paidAmountSen)}</td>
-                            </tr>
-                            <tr className="text-[#6B7280]">
-                              <td className="px-2 py-1" colSpan={3}>Outstanding</td>
-                              <td className="px-2 py-1 text-right tabular-nums font-medium">{formatCurrency(b.outstandingSen)}</td>
-                            </tr>
-                          </tfoot>
-                        </table>
+                            <span className="text-sm font-medium text-[#1F1D1B]">{b.partyName}</span>
+                            <span className="ml-auto text-xs text-[#6B7280] tabular-nums">{b.billDate}</span>
+                          </div>
+                          {(b.referenceNo || b.description) && (
+                            <div className="flex flex-wrap gap-x-6 gap-y-0.5 px-4 py-2 text-xs text-[#5A5550] border-b border-[#F0ECE9]">
+                              {b.referenceNo ? <span><span className="text-[#9CA3AF] mr-1.5">Reference</span>{b.referenceNo}</span> : null}
+                              {b.description ? <span><span className="text-[#9CA3AF] mr-1.5">Description</span>{b.description}</span> : null}
+                            </div>
+                          )}
+                          <div className="flex flex-col md:flex-row">
+                            <table className="flex-1 text-xs">
+                              <thead>
+                                <tr className="text-[10px] uppercase tracking-wider text-[#6B5C32]">
+                                  <th className="px-4 py-2 text-left w-8 font-semibold">#</th>
+                                  <th className="px-3 py-2 text-left font-semibold">Account</th>
+                                  <th className="px-3 py-2 text-left font-semibold">Line description</th>
+                                  <th className="px-4 py-2 text-right w-32 font-semibold">Amount</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {b.items.map((it, i) => {
+                                  const acct = accounts.find((a) => a.code === it.counterAccount);
+                                  return (
+                                    <tr key={i} className={`border-t border-[#F0ECE9] ${i % 2 === 1 ? "bg-[#FBFAF8]" : ""}`}>
+                                      <td className="px-4 py-1.5 text-[#C7C1BA] tabular-nums">{i + 1}</td>
+                                      <td className="px-3 py-1.5 whitespace-nowrap">
+                                        <span className="font-mono text-[11px] text-[#9CA3AF] mr-1.5">{it.counterAccount}</span>
+                                        <span className="text-[#1F1D1B]">{acct?.name ?? ""}</span>
+                                      </td>
+                                      <td className="px-3 py-1.5 text-[#5A5550]">{it.description || <span className="text-[#C7C1BA]">—</span>}</td>
+                                      <td className="px-4 py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(it.amountSen)}</td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                            <div className="md:w-60 shrink-0 border-t md:border-t-0 md:border-l border-[#E2DDD8] bg-[#FBFAF8] px-4 py-3 space-y-1.5 text-xs">
+                              {b.taxSen ? (
+                                <div className="flex justify-between text-[#6B7280]">
+                                  <span>Tax / SST</span>
+                                  <span className="tabular-nums">{formatCurrency(b.taxSen)}</span>
+                                </div>
+                              ) : null}
+                              <div className="flex justify-between font-semibold text-[#1F1D1B] border-b border-[#E2DDD8] pb-1.5">
+                                <span>Total</span>
+                                <span className="tabular-nums">{formatCurrency(b.totalSen)}</span>
+                              </div>
+                              <div className="flex justify-between text-[#6B7280]">
+                                <span>Paid</span>
+                                <span className="tabular-nums">{formatCurrency(b.paidAmountSen)}</span>
+                              </div>
+                              <div className={`flex justify-between font-semibold ${b.outstandingSen > 0 ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>
+                                <span>Outstanding</span>
+                                <span className="tabular-nums">{formatCurrency(b.outstandingSen)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
                       </td>
                     </tr>
                   )}

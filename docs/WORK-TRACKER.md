@@ -14,6 +14,25 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-09-02 — ✅ 每月银行对账：上传 HLBB PDF 自动对账 + Cash Book 视图重整（bank reco v1）
+
+Owner：「我要做到每个月我upload文件自动对账。你先看清楚再回答我」+（看完别家系统的对账模块，
+inter-contra/多对多先不要）「可以，然后顺便优化正看的咨询amount等等，现在太乱了」。
+① 新 `src/lib/hlbb-statement.ts`：HLBB PrimeBiz PDF 纯前端解析（pdfjs 文字坐标 → 按列右缘分列，
+页脚 Total Deposits 与 Closing Balance 同一行、Rebate Summary 侧栏都处理了）。**三重锁**：
+每行 running balance 连算、期初+Σ入−Σ出=期末、页脚合计/笔数对得上；锁断=整份拒收，绝不吞半份。
+真实 7 月账单 golden 验证：69/69 行、4,286.17→74,618.66、入 270,927.78(6)/出 200,595.29(63)、
+errors=[]。真银行 PDF **不进 repo**——`tests/hlbb-statement.test.mjs` 用合成坐标 fixture。
+② 后端（accounting.ts）：`ensureBankRecoCols` self-apply 三列 `stmt_month/balance_sen/ignored_at`
+（migration 0231/0212 仅为记录）；`POST /bank-reco/import-session` 服务端**复验**合计与期末锁，
+按月重导——matched 行保留、unmatched 行换新；`POST /bank-reco/ignore`（可恢复，不算未达账项）；
+`GET /bank-reco/report`：账单期末 + 未达（书有银无 − 银有书无）= 账面应有数 vs GL，balanced 徽章；
+automatch 升级 **Pass 1 凭证号优先**（statement 描述含我方单号如 HPV-2607-002 + 金额相等即配，
+无视日期差）→ Pass 2 原金额唯一±7天。
+③ Cash Book 视图重做（「现在太乱了」）：From/To 换 **Month 选择 + 「含旧月未配」勾**；
+Upload bank PDF → 预览卡（期初/入/出/期末+警告，确认才导入+自动配）；报表卡；
+金额拆 In/Out 两列正数（不再满屏红色负数）、按日排序、待配两侧表 + Matched/Ignored 折叠区。
+
 ## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
 
 Owner 三点裁决：「2. 我想要分（Opening creditors）」「3. 第三就留着（advance 原样）」

@@ -34,7 +34,11 @@ Entries themselves stay newest-first.
 
 ---
 
-## BUG-2026-09-02-174 — an outsourced worker logged 4 hours against a 9-hour day and was paid the full day `payroll` `outsourced` 🟢
+## BUG-2026-09-02-174b — an outsourced worker logged 4 hours against a 9-hour day and was paid the full day `payroll` `outsourced` 🟢
+
+> id note: originally logged as -174 in the same hour as the bank-reco -174
+> below; renamed with the `b` suffix (zero inbound references) per the
+> duplicate-id convention. Real discovery date unchanged: 2026-09-02.
 
 - **Symptom (owner, 2026-08-31)**: CHAU (OSC-001, RM 85 for a 9-hour day)
   logged **four hours on 17 Aug 2026** and August paid the full RM 85 — 24 days

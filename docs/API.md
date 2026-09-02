@@ -163,7 +163,7 @@ offsets pointing past the end of their own file.
 | `/api/notifications` | `src/api/routes/notifications.ts` | `GET /` <sub>:71</sub><br>`PUT /` <sub>:101</sub> | gated |
 | `/api/payroll` | `src/api/routes/payroll.ts` | `GET /` <sub>:78</sub><br>`POST /` <sub>:125</sub><br>`PUT /` <sub>:145</sub> | gated |
 | `/api/pay-rules` | `src/api/routes/pay-rules.ts` | `GET /` <sub>:48</sub><br>`POST /` <sub>:64</sub><br>`DELETE /:id` <sub>:107</sub> | gated |
-| `/api/payslips` | `src/api/routes/payslips.ts` | `GET /` <sub>:580</sub><br>`GET /projected` <sub>:710</sub><br>`POST /` <sub>:994</sub><br>`PUT /` <sub>:1443</sub><br>`GET /:id` <sub>:1486</sub> | gated |
+| `/api/payslips` | `src/api/routes/payslips.ts` | `GET /` <sub>:584</sub><br>`GET /projected` <sub>:718</sub><br>`POST /` <sub>:1002</sub><br>`PUT /` <sub>:1451</sub><br>`GET /:id` <sub>:1494</sub> | gated |
 | `/api/production-leadtimes` | `src/api/routes/production-leadtimes.ts` | `GET /` <sub>:193</sub><br>`PUT /settings` <sub>:202</sub><br>`PUT /` <sub>:230</sub><br>`POST /recalc-all` <sub>:310</sub><br>`GET /history` <sub>:411</sub><br>`POST /schedule` <sub>:526</sub><br>`DELETE /history/:id` <sub>:602</sub> | gated |
 | `/api/production/leadtimes` | `src/api/routes/production-leadtimes.ts` | `GET /` <sub>:193</sub><br>`PUT /settings` <sub>:202</sub><br>`PUT /` <sub>:230</sub><br>`POST /recalc-all` <sub>:310</sub><br>`GET /history` <sub>:411</sub><br>`POST /schedule` <sub>:526</sub><br>`DELETE /history/:id` <sub>:602</sub> | gated |
 | `/api/production/sync-jobcards-from-bom` | `src/api/routes/jobcard-sync.ts` | `POST /` <sub>:208</sub> | gated |

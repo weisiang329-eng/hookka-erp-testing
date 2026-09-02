@@ -8056,9 +8056,10 @@ async function computeCashflowStatement(
       if (code) grpByCode.set(code, grp);
     }
     // Per-PI material-line weights, computed once per PI and reused across
-    // every payment that touched it.
+    // every payment that touched it. A PI belongs to exactly one supplier, so
+    // the supplier-tagged fallback label is stable under the piId cache key.
     const piWeightCache = new Map<string, Map<string, number>>();
-    const piWeightsFor = async (piId: string): Promise<Map<string, number>> => {
+    const piWeightsFor = async (piId: string, supplier: string): Promise<Map<string, number>> => {
       const hit = piWeightCache.get(piId);
       if (hit) return hit;
       const w = new Map<string, number>();
@@ -8070,9 +8071,10 @@ async function computeCashflowStatement(
         const grp = mc ? grpByCode.get(mc) ?? "" : "";
         // Owner 2026-08-27 「拆散」: one row PER STOCK GROUP, not the four
         // rolled-up lines. The stock-group override map still renames a group
-        // when set; tax rides its own line; a line with no resolvable group
-        // stays unallocated rather than hiding inside "Other".
-        const line = lt === "TAX" ? "SST / TAX" : grp ? (sgOverride[grp] ?? grp) : "Unallocated raw material";
+        // when set; tax rides its own line; a line with no resolvable group is
+        // named by its SUPPLIER (owner 2026-08-31 「这个我也有要分」) so he can
+        // see whose invoice needs a material code — or that it is a service.
+        const line = lt === "TAX" ? "SST / TAX" : grp ? (sgOverride[grp] ?? grp) : `Unallocated — ${supplier}`;
         w.set(line, (w.get(line) ?? 0) + Math.max(0, amt));
       }
       piWeightCache.set(piId, w);
@@ -8087,7 +8089,7 @@ async function computeCashflowStatement(
     const weightsForPayment = async (payNo: string): Promise<Map<string, number>> => {
       const rowsRes = await c.var.DB.prepare(
         `SELECT sp.purchase_invoice_id AS purchase_invoice_id, sp.booked_sen AS booked_sen, sp.amount_sen AS amount_sen,
-                COALESCE(sp.method,'') AS method
+                sp.supplier_name AS supplier_name, COALESCE(sp.method,'') AS method
            FROM supplier_payments sp
           WHERE sp.payment_no = ? AND COALESCE(sp.method,'') <> 'CREDIT_NOTE'`,
       ).bind(payNo).all<Record<string, unknown>>();
@@ -8097,12 +8099,16 @@ async function computeCashflowStatement(
         const piId = String(row.purchaseInvoiceId ?? row.purchase_invoice_id ?? "");
         const booked = Math.max(0, Number(row.bookedSen ?? row.booked_sen ?? row.amountSen ?? row.amount_sen) || 0);
         if (!booked) continue;
+        const supplier = String(row.supplierName ?? row.supplier_name ?? "").trim() || "unknown supplier";
         if (String(row.method ?? "") === "TF_REPAYMENT") { bump("Trade finance repayment", booked); continue; }
         if (!piId) { bump("Supplier advance / deposit", booked); continue; }
-        const w = await piWeightsFor(piId);
+        const w = await piWeightsFor(piId, supplier);
         let totalW = 0;
         for (const v of w.values()) totalW += v;
-        if (!totalW) { bump(piId.startsWith("pi-ob-") ? "Opening creditors settlement" : "Unallocated raw material", booked); continue; }
+        // Owner 2026-08-31 「我想要分」: pre-system opening invoices carry no
+        // item lines, but they DO carry a supplier — one row per supplier
+        // answers 还了谁的旧账 without inventing a material mix.
+        if (!totalW) { bump(piId.startsWith("pi-ob-") ? `Opening creditors — ${supplier}` : `Unallocated — ${supplier}`, booked); continue; }
         for (const [line, lw] of w) bump(line, (booked * lw) / totalW);
       }
       return weights;

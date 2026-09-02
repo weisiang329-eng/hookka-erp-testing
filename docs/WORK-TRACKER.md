@@ -14,6 +14,16 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
+
+Owner 三点裁决：「2. 我想要分（Opening creditors）」「3. 第三就留着（advance 原样）」
+「4. 这个我也有要分（Unallocated）」+「点开无法看到 detail. 我要看 bill 的全部 detail」。
+① 报表：开账旧票/缺料号的钱按**供应商**一家一行（`Opening creditors — SUNMAT`、
+`Unallocated — NLY`——旧票无明细但供应商是真的；缺料号行标出谁家，好补码），advance 行不动；
+weightsForPayment/piWeightsFor 带 supplier，rmLineOrder 加前缀区（15/13）。
+② Bill 展开面板重做：单头（单号/对方/日期/状态/Reference/Description/OPENING 标）+ 行表
+（#/科目码+**科目名**/行描述/金额）+ Tax/Total/Paid/Outstanding——原来五行 400-0000 分不清谁是谁。
+
 ## 2026-08-31 — ✅ Non-Production 卡的 actual 从 payroll 按钟点摊（追加）
 
 Owner：「non-production 的 actual 资料不是能从 payroll 提取出来吗？」——能：payslip 把人整月

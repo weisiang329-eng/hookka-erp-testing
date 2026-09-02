@@ -176,20 +176,23 @@ test("the labour reports no longer skip a worker just because salary is 0", () =
   );
 });
 
-// --- No overtime for per-day people -----------------------------------------
-// Owner 2026-08-02, after checking with HR: 「outsource 暂时没有。暂时我们的算法
-// 就是根据你的日薪（不是时薪，纠正为日薪）去计算。」
+// --- Overtime for per-day people --------------------------------------------
+// AMENDED 2026-08-31. The rule used to be "no overtime", set by the owner on
+// 2026-08-02 after checking with HR: 「outsource 暂时没有」 — 暂时. He asked for
+// it on 2026-08-31: 「也要放 OT rate」, alongside 「跟我们目前的 flow 普通员工一
+// 样，只是他不是放 monthly 薪水而是放 daily 薪水，其他一模一样的」.
 //
-// It already came to zero by accident — every OT rate divides from
-// basicSalarySen, which is 0 for them. An accident is not a rule: put a figure
-// in Basic salary to "fix" a zero and an outsourced person starts earning
-// overtime nobody agreed to. These pin the policy, not the accident.
+// So there is no second formula. The day rate is simply TAKEN rather than
+// derived from a salary, and every rate below it — the hour rate, the dock, the
+// day-typed multipliers — falls out of the identical monthly maths.
 
-test("DAILY earns no OT even with a salary and a multiplier on the record", () => {
+test("DAILY earns OT off the DAY rate, not off a salary it does not have", () => {
   const osc = {
-    ...STAFF,                       // basicSalarySen 205000, otMultiplier 1.5
+    ...STAFF,
+    basicSalarySen: 0,              // the real shape: no monthly salary at all
     payMode: "DAILY",
     dailyRateSen: 8500,
+    otMultiplier: 1.5,
   };
   // Twelve 12-hour days — 3h over the 9h standard day, every day.
   const r = E.computeMonthlyLabor({
@@ -200,9 +203,32 @@ test("DAILY earns no OT even with a salary and a multiplier on the record", () =
     publicHolidays: [],
     absenceThroughDay: "2026-07-31",
   });
-  assert.equal(r.payroll.otPaySen, 0, "no overtime for a per-day worker");
+  // Day rate 8500 -> hour rate 8500 / (9h + 1h lunch) = 850 -> x1.5 = 1275.
+  assert.equal(r.payrollDailyRateSen, 8500, "the agreed rate, taken verbatim");
+  assert.equal(r.otHourlyRateSen, 1275);
+  assert.equal(r.otHours, 36, "3h over, twelve times");
+  assert.equal(r.payroll.otPaySen, Math.round(36 * 1275));
   assert.equal(r.payroll.basicEarnedSen, 12 * 8500);
-  assert.equal(r.payroll.grossSen, 12 * 8500, "gross is days x day rate, nothing else");
+  assert.equal(r.payroll.grossSen, 12 * 8500 + Math.round(36 * 1275));
+});
+
+test("a DAILY worker with NO standard day earns no weekday OT", () => {
+  // Hours/day was hidden for outsourced people until 2026-08-31, so it is 0 on
+  // every existing record. Weekday OT is "hours ABOVE the standard day" — with
+  // no standard day there is nothing to be above, and the old figure stands
+  // until someone fills the field in. That makes the change opt-in per worker
+  // rather than a silent repricing of everyone's history.
+  const osc = {
+    ...STAFF, basicSalarySen: 0, payMode: "DAILY", dailyRateSen: 8500,
+    workingHoursPerDay: 0,
+  };
+  const r = E.computeMonthlyLabor({
+    worker: osc, year: 2026, month: 7,
+    days: WORKING_DAYS.slice(0, 12).map((date) => ({ date, hours: 12 })),
+    publicHolidays: [], absenceThroughDay: "2026-07-31",
+  });
+  assert.equal(r.payroll.otWeekdayPaySen, 0);
+  assert.equal(r.payroll.grossSen, 12 * 8500, "day rate x days, unchanged");
 });
 
 test("DAILY records no ABSENCE — a day not worked is simply not paid", () => {
@@ -239,19 +265,49 @@ test("a MONTHLY worker still earns OT on the very same days", () => {
   );
 });
 
-test("DAILY is not docked for short hours or lateness", () => {
-  // CHAU carries 5 auto short-hour/late rows. Under a day-rate agreement a day
-  // logged is a day paid — and a day rate has no hour rate inside it to dock
-  // FROM. Passing a large dock must change nothing.
-  const osc = { ...STAFF, basicSalarySen: 205000, payMode: "DAILY", dailyRateSen: 8500 };
+test("DAILY IS docked for short hours — the row already existed", () => {
+  // AMENDED 2026-08-31, from the case that prompted it. CHAU (OSC-001, RM 85
+  // for a 9-hour day) logged FOUR hours on 17 Aug 2026 and was paid the full
+  // RM 85. Owner: 「你应该先看他的工作时长，再看他的日薪。如果他没来，是要扣掉
+  // 薪水的」.
+  //
+  // Nothing new had to be DETECTED. The dock row was already in the database —
+  // `Auto: short 5h (from punch)`, written by the same punch rules that dock
+  // everyone else. The engine read it and then threw it away, because the old
+  // rule zeroed it. That is why this is a one-line change and not a feature.
+  const osc = { ...STAFF, basicSalarySen: 0, payMode: "DAILY", dailyRateSen: 8500 };
   const withDock = E.computeMonthlyLabor({
     worker: osc, year: 2026, month: 7,
     days: WORKING_DAYS.slice(0, 25).map((date) => ({ date, hours: 9 })),
     publicHolidays: [], absenceThroughDay: "2026-07-31",
     shortHourDeductionHours: 8,
   });
-  assert.equal(withDock.payroll.shortHourDeductionSen, 0);
-  assert.equal(withDock.payroll.basicEarnedSen, 25 * 8500, "25 days logged, 25 days paid");
+  // 8h short x (8500 / 10) = 6800.
+  assert.equal(withDock.payroll.shortHourDeductionSen, 6800);
+  assert.equal(withDock.payroll.basicEarnedSen, 25 * 8500 - 6800);
+});
+
+test("CHAU August 2026 — the exact case, end to end", () => {
+  // 24 days logged, one of them (17 Aug) only four hours against a nine-hour
+  // day. Paid RM 2,040.00 with nothing docked; the punch had already recorded
+  // the 5-hour shortfall.
+  const osc = { ...STAFF, basicSalarySen: 0, payMode: "DAILY", dailyRateSen: 8500,
+                workingHoursPerDay: 9, otMultiplier: 1.5 };
+  const H = ["2026-08-01","2026-08-03","2026-08-04","2026-08-05","2026-08-06","2026-08-07",
+             "2026-08-08","2026-08-10","2026-08-11","2026-08-12","2026-08-13","2026-08-14",
+             "2026-08-15","2026-08-17","2026-08-18","2026-08-19","2026-08-20","2026-08-21",
+             "2026-08-22","2026-08-25","2026-08-26","2026-08-27","2026-08-28","2026-08-29"];
+  const r = E.computeMonthlyLabor({
+    worker: osc, year: 2026, month: 8,
+    days: H.map((date) => ({ date, hours: date === "2026-08-17" ? 4 : 9 })),
+    publicHolidays: ["2026-08-31"],
+    absenceThroughDay: 31,
+    shortHourDeductionHours: 5,
+  });
+  assert.equal(r.daysWorked, 24);
+  assert.equal(r.payroll.shortHourDeductionSen, 4250, "5h x RM 8.50");
+  assert.equal(r.payroll.grossSen, 199750, "RM 1,997.50, not the RM 2,040.00 paid");
+  assert.equal(r.payroll.absentDays, 0, "a day not worked is simply not paid");
 });
 
 test("a MONTHLY worker IS still docked for short hours", () => {

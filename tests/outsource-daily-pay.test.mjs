@@ -287,6 +287,42 @@ test("DAILY IS docked for short hours — the row already existed", () => {
   assert.equal(withDock.payroll.basicEarnedSen, 25 * 8500 - 6800);
 });
 
+test("the day rate has ONE definition, and the payslip screens use it", () => {
+  // The money was right and the REASON was invisible: CHAU's regenerated August
+  // showed RM 1,997.50 gross with a RM 0.00 deduction beside it, because the
+  // payslip LIST and DETAIL endpoints each re-derived the day rate straight
+  // from basicSalarySen — 0 for an outsourced person, so hourRate was 0.
+  //
+  // A payslip that quietly pays less than the days x rate, and cannot say why,
+  // is worse than one that pays wrong: nobody can check it.
+  assert.equal(typeof E.workerPayrollDayRateSen, "function");
+  const cfg = { dayRateDivisorMode: "fixed26", hourRateDivisorMode: "hoursPlusLunch",
+                lunchMin: 60, fixedHourDivisor: 0 };
+  const ctx = { workingDaysPerMonth: 26, calendarDays: 31, workingDaysInMonth: 26 };
+  // A per-day person: the agreed figure, taken verbatim, salary irrelevant.
+  assert.equal(
+    E.workerPayrollDayRateSen({ basicSalarySen: 0, payMode: "DAILY", dailyRateSen: 8500 }, ctx, cfg),
+    8500,
+  );
+  // Own staff: unchanged — salary / 26.
+  assert.equal(
+    E.workerPayrollDayRateSen({ basicSalarySen: 205000, payMode: "MONTHLY" }, ctx, cfg),
+    205000 / 26,
+  );
+  // And no screen may re-derive it from a salary again.
+  const src = readFileSync("src/api/routes/payslips.ts", "utf8");
+  assert.equal(
+    /payrollDayRateSen\(\s*Number\((?:w|payslip)\.basicSalarySen\)/.test(src),
+    false,
+    "the display sites must go through the shared helper",
+  );
+  assert.equal(
+    (src.match(/workerPayrollDayRateSen\(/g) ?? []).length,
+    2,
+    "both the LIST and the DETAIL endpoint",
+  );
+});
+
 test("CHAU August 2026 — the exact case, end to end", () => {
   // 24 days logged, one of them (17 Aug) only four hours against a nine-hour
   // day. Paid RM 2,040.00 with nothing docked; the punch had already recorded

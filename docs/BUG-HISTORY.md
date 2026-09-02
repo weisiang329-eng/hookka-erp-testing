@@ -96,6 +96,17 @@ match shows "wrong match — undo"); descriptions truncate to one line; the
 Out-by badge states the direction (book above/below bank). Guard:
 `tests/bank-reco-opening-legs.test.mjs` (4 new assertions).
 
+**Follow-up the same hour — the money was right and the REASON was invisible.**
+The regenerated August paid CHAU RM 1,997.50 and showed a **RM 0.00 deduction**
+beside it. The payslip LIST and DETAIL endpoints each re-derived the day rate
+straight from `basicSalarySen`, which is 0 for an outsourced person, so the
+hourly rate was 0 and the dock rendered as nothing. A payslip that quietly pays
+less than days × rate and cannot say why is worse than one that pays wrong —
+nobody can check it. Fixed by exporting `workerPayrollDayRateSen` as the ONE
+definition and routing all three callers through it; a test forbids either
+screen from deriving that rate from a salary again.
+
+
 ## BUG-2026-09-02-173 — opening legs counted as 未达账项 made the reco report blind to the opening figure `accounting` `bank-reco` 🟢
 
 Found while answering the owner's「直接给你5月22号 opening bank balance 可以吗?」

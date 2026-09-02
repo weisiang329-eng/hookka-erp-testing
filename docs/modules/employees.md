@@ -67,7 +67,7 @@ Owns the whole workforce lifecycle: the **employee master** (workers + effective
 | `countPublicHolidaysInMonth` | `src/lib/labor-engine.ts:109` | Holiday count for both divisors |
 | `computeAttendanceDayDetail` | `src/lib/labor-engine.ts:301` | Per-day absence/OT day-type detail |
 | `laborRatePerMinuteSen` | `src/lib/costing.ts:73` | Per-minute rate for product/BOM costing |
-| `computeMonthlyLabor` call sites | `src/api/routes/payslips.ts:855 / 1246` | Projected (all) + generate (per worker) |
+| `computeMonthlyLabor` call sites | `src/api/routes/payslips.ts:863 / 1254` | Projected (all) + generate (per worker) |
 | `calcStatutory` / `buildDayDetailForPeriod` | `src/api/routes/payslips.ts:295 / 480` | EPF/SOCSO/EIS/PCB + per-day detail |
 | `POST /login` / `resolveWorkerToken` | `src/api/routes/worker-auth.ts:124 / 337` | PIN login + token resolution |
 | `getWorker` (token gate) | `src/api/routes/worker.ts:160` | X-Worker-Token → ACTIVE worker or 401/403 |

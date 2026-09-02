@@ -10206,9 +10206,9 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                           {s.txnDate}
                           {earlier && <span className="ml-1 rounded bg-[#F0ECE9] px-1 text-[10px]">earlier</span>}
                         </td>
-                        <td className="px-3 py-1.5 text-xs"><div className="max-w-[420px] truncate" title={s.description ?? ""}>{s.description}</div></td>
-                        <td className="px-3 py-1.5 text-right tabular-nums">{tdIn(s.amountSen)}</td>
-                        <td className="px-3 py-1.5 text-right tabular-nums">{tdOut(s.amountSen)}</td>
+                        <td className="px-3 py-1.5 text-xs w-full max-w-0"><div className="truncate" title={s.description ?? ""}>{s.description}</div></td>
+                        <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1.5 text-right whitespace-nowrap">
                           {candidates.length > 0 ? (
                             <select defaultValue="" onChange={(e) => handleMatch(s.id, e.target.value)} className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] max-w-40">
@@ -10252,9 +10252,9 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   {unmatchedLegs.map((l) => (
                     <tr key={l.id} className="border-b border-[#F0ECE9]">
                       <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{l.day}</td>
-                      <td className="px-3 py-1.5 text-xs"><div className="max-w-[420px] truncate" title={l.description}>{l.description}</div></td>
-                      <td className="px-3 py-1.5 text-right tabular-nums">{tdIn(l.amountSen)}</td>
-                      <td className="px-3 py-1.5 text-right tabular-nums">{tdOut(l.amountSen)}</td>
+                      <td className="px-3 py-1.5 text-xs w-full max-w-0"><div className="truncate" title={l.description}>{l.description}</div></td>
+                      <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdIn(l.amountSen)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdOut(l.amountSen)}</td>
                     </tr>
                   ))}
                   {unmatchedLegs.length === 0 && (
@@ -10278,9 +10278,9 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     {matchedStmt.map((s) => (
                       <tr key={s.id} className="border-b border-[#F0ECE9] bg-[#EAF3DE]/30">
                         <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
-                        <td className="px-3 py-1 text-xs"><div className="max-w-[420px] truncate" title={s.description ?? ""}>{s.description}</div></td>
-                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdIn(s.amountSen)}</td>
-                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdOut(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-xs w-full max-w-0"><div className="truncate" title={s.description ?? ""}>{s.description}</div></td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right whitespace-nowrap">
                           <button onClick={() => handleUnmatch(s.id)} className="text-[#6B7280] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">✓ unmatch</button>
                         </td>
@@ -10302,9 +10302,9 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     {preStmt.map((s) => (
                       <tr key={s.id} className="border-b border-[#F0ECE9] opacity-60">
                         <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
-                        <td className="px-3 py-1 text-xs"><div className="max-w-[420px] truncate" title={s.description ?? ""}>{s.description}</div></td>
-                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdIn(s.amountSen)}</td>
-                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdOut(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-xs w-full max-w-0"><div className="truncate" title={s.description ?? ""}>{s.description}</div></td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right whitespace-nowrap">
                           {s.matchedLegId ? (
                             <button onClick={() => handleUnmatch(s.id)} className="text-[#9A3A2D] hover:text-[#1F1D1B] text-[11px] underline decoration-dotted cursor-pointer" title="This match double-counts money that is already in the opening balance — unmatch it">wrong match — undo</button>
@@ -10328,9 +10328,9 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     {ignoredStmt.map((s) => (
                       <tr key={s.id} className="border-b border-[#F0ECE9] opacity-60">
                         <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
-                        <td className="px-3 py-1 text-xs"><div className="max-w-[420px] truncate" title={s.description ?? ""}>{s.description}</div></td>
-                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdIn(s.amountSen)}</td>
-                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdOut(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-xs w-full max-w-0"><div className="truncate" title={s.description ?? ""}>{s.description}</div></td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right whitespace-nowrap">
                           <button onClick={() => handleIgnore(s.id, false)} className="text-[#6B7280] hover:text-[#27500A] text-[11px] underline decoration-dotted cursor-pointer">restore</button>
                         </td>

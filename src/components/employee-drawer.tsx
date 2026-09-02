@@ -358,14 +358,18 @@ export function EmployeeDrawer({
                 )}
               </>
             )}
-            {/* Basic salary, hours/day and days/month are the MONTHLY model:
-                a salary, the standard day it buys, and the divisor between
-                them. None of the three means anything for someone paid per day
-                — the day rate above is the whole of their pay. Owner
-                2026-08-02: 「大家不需要去看他的 basic hours 和 days，他是根据他的
-                daywork（85 块一天）来计算的。」 Showing them invites someone to
-                "fix" the zeroes and put a phantom salary on an outsourced
-                person. */}
+            {/* Basic salary and days/month are the MONTHLY model and mean
+                nothing for someone paid per day — the day rate above is the
+                whole of their pay, and showing a salary field invites someone
+                to "fix" the zero and put a phantom salary on an outsourced
+                person (owner 2026-08-02).
+
+                HOURS/DAY IS DIFFERENT, and was wrongly hidden with them until
+                2026-08-31. It is not part of the monthly model: it is the
+                standard day — the thing a short day falls short OF and
+                overtime goes above. Without it CHAU logged four hours against
+                a nine-hour day and was paid the full RM 85. Owner: 「你应该先看
+                他的工作时长，再看他的日薪」. It now sits outside this block. */}
             {draft.payMode !== "DAILY" && (
               <>
                 <Field label="Basic salary (RM)">
@@ -375,15 +379,6 @@ export function EmployeeDrawer({
                     onChange={(e) =>
                       set("basicSalarySen", moneyFieldToSen(e.target.value) ?? draft.basicSalarySen)
                     }
-                    className="mt-0.5 h-8 text-xs"
-                  />
-                </Field>
-                <Field label="Hours / day" hint="Their standard day — also the OT threshold.">
-                  <Input
-                    type="number"
-                    step="0.5"
-                    value={draft.workingHoursPerDay}
-                    onChange={(e) => set("workingHoursPerDay", parseFloat(e.target.value) || 0)}
                     className="mt-0.5 h-8 text-xs"
                   />
                 </Field>
@@ -397,10 +392,21 @@ export function EmployeeDrawer({
                 </Field>
               </>
             )}
-            {/* No overtime for per-day people (owner 2026-08-02, confirmed with
-                HR: 「outsource 暂时没有」). The multiplier has nothing to
-                multiply, so showing it only suggests it does something. */}
-            {draft.payMode !== "DAILY" && (
+            <Field
+              label="Hours / day"
+              hint="Their standard day — the OT threshold, and what a short day is short of."
+            >
+              <Input
+                type="number"
+                step="0.5"
+                value={draft.workingHoursPerDay}
+                onChange={(e) => set("workingHoursPerDay", parseFloat(e.target.value) || 0)}
+                className="mt-0.5 h-8 text-xs"
+              />
+            </Field>
+            {/* Overtime for per-day people was added 2026-08-31 (「也要放 OT
+                rate」), so the multiplier now means something for them too. */}
+            {(
               <Field label="OT multiplier">
                 <Input
                   type="number"

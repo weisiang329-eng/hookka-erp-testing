@@ -666,16 +666,34 @@ export function computeMonthlyLabor(
   // The payroll DAY rate under the configured divisor mode (owner 2026-06-11:
   // ÷26 / ÷calendar days / ÷actual working days — a dropdown choice now).
   // Default "fixed26" = salary ÷ workingDaysPerMonth, the unified rate.
+  // Is this an outsourced / per-day person? Hoisted above the DAY RATE, which
+  // now branches on it (2026-08-31) — the cost side and the pay side both read
+  // it, so it has to be settled before either.
+  const isDailyPaid =
+    (worker.payMode ?? "MONTHLY") === "DAILY" && (worker.dailyRateSen ?? 0) > 0;
+
   // Month-level (resolved at month end), like the absence dock it prices.
-  const payrollDailyRateSen = payrollDayRateSen(
-    basicSalarySen,
-    {
-      workingDaysPerMonth,
-      calendarDays: daysInMonth,
-      workingDaysInMonth: costingDivisor,
-    },
-    cfgMonthEnd,
-  );
+  //
+  // Owner 2026-08-31: 「简单来说就是跟我们目前的 flow 普通员工一样，只是他不是放
+  // monthly 薪水而是放 daily 薪水，其他一模一样的。你也是用 monthly 薪水来计算
+  // daily rate 的，这个是没有 monthly rate 直接 daily rate。」
+  //
+  // So an outsourced person takes the SAME road as everyone else; the only
+  // difference is where the day rate comes from. A monthly worker's is
+  // salary ÷ 26; theirs is simply the agreed figure. Everything downstream —
+  // the hour rate, the short-hour dock, the day-typed overtime — then falls out
+  // of the identical formulas instead of needing a parallel set.
+  const payrollDailyRateSen = isDailyPaid
+    ? Math.max(0, worker.dailyRateSen ?? 0)
+    : payrollDayRateSen(
+        basicSalarySen,
+        {
+          workingDaysPerMonth,
+          calendarDays: daysInMonth,
+          workingDaysInMonth: costingDivisor,
+        },
+        cfgMonthEnd,
+      );
   // Hourly divisor (owner 2026-06-11): default = the worker's OWN day span —
   // daily hours + lunch (9h + 1h = ÷10; 7.5h → ÷8.5); mode can switch it to
   // hours-only or a fixed number. No hours set → rateHoursPerDay fallback.
@@ -688,10 +706,6 @@ export function computeMonthlyLabor(
   // Unified ÷26 (owner 2026-06-11): the late/short hourly rate uses the SAME
   // ÷26 base as OT (was ÷calendar÷10).
   const lateHourlyRateSen = otBaseHourlyRateSen;
-  // Is this an outsourced / per-day person? Hoisted above the costing rate
-  // because the COST side needs it too, not just the pay side further down.
-  const isDailyPaid =
-    (worker.payMode ?? "MONTHLY") === "DAILY" && (worker.dailyRateSen ?? 0) > 0;
   // Production cost per day worked. A monthly worker's day costs their salary
   // spread over the month's working days; a daily worker's day costs exactly
   // the agreed day rate — that IS their cost, and it does not depend on a
@@ -768,16 +782,17 @@ export function computeMonthlyLabor(
   // Owner-flagged / punch-derived unworked hours dock at (salary ÷ 26) ÷ the
   // effective-dated hour divisor — the same RM7.88/h base the OT rate uses.
   const shortHourDeductionHours = Math.max(0, input.shortHourDeductionHours || 0);
-  // No hourly docking for a per-day worker. Owner 2026-08-02: 「打卡了几天，就会
-  // 算几天的薪水」 and 「根据你的日薪…去计算」. A day rate has no hour rate inside
-  // it to dock FROM — the deduction would be priced off basicSalarySen, which
-  // they do not have. CHAU carries 5 auto short-hour/late rows (16 min late on
-  // 06-29, 0.75h short on 07-09); under a day-rate agreement those do not
-  // reduce the day. Like the OT rule, this already came to zero because the
-  // hourly rate is zero — and like the OT rule, an accident is not a rule.
-  const shortHourDeductionSen = isDailyPaid
-    ? 0
-    : Math.round(shortHourDeductionHours * lateHourlyRateSen);
+  // Short-hour docks apply to per-day people too (owner 2026-08-31, from a real
+  // case: CHAU logged FOUR hours on 17 Aug against a 9-hour day and was paid the
+  // full RM 85 — 「如果他没来，是要扣掉薪水的」).
+  //
+  // Nothing new had to be detected. The row was already there —
+  // `Auto: short 5h (from punch)` on 2026-08-17 — written by the same punch
+  // rules that dock everyone else. The engine collected it and then threw it
+  // away here, because the old rule zeroed it and the hourly rate was 0 anyway
+  // (it divided from a salary they do not have). With the day rate now taken
+  // directly, that hourly rate is real and the existing dock simply lands.
+  const shortHourDeductionSen = Math.round(shortHourDeductionHours * lateHourlyRateSen);
   // Daily: rate x days actually worked. There is no absence line to subtract —
   // a day not worked simply is not paid.
   // Deliberately `daysWorked`, NOT `workedWithinWindow`. The latter is clamped
@@ -786,7 +801,10 @@ export function computeMonthlyLabor(
   // that falls outside that window would be worked and then not paid for. For
   // daily pay the rule is simply "days logged, days paid".
   const basicEarnedSen = isDailyPaid
-    ? Math.max(0, Math.round(daysWorked * (worker.dailyRateSen ?? 0)))
+    ? Math.max(
+        0,
+        Math.round(daysWorked * (worker.dailyRateSen ?? 0)) - shortHourDeductionSen,
+      )
     : Math.max(
         0,
         Math.max(0, basicSalarySen - absenceDeductionSen) - shortHourDeductionSen,
@@ -795,16 +813,18 @@ export function computeMonthlyLabor(
   // weekday-only worker is byte-identical to before; Sunday/holiday use the fixed
   // 2×/3× on the base rate. Each bucket is rounded, then summed → otPaySen.
   //
-  // Outsourced / per-day people get NO overtime. Owner 2026-08-02, after asking
-  // HR: 「outsource 暂时没有。暂时我们的算法就是根据你的日薪…去计算。」 It is a
-  // POLICY, stated explicitly here rather than left to fall out of the
-  // arithmetic. It already came to zero by accident — every OT rate divides
-  // from basicSalarySen, which is 0 for them — but an accident is not a rule:
-  // the moment someone puts a figure in Basic salary to "fix" a zero, an
-  // outsourced person would start earning overtime nobody agreed to.
-  const otWeekdayPaySen = isDailyPaid ? 0 : Math.round(otWeekdayPayExact);
-  const otSundayPaySen = isDailyPaid ? 0 : Math.round(otSundayPayExact);
-  const otHolidayPaySen = isDailyPaid ? 0 : Math.round(otHolidayPayExact);
+  // Outsourced people now earn overtime too. Owner 2026-08-02 wrote the
+  // original rule as 「outsource 暂时没有」 — 暂时 — and on 2026-08-31 asked for
+  // it: 「也要放 OT rate」.
+  //
+  // No separate formula: the rates above already divide from
+  // payrollDailyRateSen, which for a per-day person IS their agreed day rate.
+  // Weekday OT still needs a standard day to be ABOVE, so it stays zero until
+  // Hours/day is set on the worker — while Sunday and public-holiday hours are
+  // premium from the first hour and apply at once, exactly as for own staff.
+  const otWeekdayPaySen = Math.round(otWeekdayPayExact);
+  const otSundayPaySen = Math.round(otSundayPayExact);
+  const otHolidayPaySen = Math.round(otHolidayPayExact);
   const otPaySen = otWeekdayPaySen + otSundayPaySen + otHolidayPaySen;
   const grossSen = basicEarnedSen + otPaySen;
 

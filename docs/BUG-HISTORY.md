@@ -34,6 +34,41 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-08-31-170 — an outsourced worker logged 4 hours against a 9-hour day and was paid the full day `payroll` `outsourced` 🟢
+
+- **Symptom (owner, 2026-08-31)**: CHAU (OSC-001, RM 85 for a 9-hour day)
+  logged **four hours on 17 Aug 2026** and August paid the full RM 85 — 24 days
+  × RM 85 = RM 2,040.00, nothing docked. 「你应该先看他的工作时长，再看他的日
+  薪。如果他没来，是要扣掉薪水的」.
+- **Nothing had to be DETECTED.** The dock row was already in the database —
+  `payroll_hour_deductions`: `2026-08-17 · 5h · "Auto: short 5h (from punch)"`,
+  written by the same punch rules that dock everyone else. `computeMonthlyLabor`
+  read it and then **threw it away**: `shortHourDeductionSen = isDailyPaid ? 0
+  : …`. The old rule (owner 2026-08-02) was 「打卡了几天，就会算几天的薪水」, and
+  it was safe only because the hourly rate divided from `basicSalarySen`, which
+  is 0 for an outsourced person.
+- **The shape of the fix comes from the owner's own framing**: 「跟我们目前的
+  flow 普通员工一样，只是他不是放 monthly 薪水而是放 daily 薪水，其他一模一样
+  的。你也是用 monthly 薪水来计算 daily rate 的，这个是没有 monthly rate 直接
+  daily rate。」 So there is **no second formula**: `payrollDailyRateSen` is
+  simply TAKEN for a per-day person instead of derived as salary ÷ 26, and every
+  rate below it — the hour rate, the short-hour dock, the day-typed overtime —
+  falls out of the identical monthly maths. The first attempt at this was a
+  bespoke pro-rate branch; it was thrown away when the owner said "identical".
+- **Overtime too** (「也要放 OT rate」), reversing the 2026-08-02 「outsource 暂时
+  没有」 — 暂时. Priced off the day rate: RM 85 ÷ (9h + 1h lunch) = RM 8.50/h,
+  × 1.5 = RM 12.75.
+- **`Hours / day` was hidden for outsourced people** and is 0 on every existing
+  record. It was hidden with Basic salary and Days/month as "the monthly model",
+  but it is not part of that model — it is the standard day a short day falls
+  short OF and overtime goes above. Now shown. Weekday OT stays 0 until it is
+  filled in, so the change is **opt-in per worker** rather than a silent
+  repricing of history.
+- **Measured**: CHAU August RM 2,040.00 → **RM 1,997.50** (5h × RM 8.50).
+- **Regression**: `tests/outsource-daily-pay.test.mjs` — the two tests that
+  pinned the OLD policy were rewritten rather than deleted, each carrying the
+  date and the quote that changed it, plus CHAU's August as an end-to-end case.
+
 ## BUG-2026-08-28-169 — a price-list refresh would have written per-BOX prices into a per-PIECE list `procurement` `money` 🟢
 
 🟢 Caught on the FIRST production dry run, before anything was written.

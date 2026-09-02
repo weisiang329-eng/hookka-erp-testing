@@ -12152,6 +12152,15 @@ app.post("/bank-reco/match", async (c) => {
         400,
       );
     }
+    // Self-heal: a match stored on a PRE-OPENING line is void for every read,
+    // but it still occupied the leg here and blocked re-matching with
+    // "already matched" (BUG-2026-09-02-175). Clear the account's void claims
+    // before checking whether the leg is taken.
+    if (obDateM) {
+      await c.var.DB.prepare(
+        "UPDATE bank_statement_lines SET matchedLegId = NULL, matchedAt = NULL WHERE accountCode = ? AND matchedLegId IS NOT NULL AND txnDate < ?",
+      ).bind(line.accountCode, obDateM).run();
+    }
     const taken = await c.var.DB.prepare(
       "SELECT id FROM bank_statement_lines WHERE matchedLegId = ? LIMIT 1",
     )
@@ -12210,6 +12219,14 @@ app.post("/bank-reco/automatch", async (c) => {
       equivalents = [account];
     }
     const marks = equivalents.map(() => "?").join(",");
+    // Self-heal void claims before reading state: a match stored on a
+    // pre-opening line blocks its leg forever (BUG-2026-09-02-175).
+    const obDateSweep = await getOpeningDate(c.var.DB);
+    if (obDateSweep) {
+      await c.var.DB.prepare(
+        "UPDATE bank_statement_lines SET matchedLegId = NULL, matchedAt = NULL WHERE accountCode = ? AND matchedLegId IS NOT NULL AND txnDate < ?",
+      ).bind(account, obDateSweep).run();
+    }
     const [legRes, lineRes, matchedRes] = await Promise.all([
       c.var.DB.prepare(
         `SELECT id, sourceId, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries

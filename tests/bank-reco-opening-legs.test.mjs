@@ -82,3 +82,22 @@ test("GET /bank-reco only flags legs matched by post-opening lines", () => {
   const body = handler('app.get("/bank-reco", async (c) => {');
   assert.match(body, /if \(!obDateBr \|\| r\.txnDate >= obDateBr\) matchedLegIds\.add/);
 });
+
+// BUG-2026-09-02-175 — a void claim (match stored on a pre-opening line) is
+// invisible to every read but still occupied the leg in the WRITE path: the
+// owner's first manual match after the 174 fix bounced with "already matched".
+// Both write paths sweep the account's void claims before acting.
+const SWEEP = /UPDATE bank_statement_lines SET matchedLegId = NULL, matchedAt = NULL WHERE accountCode = \? AND matchedLegId IS NOT NULL AND txnDate < \?/;
+
+test("manual match sweeps void pre-opening claims before the taken check", () => {
+  const body = handler('app.post("/bank-reco/match", async (c) => {');
+  assert.match(body, SWEEP);
+  // The sweep must run BEFORE the taken check reads the table.
+  assert.ok(body.search(SWEEP) < body.indexOf("already matched to another statement line"));
+});
+
+test("automatch sweeps void pre-opening claims before reading state", () => {
+  const body = handler('app.post("/bank-reco/automatch", async (c) => {');
+  assert.match(body, SWEEP);
+  assert.ok(body.search(SWEEP) < body.indexOf("Promise.all"));
+});

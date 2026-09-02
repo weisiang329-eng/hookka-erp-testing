@@ -34,6 +34,25 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-09-02-175 — a void pre-opening match still occupied the leg in the write path `accounting` `bank-reco` 🟢
+
+Minutes after the 174 fix shipped, the owner picked HPV-2605-018 in the
+"match to…" dropdown for the restored GVP 950.00 line and got "This ledger
+leg is already matched to another statement line". The 174 fix voided
+matches stored on pre-opening lines for every READ (list, automatch
+candidates, report) — but the manual-match endpoint's taken check queries
+the raw table, where the stale claim still sat. The leg was simultaneously
+"open" on screen and "taken" on write.
+
+Fix ([accounting.ts](../src/api/routes/accounting.ts)): both write paths
+self-heal — POST /bank-reco/match and /bank-reco/automatch first clear the
+account's matches held by pre-opening lines (they are void by definition),
+then proceed. Side benefit: the four "wrong match — undo" rows clean
+themselves on the next match/automatch, no clicks needed. Same PR: the two
+reconciliation tables stack vertically at full width (owner: 「就不能上下
+吗？」— the side-by-side grid still forced horizontal scrolling on his
+screen). Guard: `tests/bank-reco-opening-legs.test.mjs` (+2 assertions).
+
 ## BUG-2026-09-02-174b — an outsourced worker logged 4 hours against a 9-hour day and was paid the full day `payroll` `outsourced` 🟢
 
 > id note: originally logged as -174 in the same hour as the bank-reco -174

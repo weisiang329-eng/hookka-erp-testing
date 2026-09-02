@@ -45,7 +45,10 @@ automatch 可能按金额误抓开账腿。修：`isOpeningSource` 腿三处排�
 = 4 笔开账后真支出被 ignore −9,183.84 − 4 条开账前银行行被错配 −2,235.00，拆到分）：开账月里
 22/05 前的银行行本属开账数，系统却当普通行。修：match 拒收 / automatch 跳过 / report 作废其配对
 + 不计未达 / GET 回 openingDate；UI 新「Before opening」折叠区（错配行带 undo）、描述截一行、
-Out by 徽章标方向（book above/below bank）。
+Out by 徽章标方向（book above/below bank）。owner restore 4 笔后 5 月 **0.00 Balanced ✓**（量证）。
+⑥ 紧跟 **BUG-175**：作废的开账前配对在写路径仍占着腿——owner 手配 GVP 950→HPV-2605-018 被顶
+「already matched」。修：match/automatch 动手前先清本账户开账前的作废占用（自愈，4 条 undo 行
+免点）；同 PR 把两张对账表改**上下直排全宽**（owner「就不能上下吗？」——左右并排在他屏上仍横滚）。
 
 ## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
 

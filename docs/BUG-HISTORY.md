@@ -69,6 +69,29 @@ Entries themselves stay newest-first.
   pinned the OLD policy were rewritten rather than deleted, each carrying the
   date and the quote that changed it, plus CHAU's August as an end-to-end case.
 
+## BUG-2026-09-02-174 — pre-opening statement lines treated as reconcilable `accounting` `bank-reco` 🟢
+
+Owner uploaded the May'26 statement (the opening month: statement covers
+01–31/05, the books start 22/05) and could not tally: "Out by −RM 6,948.84".
+Measured composition, exact to the sen: he had to hand-ignore 23 pre-opening
+bank lines (their money is inside the keyed opening balance 4,742.72), FOUR
+pre-opening lines got matched to 22/05-keyed book legs (−2,235.00 — each
+match pairs a bank movement that is inside the opening with a post-opening
+book leg, a double count), and in the confusion four REAL post-opening
+outflows were ignored (−9,183.84: JomPAY 152.25, petty cash 6,521.59, Big
+Green 1,560.00, GVP 950.00). −9,183.84 − (−2,235.00) = −6,948.84.
+
+Fix ([accounting.ts](../src/api/routes/accounting.ts)): statement lines dated
+before kv `opening_date` are floored everywhere — POST /bank-reco/match
+refuses them, automatch skips them, the report voids stored matches on them
+and excludes them from unbookedStmt, and GET /bank-reco flags a leg matched
+only when its line is post-opening (response now carries `openingDate`). UI:
+pre-opening lines live in their own collapsed "Before opening — already
+inside the opening balance" section (no ignore/match actions; a stored wrong
+match shows "wrong match — undo"); descriptions truncate to one line; the
+Out-by badge states the direction (book above/below bank). Guard:
+`tests/bank-reco-opening-legs.test.mjs` (4 new assertions).
+
 ## BUG-2026-09-02-173 — opening legs counted as 未达账项 made the reco report blind to the opening figure `accounting` `bank-reco` 🟢
 
 Found while answering the owner's「直接给你5月22号 opening bank balance 可以吗?」

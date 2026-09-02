@@ -6558,17 +6558,64 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
                     </td>
                   </tr>
                   {openBill === b.id && (
+                    /* Full bill detail (owner 2026-08-31: 「点开无法看到
+                       detail. 我要看bill 的全部detail」) — the old expander was
+                       a cramped grey list with account CODES only; five
+                       400-0000 lines were indistinguishable. */
                     <tr className="border-b border-[#F0ECE9] bg-[#FAF8F5]">
-                      <td colSpan={10} className="px-8 py-2">
-                        <div className="text-xs text-[#6B7280] space-y-0.5">
-                          {b.items.map((it, i) => (
-                            <div key={i} className="flex justify-between max-w-md">
-                              <span>{it.counterAccount}{it.description ? ` · ${it.description}` : ""}</span>
-                              <span className="tabular-nums">{formatCurrency(it.amountSen)}</span>
-                            </div>
-                          ))}
-                          {b.taxSen ? <div className="flex justify-between max-w-md border-t border-[#E2DDD8] mt-0.5 pt-0.5"><span>Tax / SST</span><span className="tabular-nums">{formatCurrency(b.taxSen)}</span></div> : null}
+                      <td colSpan={10} className="px-8 py-3">
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-1 text-xs mb-2">
+                          <div><span className="text-[#9CA3AF]">Bill</span> <span className="font-mono">{b.billNo}</span>{b.isOpening ? <span className="ml-1.5 text-[10px] rounded bg-[#F0ECE9] px-1 py-0.5 text-[#6B7280]">OPENING</span> : null}</div>
+                          <div><span className="text-[#9CA3AF]">Party</span> <span className="text-[#1F1D1B]">{b.partyName}</span></div>
+                          <div><span className="text-[#9CA3AF]">Date</span> {b.billDate}</div>
+                          <div><span className="text-[#9CA3AF]">Status</span> {b.status}{(b.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? ` · ${b.lifecycleState}` : ""}</div>
+                          {b.referenceNo ? <div className="col-span-2"><span className="text-[#9CA3AF]">Reference</span> {b.referenceNo}</div> : null}
+                          {b.description ? <div className="col-span-2"><span className="text-[#9CA3AF]">Description</span> {b.description}</div> : null}
                         </div>
+                        <table className="w-full max-w-3xl text-xs border border-[#E2DDD8] rounded">
+                          <thead>
+                            <tr className="bg-[#F7F4EF] text-[#6B5C32]">
+                              <th className="px-2 py-1 text-left w-8">#</th>
+                              <th className="px-2 py-1 text-left">Account</th>
+                              <th className="px-2 py-1 text-left">Line description</th>
+                              <th className="px-2 py-1 text-right w-28">Amount</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {b.items.map((it, i) => {
+                              const acct = accounts.find((a) => a.code === it.counterAccount);
+                              return (
+                                <tr key={i} className="border-t border-[#F0ECE9]">
+                                  <td className="px-2 py-1 text-[#9CA3AF]">{i + 1}</td>
+                                  <td className="px-2 py-1"><span className="font-mono text-[11px] text-[#9CA3AF] mr-1.5">{it.counterAccount}</span>{acct?.name ?? ""}</td>
+                                  <td className="px-2 py-1">{it.description || <span className="text-[#C7C1BA]">—</span>}</td>
+                                  <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(it.amountSen)}</td>
+                                </tr>
+                              );
+                            })}
+                            {b.taxSen ? (
+                              <tr className="border-t border-[#F0ECE9]">
+                                <td className="px-2 py-1"></td>
+                                <td className="px-2 py-1" colSpan={2}>Tax / SST</td>
+                                <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(b.taxSen)}</td>
+                              </tr>
+                            ) : null}
+                          </tbody>
+                          <tfoot>
+                            <tr className="border-t-2 border-[#E2DDD8] bg-[#F7F4EF] font-semibold">
+                              <td className="px-2 py-1" colSpan={3}>Total</td>
+                              <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(b.totalSen)}</td>
+                            </tr>
+                            <tr className="text-[#6B7280]">
+                              <td className="px-2 py-1" colSpan={3}>Paid</td>
+                              <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(b.paidAmountSen)}</td>
+                            </tr>
+                            <tr className="text-[#6B7280]">
+                              <td className="px-2 py-1" colSpan={3}>Outstanding</td>
+                              <td className="px-2 py-1 text-right tabular-nums font-medium">{formatCurrency(b.outstandingSen)}</td>
+                            </tr>
+                          </tfoot>
+                        </table>
                       </td>
                     </tr>
                   )}

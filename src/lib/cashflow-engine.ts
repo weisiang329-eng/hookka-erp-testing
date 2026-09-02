@@ -119,8 +119,13 @@ export function rawMaterialLineFor(
 // "Unallocated raw material" always last.
 export function rmLineOrder(line: string): number {
   if (line === "Unallocated raw material") return 99;
+  // Per-supplier unresolved rows (owner 2026-08-31 「这个我也有要分」) sit
+  // just above the absolute-residual line.
+  if (line.startsWith("Unallocated — ")) return 15;
   if (line === "Supplier advance / deposit") return 14;
-  if (line === "Opening creditors settlement") return 13;
+  // "Opening creditors settlement" and the per-supplier "Opening creditors —
+  // X" rows (owner 2026-08-31 「我想要分」) share the same slot.
+  if (line.startsWith("Opening creditors")) return 13;
   if (line === "Trade finance repayment" || line.endsWith("(other creditor)") || line.startsWith("Suppliers settled via ")) return 12;
   if (line === "SST / TAX") return 11;
   return 10;

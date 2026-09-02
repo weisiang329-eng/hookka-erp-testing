@@ -298,3 +298,10 @@ test("buildStatement — rmSplit keyed sourceId@account overrides the plain key"
   assert.equal(val("Suppliers settled via X"), 6000);
   assert.equal(val("fallback line"), 4000);
 });
+
+test("rmLineOrder — per-supplier opening/unallocated rows keep their zones", () => {
+  assert.equal(cf.rmLineOrder("Opening creditors — SUNMAT INDUSTRIES SDN. BHD"), 13);
+  assert.equal(cf.rmLineOrder("Unallocated — NLY SDN BHD"), 15);
+  assert.ok(cf.rmLineOrder("Supplier advance / deposit") < cf.rmLineOrder("Unallocated — NLY SDN BHD"));
+  assert.ok(cf.rmLineOrder("Unallocated — NLY SDN BHD") < cf.rmLineOrder("Unallocated raw material"));
+});

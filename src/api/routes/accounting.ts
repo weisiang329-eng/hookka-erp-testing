@@ -12061,6 +12061,17 @@ app.get("/bank-reco", async (c) => {
   } catch {
     migrationMissing = true;
   }
+  // Which months are already finalised — drives the ✓ chips and the locked UI.
+  let finalizedMonths: string[] = [];
+  try {
+    const fRows = await c.var.DB.prepare(
+      "SELECT key FROM kv_config WHERE key LIKE ?",
+    ).bind(`bank_reco_final:${account}:%`).all<{ key: string }>();
+    finalizedMonths = (fRows.results ?? [])
+      .map((r) => String(r.key).slice(`bank_reco_final:${account}:`.length))
+      .filter((m) => /^\d{4}-\d{2}$/.test(m))
+      .sort();
+  } catch { finalizedMonths = []; }
   return c.json({
     success: true,
     data: {
@@ -12069,6 +12080,7 @@ app.get("/bank-reco", async (c) => {
       to: to === "9999-12-31" ? null : to,
       openingDate: obDateBr ?? null,
       migrationMissing,
+      finalizedMonths,
       legs: legs.map((l) => ({ ...l, matched: matchedLegIds.has(l.id) })),
       statementLines: stmtLines,
     },
@@ -12129,6 +12141,9 @@ app.post("/bank-reco/match", async (c) => {
       .first<{ id: string; accountCode: string; txnDate: string; amountSen: number; matchedLegId: string | null }>();
     if (!line) return c.json({ success: false, error: "Statement line not found" }, 404);
     if (line.matchedLegId) return c.json({ success: false, error: "Line already matched" }, 400);
+    if (await bankRecoMonthFinalized(c.var.DB, line.accountCode, line.txnDate)) {
+      return c.json({ success: false, error: BANK_RECO_FINALIZED_ERR }, 400);
+    }
     // Pre-opening bank movements are already inside the keyed opening balance
     // — matching one to a book leg double-counts it (BUG-2026-09-02-174).
     const obDateM = await getOpeningDate(c.var.DB);
@@ -12184,6 +12199,13 @@ app.post("/bank-reco/unmatch", async (c) => {
   try {
     const body = await c.req.json();
     const lineId = String(body.statementLineId || "");
+    const umLine = await c.var.DB.prepare(
+      "SELECT id, accountCode, txnDate FROM bank_statement_lines WHERE id = ?",
+    ).bind(lineId).first<{ id: string; accountCode: string; txnDate: string }>();
+    if (!umLine) return c.json({ success: false, error: "Statement line not found" }, 404);
+    if (await bankRecoMonthFinalized(c.var.DB, umLine.accountCode, umLine.txnDate)) {
+      return c.json({ success: false, error: BANK_RECO_FINALIZED_ERR }, 400);
+    }
     await c.var.DB.prepare(
       "UPDATE bank_statement_lines SET matchedLegId = NULL, matchedAt = NULL WHERE id = ?",
     )
@@ -12314,13 +12336,16 @@ app.delete("/bank-reco/line/:id", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   const row = await c.var.DB.prepare(
-    "SELECT id, matchedLegId FROM bank_statement_lines WHERE id = ?",
+    "SELECT id, accountCode, txnDate, matchedLegId FROM bank_statement_lines WHERE id = ?",
   )
     .bind(id)
-    .first<{ id: string; matchedLegId: string | null }>();
+    .first<{ id: string; accountCode: string; txnDate: string; matchedLegId: string | null }>();
   if (!row) return c.json({ success: false, error: "Line not found" }, 404);
   if (row.matchedLegId) {
     return c.json({ success: false, error: "Unmatch the line before deleting it" }, 400);
+  }
+  if (await bankRecoMonthFinalized(c.var.DB, row.accountCode, row.txnDate)) {
+    return c.json({ success: false, error: BANK_RECO_FINALIZED_ERR }, 400);
   }
   await c.var.DB.prepare("DELETE FROM bank_statement_lines WHERE id = ?").bind(id).run();
   return c.json({ success: true });
@@ -12352,6 +12377,9 @@ app.post("/bank-reco/import-session", async (c) => {
     const err = await bankAccountOrError(c.var.DB, account);
     if (err) return c.json({ success: false, error: err }, 400);
     if (!/^\d{4}-\d{2}$/.test(month)) return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+    if (await bankRecoMonthFinalized(c.var.DB, account, month)) {
+      return c.json({ success: false, error: BANK_RECO_FINALIZED_ERR }, 400);
+    }
     const lines = Array.isArray(body.lines) ? body.lines : [];
     const meta = body.meta;
     if (!lines.length || lines.length > 2000 || !meta) {
@@ -12426,10 +12454,13 @@ app.post("/bank-reco/ignore", async (c) => {
     const body = await c.req.json() as { statementLineId?: string; ignored?: boolean };
     const id = String(body.statementLineId || "");
     const row = await c.var.DB.prepare(
-      "SELECT id, matchedLegId FROM bank_statement_lines WHERE id = ?",
-    ).bind(id).first<{ id: string; matchedLegId: string | null }>();
+      "SELECT id, accountCode, txnDate, matchedLegId FROM bank_statement_lines WHERE id = ?",
+    ).bind(id).first<{ id: string; accountCode: string; txnDate: string; matchedLegId: string | null }>();
     if (!row) return c.json({ success: false, error: "Statement line not found" }, 404);
     if (row.matchedLegId) return c.json({ success: false, error: "Unmatch the line before ignoring it" }, 400);
+    if (await bankRecoMonthFinalized(c.var.DB, row.accountCode, row.txnDate)) {
+      return c.json({ success: false, error: BANK_RECO_FINALIZED_ERR }, 400);
+    }
     await c.var.DB.prepare("UPDATE bank_statement_lines SET ignored_at = ? WHERE id = ?")
       .bind(body.ignored === false ? null : new Date().toISOString(), id)
       .run();
@@ -12438,6 +12469,136 @@ app.post("/bank-reco/ignore", async (c) => {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
 });
+
+// Finalising a month freezes its reconciliation: the figures AND the
+// outstanding-item lists are snapshotted to kv, the month's statement lines
+// refuse further match/unmatch/ignore/delete/import, and the report shows the
+// saved record with a drift warning if the live ledger has since moved
+// (owner 2026-09-02:「match 完了就要 save 起来，不会因为往后加新的东西就乱了」).
+const BANK_RECO_FINALIZED_ERR =
+  "This month's reconciliation is finalised — re-open it on the report card first";
+
+async function bankRecoMonthFinalized(
+  db: Env["Variables"]["DB"],
+  account: string,
+  dateOrMonth: string,
+): Promise<boolean> {
+  const month = String(dateOrMonth).slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(month)) return false;
+  try {
+    const row = await db.prepare("SELECT key FROM kv_config WHERE key = ?")
+      .bind(`bank_reco_final:${account}:${month}`)
+      .first<{ key: string }>();
+    return !!row;
+  } catch {
+    return false;
+  }
+}
+
+type BankRecoOutstanding = { day: string; description: string; amountSen: number };
+type BankRecoComputed = {
+  statementOpeningSen: number | null;
+  statementClosingSen: number | null;
+  importedAt: string | null;
+  glSen: number;
+  computedGlSen: number | null;
+  balanced: boolean;
+  unclearedBookSen: number;
+  unclearedBookCount: number;
+  unbookedStmtSen: number;
+  unbookedStmtCount: number;
+  unclearedBook: BankRecoOutstanding[];
+  unbookedStmt: BankRecoOutstanding[];
+};
+
+// One walk, used by BOTH the live report and the finalise snapshot — a
+// duplicated mirror of this loop is exactly the class of bug that keeps
+// recurring in this repo, so there is only one copy.
+async function computeBankRecoReport(
+  db: Env["Variables"]["DB"],
+  account: string,
+  month: string,
+): Promise<BankRecoComputed> {
+  const monthEnd = `${month}-31`;
+  const metaRow = await db.prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind(`bank_reco_meta:${account}:${month}`)
+    .first<{ value: string | null }>()
+    .catch(() => null);
+  let meta: { openingSen?: number; closingSen?: number; importedAt?: string } | null = null;
+  try { meta = metaRow?.value ? JSON.parse(metaRow.value) : null; } catch { meta = null; }
+  const resolveRp = await loadAccountResolver(db);
+  let equivalents = [account];
+  try {
+    const aliasRows = await db.prepare("SELECT oldCode FROM account_aliases").all<{ oldCode: string }>();
+    for (const a of aliasRows.results ?? []) if (resolveRp(a.oldCode) === account) equivalents.push(a.oldCode);
+  } catch { equivalents = [account]; }
+  const marks = equivalents.map(() => "?").join(",");
+  const [legRes, matchedRes, stmtRes] = await Promise.all([
+    db.prepare(
+      `SELECT id, sourceType, sourceId, debitSen, creditSen, description, postedAt FROM ledger_journal_entries
+        WHERE accountCode IN (${marks}) AND hidden = 0`,
+    ).bind(...equivalents).all<{ id: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; description: string | null; postedAt: string }>(),
+    db.prepare(
+      "SELECT matchedLegId, txnDate FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
+    ).bind(account).all<{ matchedLegId: string; txnDate: string }>(),
+    db.prepare(
+      `SELECT amountSen, txnDate, description FROM bank_statement_lines
+        WHERE accountCode = ? AND matchedLegId IS NULL AND ignored_at IS NULL AND txnDate <= ?`,
+    ).bind(account, monthEnd).all<{ amountSen: number; txnDate: string; description: string | null }>(),
+  ]);
+  const { docDate, openingDate: obDateRp } = await loadDocDateResolver(db);
+  // A match on a pre-opening statement line is void for reconciliation — that
+  // bank movement is inside the keyed opening balance (BUG-2026-09-02-174).
+  const matchedIds = new Set(
+    (matchedRes.results ?? [])
+      .filter((r) => !obDateRp || r.txnDate >= obDateRp)
+      .map((r) => r.matchedLegId),
+  );
+  let glSen = 0;
+  let unclearedBookSen = 0;
+  let unclearedBookCount = 0;
+  const unclearedBook: BankRecoOutstanding[] = [];
+  for (const l of legRes.results ?? []) {
+    const day = docDate(l.sourceType, l.sourceId, l.postedAt);
+    if (legBeforeOpening(l.sourceType, day, obDateRp) || day > monthEnd) continue;
+    const amt = (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+    glSen += amt;
+    // Opening legs stay in glSen (they ARE the account's floor) but are never
+    // 未达账项 — the bank has no "opening balance" transaction to clear them
+    // against. Counting them made the report insensitive to the keyed opening
+    // figure entirely (BUG-2026-09-02-173).
+    if (!matchedIds.has(l.id) && !isOpeningSource(l.sourceType)) {
+      unclearedBookSen += amt;
+      unclearedBookCount++;
+      if (unclearedBook.length < 200) unclearedBook.push({ day, description: l.description ?? "", amountSen: amt });
+    }
+  }
+  let unbookedStmtSen = 0;
+  let unbookedStmtCount = 0;
+  const unbookedStmt: BankRecoOutstanding[] = [];
+  for (const r of stmtRes.results ?? []) {
+    if (obDateRp && r.txnDate < obDateRp) continue; // pre-opening: inside the opening balance
+    const amt = Math.round(Number(r.amountSen) || 0);
+    unbookedStmtSen += amt;
+    unbookedStmtCount++;
+    if (unbookedStmt.length < 200) unbookedStmt.push({ day: r.txnDate, description: r.description ?? "", amountSen: amt });
+  }
+  unclearedBook.sort((a, b) => a.day.localeCompare(b.day));
+  unbookedStmt.sort((a, b) => a.day.localeCompare(b.day));
+  const closingSen = meta?.closingSen ?? null;
+  const computedGlSen = closingSen === null ? null : closingSen + unclearedBookSen - unbookedStmtSen;
+  return {
+    statementOpeningSen: meta?.openingSen ?? null,
+    statementClosingSen: closingSen,
+    importedAt: meta?.importedAt ?? null,
+    glSen,
+    computedGlSen,
+    balanced: computedGlSen !== null && computedGlSen === glSen,
+    unclearedBookSen, unclearedBookCount,
+    unbookedStmtSen, unbookedStmtCount,
+    unclearedBook, unbookedStmt,
+  };
+}
 
 // The classic closing statement:
 //   statement closing ± items not yet through the bank = GL balance.
@@ -12450,78 +12611,53 @@ app.get("/bank-reco/report", async (c) => {
   if (err) return c.json({ success: false, error: err }, 400);
   if (!/^\d{4}-\d{2}$/.test(month)) return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
   await ensureBankRecoCols(c.var.DB);
-  const monthEnd = `${month}-31`;
-  const metaRow = await c.var.DB.prepare("SELECT value FROM kv_config WHERE key = ?")
-    .bind(`bank_reco_meta:${account}:${month}`)
+  const live = await computeBankRecoReport(c.var.DB, account, month);
+  const finalRow = await c.var.DB.prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind(`bank_reco_final:${account}:${month}`)
     .first<{ value: string | null }>()
     .catch(() => null);
-  let meta: { openingSen?: number; closingSen?: number; importedAt?: string } | null = null;
-  try { meta = metaRow?.value ? JSON.parse(metaRow.value) : null; } catch { meta = null; }
-  const resolveRp = await loadAccountResolver(c.var.DB);
-  let equivalents = [account];
+  let final: Record<string, unknown> | null = null;
+  try { final = finalRow?.value ? JSON.parse(finalRow.value) : null; } catch { final = null; }
+  const { unclearedBook, unbookedStmt, ...figures } = live;
+  void unclearedBook; void unbookedStmt; // the live endpoint stays light — lists ship in the snapshot
+  return c.json({ success: true, data: { account, month, ...figures, final } });
+});
+
+// Freeze (or re-open) a month's reconciliation. POST {accountCode, month} to
+// finalise — the current figures + outstanding lists become the permanent
+// record; POST {accountCode, month, reopen: true} to unlock it again.
+app.post("/bank-reco/finalize", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
   try {
-    const aliasRows = await c.var.DB.prepare("SELECT oldCode FROM account_aliases").all<{ oldCode: string }>();
-    for (const a of aliasRows.results ?? []) if (resolveRp(a.oldCode) === account) equivalents.push(a.oldCode);
-  } catch { equivalents = [account]; }
-  const marks = equivalents.map(() => "?").join(",");
-  const [legRes, matchedRes, stmtRes] = await Promise.all([
-    c.var.DB.prepare(
-      `SELECT id, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries
-        WHERE accountCode IN (${marks}) AND hidden = 0`,
-    ).bind(...equivalents).all<{ id: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>(),
-    c.var.DB.prepare(
-      "SELECT matchedLegId, txnDate FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
-    ).bind(account).all<{ matchedLegId: string; txnDate: string }>(),
-    c.var.DB.prepare(
-      `SELECT amountSen, txnDate FROM bank_statement_lines
-        WHERE accountCode = ? AND matchedLegId IS NULL AND ignored_at IS NULL AND txnDate <= ?`,
-    ).bind(account, monthEnd).all<{ amountSen: number; txnDate: string }>(),
-  ]);
-  const { docDate, openingDate: obDateRp } = await loadDocDateResolver(c.var.DB);
-  // A match on a pre-opening statement line is void for reconciliation — that
-  // bank movement is inside the keyed opening balance (BUG-2026-09-02-174).
-  const matchedIds = new Set(
-    (matchedRes.results ?? [])
-      .filter((r) => !obDateRp || r.txnDate >= obDateRp)
-      .map((r) => r.matchedLegId),
-  );
-  let glSen = 0;
-  let unclearedBookSen = 0;
-  let unclearedBookCount = 0;
-  for (const l of legRes.results ?? []) {
-    const day = docDate(l.sourceType, l.sourceId, l.postedAt);
-    if (legBeforeOpening(l.sourceType, day, obDateRp) || day > monthEnd) continue;
-    const amt = (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
-    glSen += amt;
-    // Opening legs stay in glSen (they ARE the account's floor) but are never
-    // 未达账项 — the bank has no "opening balance" transaction to clear them
-    // against. Counting them made the report insensitive to the keyed opening
-    // figure entirely (BUG-2026-09-02-173).
-    if (!matchedIds.has(l.id) && !isOpeningSource(l.sourceType)) { unclearedBookSen += amt; unclearedBookCount++; }
+    const body = await c.req.json() as { accountCode?: string; month?: string; reopen?: boolean };
+    const account = String(body.accountCode || "");
+    const month = String(body.month || "");
+    const err = await bankAccountOrError(c.var.DB, account);
+    if (err) return c.json({ success: false, error: err }, 400);
+    if (!/^\d{4}-\d{2}$/.test(month)) return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+    await ensureBankRecoCols(c.var.DB);
+    const key = `bank_reco_final:${account}:${month}`;
+    if (body.reopen) {
+      await c.var.DB.prepare("DELETE FROM kv_config WHERE key = ?").bind(key).run();
+      return c.json({ success: true, data: { reopened: true } });
+    }
+    const snap = await computeBankRecoReport(c.var.DB, account, month);
+    if (!snap.importedAt) {
+      return c.json({ success: false, error: "Import this month's bank statement before finalising" }, 400);
+    }
+    const actorUserId = (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const now = new Date().toISOString();
+    await c.var.DB.prepare(
+      `INSERT INTO kv_config (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    )
+      .bind(key, JSON.stringify({ v: 1, finalizedAt: now, actorUserId, ...snap }), now)
+      .run();
+    return c.json({ success: true, data: { finalizedAt: now, balanced: snap.balanced } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
   }
-  let unbookedStmtSen = 0;
-  let unbookedStmtCount = 0;
-  for (const r of stmtRes.results ?? []) {
-    if (obDateRp && r.txnDate < obDateRp) continue; // pre-opening: inside the opening balance
-    unbookedStmtSen += Math.round(Number(r.amountSen) || 0);
-    unbookedStmtCount++;
-  }
-  const closingSen = meta?.closingSen ?? null;
-  const computedGlSen = closingSen === null ? null : closingSen + unclearedBookSen - unbookedStmtSen;
-  return c.json({
-    success: true,
-    data: {
-      account, month,
-      statementClosingSen: closingSen,
-      statementOpeningSen: meta?.openingSen ?? null,
-      importedAt: meta?.importedAt ?? null,
-      unclearedBookSen, unclearedBookCount,
-      unbookedStmtSen, unbookedStmtCount,
-      glSen,
-      computedGlSen,
-      balanced: computedGlSen !== null && computedGlSen === glSen,
-    },
-  });
 });
 
 // ---------------------------------------------------------------------------

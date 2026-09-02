@@ -12046,13 +12046,18 @@ app.get("/bank-reco", async (c) => {
       .all<{ id: string; txnDate: string; description: string | null; amountSen: number; matchedLegId: string | null; matchedAt: string | null }>();
     stmtLines = res.results ?? [];
     // Matches can point at legs outside the window — collect ALL matched
-    // leg ids for this account so book legs flag correctly.
+    // leg ids for this account so book legs flag correctly. A match whose
+    // statement line is dated BEFORE the opening date does not count: that
+    // bank movement is already inside the keyed opening balance, so it can
+    // never clear a book leg (BUG-2026-09-02-174).
     const allMatched = await c.var.DB.prepare(
-      "SELECT matchedLegId FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
+      "SELECT matchedLegId, txnDate FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
     )
       .bind(account)
-      .all<{ matchedLegId: string }>();
-    for (const r of allMatched.results ?? []) matchedLegIds.add(r.matchedLegId);
+      .all<{ matchedLegId: string; txnDate: string }>();
+    for (const r of allMatched.results ?? []) {
+      if (!obDateBr || r.txnDate >= obDateBr) matchedLegIds.add(r.matchedLegId);
+    }
   } catch {
     migrationMissing = true;
   }
@@ -12062,6 +12067,7 @@ app.get("/bank-reco", async (c) => {
       account,
       from: from || null,
       to: to === "9999-12-31" ? null : to,
+      openingDate: obDateBr ?? null,
       migrationMissing,
       legs: legs.map((l) => ({ ...l, matched: matchedLegIds.has(l.id) })),
       statementLines: stmtLines,
@@ -12117,12 +12123,18 @@ app.post("/bank-reco/match", async (c) => {
     const lineId = String(body.statementLineId || "");
     const legId = String(body.legId || "");
     const line = await c.var.DB.prepare(
-      "SELECT id, accountCode, amountSen, matchedLegId FROM bank_statement_lines WHERE id = ?",
+      "SELECT id, accountCode, txnDate, amountSen, matchedLegId FROM bank_statement_lines WHERE id = ?",
     )
       .bind(lineId)
-      .first<{ id: string; accountCode: string; amountSen: number; matchedLegId: string | null }>();
+      .first<{ id: string; accountCode: string; txnDate: string; amountSen: number; matchedLegId: string | null }>();
     if (!line) return c.json({ success: false, error: "Statement line not found" }, 404);
     if (line.matchedLegId) return c.json({ success: false, error: "Line already matched" }, 400);
+    // Pre-opening bank movements are already inside the keyed opening balance
+    // — matching one to a book leg double-counts it (BUG-2026-09-02-174).
+    const obDateM = await getOpeningDate(c.var.DB);
+    if (obDateM && line.txnDate < obDateM) {
+      return c.json({ success: false, error: `This statement line is dated before the opening date (${obDateM}) — its money is already inside the opening balance and cannot clear a book entry.` }, 400);
+    }
     const leg = await c.var.DB.prepare(
       "SELECT id, accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE id = ?",
     )
@@ -12227,6 +12239,9 @@ app.post("/bank-reco/automatch", async (c) => {
         day: docDate(l.sourceType, l.sourceId, l.postedAt), // by document date
         amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
       }));
+    // Pre-opening statement lines are inside the keyed opening balance —
+    // never candidates for matching (BUG-2026-09-02-174).
+    const matchableLines = (lineRes.results ?? []).filter((l) => !obDateAm || l.txnDate >= obDateAm);
     const dayMs = 86400000;
     const updates: D1PreparedStatement[] = [];
     const usedLeg = new Set<string>();
@@ -12249,7 +12264,7 @@ app.post("/bank-reco/automatch", async (c) => {
     const voucherLegs = freeLegs
       .map((l) => ({ ...l, token: /^[A-Z]{2,5}-\d{3,4}-\d+$/i.test(l.sourceId) ? l.sourceId.toUpperCase() : null }))
       .filter((l) => l.token);
-    for (const line of lineRes.results ?? []) {
+    for (const line of matchableLines) {
       const desc = String(line.description ?? "").toUpperCase();
       if (!desc) continue;
       const hits = voucherLegs.filter(
@@ -12258,7 +12273,7 @@ app.post("/bank-reco/automatch", async (c) => {
       if (hits.length === 1) take(line.id, hits[0].id);
     }
     // Pass 2 — unique exact-amount candidates within ±7 days.
-    for (const line of lineRes.results ?? []) {
+    for (const line of matchableLines) {
       if (usedLine.has(line.id)) continue;
       const lineT = Date.parse(line.txnDate);
       const candidates = freeLegs.filter(
@@ -12438,15 +12453,21 @@ app.get("/bank-reco/report", async (c) => {
         WHERE accountCode IN (${marks}) AND hidden = 0`,
     ).bind(...equivalents).all<{ id: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>(),
     c.var.DB.prepare(
-      "SELECT matchedLegId FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
-    ).bind(account).all<{ matchedLegId: string }>(),
+      "SELECT matchedLegId, txnDate FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
+    ).bind(account).all<{ matchedLegId: string; txnDate: string }>(),
     c.var.DB.prepare(
-      `SELECT amountSen FROM bank_statement_lines
+      `SELECT amountSen, txnDate FROM bank_statement_lines
         WHERE accountCode = ? AND matchedLegId IS NULL AND ignored_at IS NULL AND txnDate <= ?`,
-    ).bind(account, monthEnd).all<{ amountSen: number }>(),
+    ).bind(account, monthEnd).all<{ amountSen: number; txnDate: string }>(),
   ]);
-  const matchedIds = new Set((matchedRes.results ?? []).map((r) => r.matchedLegId));
   const { docDate, openingDate: obDateRp } = await loadDocDateResolver(c.var.DB);
+  // A match on a pre-opening statement line is void for reconciliation — that
+  // bank movement is inside the keyed opening balance (BUG-2026-09-02-174).
+  const matchedIds = new Set(
+    (matchedRes.results ?? [])
+      .filter((r) => !obDateRp || r.txnDate >= obDateRp)
+      .map((r) => r.matchedLegId),
+  );
   let glSen = 0;
   let unclearedBookSen = 0;
   let unclearedBookCount = 0;
@@ -12464,6 +12485,7 @@ app.get("/bank-reco/report", async (c) => {
   let unbookedStmtSen = 0;
   let unbookedStmtCount = 0;
   for (const r of stmtRes.results ?? []) {
+    if (obDateRp && r.txnDate < obDateRp) continue; // pre-opening: inside the opening balance
     unbookedStmtSen += Math.round(Number(r.amountSen) || 0);
     unbookedStmtCount++;
   }

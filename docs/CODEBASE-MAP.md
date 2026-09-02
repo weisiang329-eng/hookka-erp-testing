@@ -377,7 +377,7 @@ authoritative current detail.** New here? Start with [ONBOARDING-PATH.md](ONBOAR
   - Stock Summary tab + WipDetailCard — L5969-6222
   - Labour month-end posting tab + AddDeptMapRow — L6223-6446
   - Fixed Assets + Depreciation tab — L6447-6734
-  - Cash Book / Bank Reconciliation tab — L6735-7076
+  - Cash Book / Bank Reconciliation tab (`CashBookTab`, anchor by name — ~L9754 as of 2026-09-02) — monthly sessions: Upload bank PDF → `src/lib/hlbb-statement.ts` (client-side pdfjs parse, triple-locked, refuses on any broken balance check) → preview → `POST /bank-reco/import-session` → voucher-first automatch → report card (statement closing ± 未达账项 vs GL). CSV paste importer kept as fallback.
   - Opening Balance tab — L7077-7480
   - Balance Sheet tab (+ YearCloseCard + GroupByCompanyCard) — L7481-7778
   - Cash Flow tab — L7779-7945

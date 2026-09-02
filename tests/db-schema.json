@@ -196,12 +196,15 @@
   "bank_statement_lines": [
     "account_code",
     "amount_sen",
+    "balance_sen",
     "created_at",
     "description",
     "id",
+    "ignored_at",
     "imported_at",
     "matched_at",
     "matched_leg_id",
+    "stmt_month",
     "txn_date"
   ],
   "bank_transactions": [

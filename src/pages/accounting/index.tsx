@@ -9720,7 +9720,18 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 // unmatched on either side IS the 未达账项 list.
 
 type RecoLeg = { id: string; day: string; description: string; sourceType: string; sourceId: string; amountSen: number; matched: boolean };
-type RecoLine = { id: string; txnDate: string; description: string | null; amountSen: number; matchedLegId: string | null; matchedAt: string | null };
+type RecoLine = {
+  id: string; txnDate: string; description: string | null; amountSen: number;
+  matchedLegId: string | null; matchedAt: string | null;
+  ignoredAt?: string | null; ignored_at?: string | null;
+  stmtMonth?: string | null; balanceSen?: number | null;
+};
+type RecoReport = {
+  statementClosingSen: number | null; statementOpeningSen: number | null; importedAt: string | null;
+  unclearedBookSen: number; unclearedBookCount: number;
+  unbookedStmtSen: number; unbookedStmtCount: number;
+  glSen: number; computedGlSen: number | null; balanced: boolean;
+};
 
 function parseCsvLine(line: string): string[] {
   const out: string[] = [];
@@ -9746,13 +9757,27 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     (a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH",
   );
   const [account, setAccount] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  // Monthly session view (owner 2026-09-01 「每个月我upload文件自动对账」+
+  // 「现在太乱了」): one month at a time, with earlier unmatched leftovers
+  // pulled in so last month's in-transit cheques can still be ticked off.
+  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [includeEarlier, setIncludeEarlier] = useState(true);
   const [data, setData] = useState<{ migrationMissing: boolean; legs: RecoLeg[]; statementLines: RecoLine[] } | null>(null);
+  const [report, setReport] = useState<RecoReport | null>(null);
   const [showImport, setShowImport] = useState(false);
   const [csv, setCsv] = useState("");
   const [map, setMap] = useState({ date: "1", desc: "2", out: "3", in: "4", header: true, fmt: "DD/MM/YYYY" });
   const [busy, setBusy] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [preview, setPreview] = useState<{
+    fileName: string; month: string;
+    rows: { date: string; description: string; amountSen: number; balanceSen: number | null }[];
+    meta: { openingSen: number; closingSen: number; totalInSen: number; totalOutSen: number; countIn: number; countOut: number };
+    warnings: string[];
+  } | null>(null);
+  const pdfInputRef = useRef<HTMLInputElement | null>(null);
+  const from = includeEarlier ? "" : `${month}-01`;
+  const to = `${month}-31`;
 
   const load = useCallback(() => {
     if (!account) return;
@@ -9763,8 +9788,86 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
       .then((r) => r.json() as Promise<{ success?: boolean; data?: { migrationMissing: boolean; legs: RecoLeg[]; statementLines: RecoLine[] } }>)
       .then((j) => { if (j?.success && j.data) setData(j.data); })
       .catch(() => {});
-  }, [account, from, to]);
+    fetch(`/api/accounting/bank-reco/report?account=${encodeURIComponent(account)}&month=${month}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: RecoReport }>)
+      .then((j) => { if (j?.success && j.data) setReport(j.data); else setReport(null); })
+      .catch(() => setReport(null));
+  }, [account, from, to, month]);
   useEffect(() => { load(); }, [load]);
+
+  // Upload the bank's own PDF (HLBB) → parse client-side with the
+  // triple-locked parser → preview → import as this month's session.
+  const handlePdfFile = async (file: File) => {
+    if (!account) { toast.error("Pick an account first"); return; }
+    setPdfBusy(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const pdfjsLib = await import("pdfjs-dist");
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      const items: { str: string; x: number; y: number; w: number; page: number }[] = [];
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+        const vp = page.getViewport({ scale: 1 });
+        const tc = await page.getTextContent();
+        for (const it of tc.items) {
+          const t = it as { str?: string; transform?: number[]; width?: number };
+          if (!t.str || !t.str.trim() || !t.transform) continue;
+          items.push({ str: t.str, x: t.transform[4], y: vp.height - t.transform[5], w: t.width ?? 0, page: p });
+        }
+      }
+      const { parseHlbbStatement } = await import("@/lib/hlbb-statement");
+      const parsed = parseHlbbStatement(items);
+      if (parsed.errors.length) {
+        toast.error(`Statement refused: ${parsed.errors[0]}`);
+        setPreview(null);
+        return;
+      }
+      const stmtMonth = parsed.rows[0]?.date.slice(0, 7) ?? month;
+      setPreview({
+        fileName: file.name,
+        month: stmtMonth,
+        rows: parsed.rows,
+        meta: {
+          openingSen: parsed.openingSen, closingSen: parsed.closingSen,
+          totalInSen: parsed.totalInSen, totalOutSen: parsed.totalOutSen,
+          countIn: parsed.countIn, countOut: parsed.countOut,
+        },
+        warnings: parsed.warnings,
+      });
+    } catch {
+      toast.error("Could not read that PDF");
+    } finally {
+      setPdfBusy(false);
+      if (pdfInputRef.current) pdfInputRef.current.value = "";
+    }
+  };
+
+  const confirmPdfImport = async () => {
+    if (!preview) return;
+    setPdfBusy(true);
+    try {
+      const res = await fetch("/api/accounting/bank-reco/import-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountCode: account, month: preview.month, lines: preview.rows, meta: preview.meta }),
+      });
+      const j = await res.json() as { success?: boolean; data?: { imported: number; skippedDupes: number }; error?: string };
+      if (!j?.success) { toast.error(j?.error || "Import failed"); return; }
+      const am = await fetch("/api/accounting/bank-reco/automatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountCode: account, from: "", to: `${preview.month}-31` }),
+      });
+      const aj = await am.json() as { success?: boolean; data?: { matched: number } };
+      toast.success(`${j.data?.imported ?? 0} lines imported · ${aj?.data?.matched ?? 0} auto-matched`);
+      setMonth(preview.month);
+      setPreview(null);
+      load();
+    } finally {
+      setPdfBusy(false);
+    }
+  };
 
   const parseDate = (s: string): string | null => {
     const v = s.trim();
@@ -9891,19 +9994,49 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     else toast.error(j?.error || "Delete failed");
   };
 
+  const handleIgnore = async (lineId: string, ignored: boolean) => {
+    const res = await fetch("/api/accounting/bank-reco/ignore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ statementLineId: lineId, ignored }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load();
+    else toast.error(j?.error || "Update failed");
+  };
+
   const legs = data?.legs ?? [];
   const stmt = data?.statementLines ?? [];
-  const unmatchedLegs = legs.filter((l) => !l.matched);
-  const unmatchedStmt = stmt.filter((s) => !s.matchedLegId);
+  // Dual-key read of the ignore stamp (BUG class C1 — adapter camelCases).
+  const ignAt = (s: RecoLine) => s.ignoredAt ?? s.ignored_at ?? null;
+  const legsSorted = [...legs].sort((a, b) => a.day.localeCompare(b.day));
+  const stmtSorted = [...stmt].sort((a, b) => a.txnDate.localeCompare(b.txnDate));
+  const unmatchedLegs = legsSorted.filter((l) => !l.matched);
+  const unmatchedStmt = stmtSorted.filter((s) => !s.matchedLegId && !ignAt(s));
+  const matchedStmt = stmtSorted.filter((s) => !!s.matchedLegId);
+  const ignoredStmt = stmtSorted.filter((s) => !s.matchedLegId && !!ignAt(s));
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
-  const amtCls = (n: number) => `tabular-nums ${n < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`;
+  // Owner 2026-09-01 「现在太乱了」: signed red numbers everywhere read as a
+  // wall of errors. Split into positive In / Out columns instead.
+  const tdIn = (n: number) => (n > 0 ? formatCurrency(n) : "");
+  const tdOut = (n: number) => (n < 0 ? formatCurrency(-n) : "");
 
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Cash Book · Bank Reconciliation</h2>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" disabled={!account} onClick={() => setShowImport(!showImport)}>Import statement</Button>
+          <input
+            ref={pdfInputRef}
+            type="file"
+            accept="application/pdf"
+            className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void handlePdfFile(f); }}
+          />
+          <Button variant="primary" size="sm" disabled={!account || pdfBusy} onClick={() => pdfInputRef.current?.click()}>
+            {pdfBusy ? "Reading…" : "Upload bank PDF"}
+          </Button>
+          <Button variant="outline" size="sm" disabled={!account} onClick={() => setShowImport(!showImport)}>Import CSV</Button>
           <Button variant="outline" size="sm" disabled={!account || busy || unmatchedStmt.length === 0} onClick={handleAutoMatch}>Auto-match</Button>
         </div>
       </div>
@@ -9912,22 +10045,22 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
         <CardContent className="p-4 flex flex-wrap items-end gap-4 bg-[#F7F4EF] rounded-lg">
           <div>
             <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Bank / Cash account</label>
-            <select value={account} onChange={(e) => { setAccount(e.target.value); setData(null); }} className={`${selCls} w-72`}>
+            <select value={account} onChange={(e) => { setAccount(e.target.value); setData(null); setReport(null); }} className={`${selCls} w-72`}>
               <option value="">— pick account —</option>
               {bankCash.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
             </select>
           </div>
           <div>
-            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">From</label>
-            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className={selCls} />
+            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Month</label>
+            <input type="month" value={month} onChange={(e) => { if (e.target.value) setMonth(e.target.value); }} className={selCls} />
           </div>
-          <div>
-            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">To</label>
-            <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className={selCls} />
-          </div>
+          <label className="flex items-center gap-2 text-sm pb-2 cursor-pointer">
+            <input type="checkbox" checked={includeEarlier} onChange={(e) => setIncludeEarlier(e.target.checked)} className="h-4 w-4 accent-[#6B5C32]" />
+            Include earlier unmatched items
+          </label>
           {data && !data.migrationMissing && (
             <div className="text-sm text-[#6B7280] pb-1">
-              Book {legs.length} legs ({unmatchedLegs.length} unmatched) · Statement {stmt.length} lines ({unmatchedStmt.length} unmatched)
+              Statement {stmt.length} lines ({unmatchedStmt.length} open{ignoredStmt.length > 0 ? ` · ${ignoredStmt.length} ignored` : ""}) · Book {legs.length} legs ({unmatchedLegs.length} open)
             </div>
           )}
         </CardContent>
@@ -9935,6 +10068,65 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
       {data?.migrationMissing && (
         <Card><CardContent className="p-4 text-sm text-[#9A3A2D]">Migration 0160 not applied yet — run the paste-version SQL first.</CardContent></Card>
+      )}
+
+      {preview && (
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <div className="text-sm font-semibold text-[#1F1D1B]">{preview.fileName}</div>
+                <div className="text-xs text-[#27500A]">Statement month {preview.month} · {preview.rows.length} transactions · every balance check passed ✓</div>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" disabled={pdfBusy} onClick={() => setPreview(null)}>Cancel</Button>
+                <Button variant="primary" size="sm" disabled={pdfBusy} onClick={confirmPdfImport}>
+                  {pdfBusy ? "Importing…" : `Import ${preview.rows.length} lines & auto-match`}
+                </Button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+              <div className="rounded-md bg-[#F7F4EF] p-2"><div className="text-[11px] text-[#6B7280]">Opening</div><div className="tabular-nums">{formatCurrency(preview.meta.openingSen)}</div></div>
+              <div className="rounded-md bg-[#F7F4EF] p-2"><div className="text-[11px] text-[#6B7280]">Money in ({preview.meta.countIn})</div><div className="tabular-nums">{formatCurrency(preview.meta.totalInSen)}</div></div>
+              <div className="rounded-md bg-[#F7F4EF] p-2"><div className="text-[11px] text-[#6B7280]">Money out ({preview.meta.countOut})</div><div className="tabular-nums">{formatCurrency(preview.meta.totalOutSen)}</div></div>
+              <div className="rounded-md bg-[#F7F4EF] p-2"><div className="text-[11px] text-[#6B7280]">Closing</div><div className="tabular-nums font-semibold">{formatCurrency(preview.meta.closingSen)}</div></div>
+            </div>
+            {preview.warnings.length > 0 && (
+              <ul className="text-[11px] text-[#9A3A2D] list-disc pl-4">
+                {preview.warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            )}
+            <p className="text-[11px] text-[#9CA3AF]">
+              Importing replaces this month's unmatched statement lines; lines you already matched are kept.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {account && data && !data.migrationMissing && report?.importedAt && !preview && (
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+              <div className="text-sm font-semibold text-[#1F1D1B]">Reconciliation — {month}</div>
+              {report.balanced ? (
+                <span className="rounded-full bg-[#EAF3DE] text-[#27500A] text-xs font-semibold px-2.5 py-0.5">Balanced ✓</span>
+              ) : (
+                <span className="rounded-full bg-[#F7E5E1] text-[#9A3A2D] text-xs font-semibold px-2.5 py-0.5">
+                  Out by {formatCurrency((report.computedGlSen ?? 0) - report.glSen)}
+                </span>
+              )}
+            </div>
+            <table className="text-sm w-full max-w-md">
+              <tbody>
+                <tr><td className="py-0.5 text-[#6B7280]">Bank statement closing balance</td><td className="py-0.5 text-right tabular-nums">{report.statementClosingSen != null ? formatCurrency(report.statementClosingSen) : "—"}</td></tr>
+                <tr><td className="py-0.5 text-[#6B7280]">+ In the book, not yet in the bank ({report.unclearedBookCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(report.unclearedBookSen)}</td></tr>
+                <tr><td className="py-0.5 text-[#6B7280]">− In the bank, not yet in the book ({report.unbookedStmtCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(report.unbookedStmtSen)}</td></tr>
+                <tr className="border-t border-[#E2DDD8]"><td className="py-0.5 font-medium">= Book balance should be</td><td className="py-0.5 text-right tabular-nums font-medium">{report.computedGlSen != null ? formatCurrency(report.computedGlSen) : "—"}</td></tr>
+                <tr><td className="py-0.5 font-medium">Book balance today (GL {account})</td><td className="py-0.5 text-right tabular-nums font-medium">{formatCurrency(report.glSen)}</td></tr>
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
       )}
 
       {showImport && (
@@ -9985,73 +10177,82 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
       )}
 
       {account && data && !data.migrationMissing && (
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          {/* Statement side */}
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+          {/* Bank side — open lines */}
           <Card>
             <CardContent className="p-0 overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                    <th className="px-3 py-2 text-left" colSpan={4}>Bank statement ({stmt.length})</th>
+                    <th className="px-3 py-2 text-left" colSpan={2}>Bank statement — to match ({unmatchedStmt.length})</th>
+                    <th className="px-3 py-2 text-right">In</th>
+                    <th className="px-3 py-2 text-right">Out</th>
+                    <th className="px-3 py-2 text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {stmt.map((s) => {
+                  {unmatchedStmt.map((s) => {
                     const candidates = unmatchedLegs.filter((l) => l.amountSen === s.amountSen);
+                    const earlier = s.txnDate.slice(0, 7) < month;
                     return (
-                      <tr key={s.id} className={`border-b border-[#F0ECE9] ${s.matchedLegId ? "bg-[#EAF3DE]/40" : ""}`}>
-                        <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
+                      <tr key={s.id} className="border-b border-[#F0ECE9]">
+                        <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">
+                          {s.txnDate}
+                          {earlier && <span className="ml-1 rounded bg-[#F0ECE9] px-1 text-[10px]">earlier</span>}
+                        </td>
                         <td className="px-3 py-1.5 text-xs">{s.description}</td>
-                        <td className={`px-3 py-1.5 text-right ${amtCls(s.amountSen)}`}>{formatCurrency(s.amountSen)}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1.5 text-right whitespace-nowrap">
-                          {s.matchedLegId ? (
-                            <button onClick={() => handleUnmatch(s.id)} className="text-[#6B7280] hover:text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer" title="Matched — click to unmatch">✓ unmatch</button>
-                          ) : candidates.length > 0 ? (
-                            <select defaultValue="" onChange={(e) => handleMatch(s.id, e.target.value)} className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] max-w-44">
+                          {candidates.length > 0 ? (
+                            <select defaultValue="" onChange={(e) => handleMatch(s.id, e.target.value)} className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] max-w-40">
                               <option value="">match to…</option>
                               {candidates.map((l) => (
                                 <option key={l.id} value={l.id}>{l.day} {l.description.slice(0, 30)}</option>
                               ))}
                             </select>
                           ) : (
-                            <>
-                              <span className="text-[11px] text-[#9A3A2D] mr-2">no book entry</span>
-                              <button onClick={() => handleDeleteLine(s.id)} className="text-[#9CA3AF] hover:text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer">del</button>
-                            </>
+                            <span className="text-[11px] text-[#9A3A2D]">not in book</span>
                           )}
+                          <button onClick={() => handleIgnore(s.id, true)} className="ml-2 text-[#9CA3AF] hover:text-[#1F1D1B] text-[11px] underline decoration-dotted cursor-pointer" title="Leave this line out of the reconciliation">ignore</button>
+                          <button onClick={() => handleDeleteLine(s.id)} className="ml-1.5 text-[#9CA3AF] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">del</button>
                         </td>
                       </tr>
                     );
                   })}
-                  {stmt.length === 0 && (
-                    <tr><td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={4}>No statement lines in this window — import one</td></tr>
+                  {unmatchedStmt.length === 0 && (
+                    <tr>
+                      <td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={5}>
+                        {stmt.length === 0 ? "No statement lines yet — Upload bank PDF above" : "Every statement line is matched ✓"}
+                      </td>
+                    </tr>
                   )}
                 </tbody>
               </table>
             </CardContent>
           </Card>
-          {/* Book side */}
+          {/* Book side — open legs */}
           <Card>
             <CardContent className="p-0 overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                    <th className="px-3 py-2 text-left" colSpan={4}>Book (ledger {account}) — {legs.length} legs</th>
+                    <th className="px-3 py-2 text-left" colSpan={2}>Book — not yet in the bank ({unmatchedLegs.length})</th>
+                    <th className="px-3 py-2 text-right">In</th>
+                    <th className="px-3 py-2 text-right">Out</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {legs.map((l) => (
-                    <tr key={l.id} className={`border-b border-[#F0ECE9] ${l.matched ? "bg-[#EAF3DE]/40" : ""}`}>
+                  {unmatchedLegs.map((l) => (
+                    <tr key={l.id} className="border-b border-[#F0ECE9]">
                       <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{l.day}</td>
                       <td className="px-3 py-1.5 text-xs">{l.description}</td>
-                      <td className={`px-3 py-1.5 text-right ${amtCls(l.amountSen)}`}>{formatCurrency(l.amountSen)}</td>
-                      <td className="px-3 py-1.5 text-right text-xs">
-                        {l.matched ? <span className="text-[#27500A]">✓</span> : <span className="text-[#9A3A2D]">not in bank</span>}
-                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{tdIn(l.amountSen)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{tdOut(l.amountSen)}</td>
                     </tr>
                   ))}
-                  {legs.length === 0 && (
-                    <tr><td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={4}>No book entries in this window</td></tr>
+                  {unmatchedLegs.length === 0 && (
+                    <tr><td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={4}>Every book entry is matched ✓</td></tr>
                   )}
                 </tbody>
               </table>
@@ -10059,10 +10260,61 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
           </Card>
         </div>
       )}
+
+      {account && data && !data.migrationMissing && (matchedStmt.length > 0 || ignoredStmt.length > 0) && (
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+          {matchedStmt.length > 0 && (
+            <details className="rounded-lg border border-[#E2DDD8] bg-white">
+              <summary className="cursor-pointer px-4 py-2 text-sm font-medium text-[#1F1D1B]">Matched ({matchedStmt.length})</summary>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {matchedStmt.map((s) => (
+                      <tr key={s.id} className="border-b border-[#F0ECE9] bg-[#EAF3DE]/30">
+                        <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
+                        <td className="px-3 py-1 text-xs">{s.description}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdOut(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right whitespace-nowrap">
+                          <button onClick={() => handleUnmatch(s.id)} className="text-[#6B7280] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">✓ unmatch</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+          {ignoredStmt.length > 0 && (
+            <details className="rounded-lg border border-[#E2DDD8] bg-white">
+              <summary className="cursor-pointer px-4 py-2 text-sm font-medium text-[#1F1D1B]">Ignored ({ignoredStmt.length})</summary>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {ignoredStmt.map((s) => (
+                      <tr key={s.id} className="border-b border-[#F0ECE9] opacity-60">
+                        <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
+                        <td className="px-3 py-1 text-xs">{s.description}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs">{tdOut(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right whitespace-nowrap">
+                          <button onClick={() => handleIgnore(s.id, false)} className="text-[#6B7280] hover:text-[#27500A] text-[11px] underline decoration-dotted cursor-pointer">restore</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+
       {account && data && !data.migrationMissing && (
         <p className="text-[11px] text-[#9CA3AF]">
-          Unreconciled items = the red rows: "not in bank" (book has it, statement doesn't — uncleared cheques etc.) and
-          "no book entry" (bank has it, book doesn't — record it via Payments / Receipts, then match).
+          Left = what the bank says, right = what the book says; a clean month leaves both sides empty.
+          "Not in book" → record it via Payments / Receipts, then match. "Not yet in the bank" → usually an
+          uncleared cheque or in-transit transfer — it explains the report difference. Ignored lines stay out of the report.
         </p>
       )}
     </div>

@@ -12030,7 +12030,7 @@ app.get("/bank-reco", async (c) => {
       sourceId: l.sourceId,
       amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
     }))
-    .filter((l) => !legBeforeOpening(l.sourceType, l.day, obDateBr) && l.day >= from && l.day <= to); // pre-opening: not extracted
+    .filter((l) => !legBeforeOpening(l.sourceType, l.day, obDateBr) && !isOpeningSource(l.sourceType) && l.day >= from && l.day <= to); // pre-opening + opening legs: not matchable (BUG-2026-09-02-173)
   let stmtLines: unknown[] = [];
   let migrationMissing = false;
   const matchedLegIds = new Set<string>();
@@ -12220,7 +12220,7 @@ app.post("/bank-reco/automatch", async (c) => {
     const takenLegs = new Set((matchedRes.results ?? []).map((r) => r.matchedLegId));
     const { docDate, openingDate: obDateAm } = await loadDocDateResolver(c.var.DB);
     const freeLegs = (legRes.results ?? [])
-      .filter((l) => !takenLegs.has(l.id) && !legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDateAm)) // pre-opening: not a match candidate
+      .filter((l) => !takenLegs.has(l.id) && !isOpeningSource(l.sourceType) && !legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDateAm)) // pre-opening + opening legs: not match candidates (BUG-2026-09-02-173)
       .map((l) => ({
         id: l.id,
         sourceId: String(l.sourceId ?? ""),
@@ -12455,7 +12455,11 @@ app.get("/bank-reco/report", async (c) => {
     if (legBeforeOpening(l.sourceType, day, obDateRp) || day > monthEnd) continue;
     const amt = (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
     glSen += amt;
-    if (!matchedIds.has(l.id)) { unclearedBookSen += amt; unclearedBookCount++; }
+    // Opening legs stay in glSen (they ARE the account's floor) but are never
+    // 未达账项 — the bank has no "opening balance" transaction to clear them
+    // against. Counting them made the report insensitive to the keyed opening
+    // figure entirely (BUG-2026-09-02-173).
+    if (!matchedIds.has(l.id) && !isOpeningSource(l.sourceType)) { unclearedBookSen += amt; unclearedBookCount++; }
   }
   let unbookedStmtSen = 0;
   let unbookedStmtCount = 0;

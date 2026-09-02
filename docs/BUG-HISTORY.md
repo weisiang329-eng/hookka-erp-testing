@@ -34,6 +34,27 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-09-02-173 — opening legs counted as 未达账项 made the reco report blind to the opening figure `accounting` `bank-reco` 🟢
+
+Found while answering the owner's「直接给你5月22号 opening bank balance 可以吗?」
+the day after bank-reco v1 shipped. Measured on prod: the posted opening batch
+carries 310-0010 DR 1,600.00, yet the July report's algebra only reproduced its
+"Out by 4,936.17" if the opening contributed ZERO — because every unmatched
+opening_balance / opening_balance_reversal leg was summed into BOTH glSen and
+unclearedBookSen, cancelling out of (computedGl − gl). Consequences: (a) keying
+the correct opening would not move the report by one sen; (b) the opening rows
+polluted the "Book — not yet in the bank" list (the bank has no "opening
+balance" transaction that could ever clear them); (c) automatch could
+amount-grab an opening leg for a real statement line within ±7 days of 开账日.
+
+Fix ([accounting.ts](../src/api/routes/accounting.ts): GET /bank-reco leg
+filter, automatch freeLegs filter, report uncleared walk): opening-family legs
+(existing `isOpeningSource` helper) stay in glSen — they ARE the account's
+floor — and are excluded everywhere they were treated as open items. Verified
+on prod: Out by moved 4,936.17 → 3,336.17, exactly the predicted
+4,286.17 (July stmt opening) − 1,600.00 (keyed GL opening) + 650.00 (stray
+June test statement line). Guard: `tests/bank-reco-opening-legs.test.mjs`.
+
 ## BUG-2026-08-31-172 — one office-salary JV silenced a whole month's labour auto-extract `accounting` `pnl` 🟢
 
 Owner (Monthly P&L screenshot, hours after the auto-extract shipped):

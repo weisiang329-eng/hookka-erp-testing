@@ -32,6 +32,12 @@ automatch 升级 **Pass 1 凭证号优先**（statement 描述含我方单号如
 ③ Cash Book 视图重做（「现在太乱了」）：From/To 换 **Month 选择 + 「含旧月未配」勾**；
 Upload bank PDF → 预览卡（期初/入/出/期末+警告，确认才导入+自动配）；报表卡；
 金额拆 In/Out 两列正数（不再满屏红色负数）、按日排序、待配两侧表 + Matched/Ignored 折叠区。
+④ 同日补修 **BUG-2026-09-02-173**（owner 问「直接给 22/05 opening balance 可以吗」引出）：
+开账腿被当未达账项 → 报表对 opening 数完全不敏感（改了也不动）+ 开账行污染待配名单 +
+automatch 可能按金额误抓开账腿。修：`isOpeningSource` 腿三处排除（GET 列表 / automatch
+候选 / report 未达 walk），glSen 保留。修后 prod 实测 Out by 4,936.17 → 3,336.17
+（= 7 月账单期初 4,286.17 − 开账记的 1,600 + 6 月测试行 650，一分不差）。
+守卫 `tests/bank-reco-opening-legs.test.mjs`。
 
 ## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
 

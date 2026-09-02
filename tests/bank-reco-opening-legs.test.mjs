@@ -42,8 +42,17 @@ test("automatch never offers an opening leg as a candidate", () => {
   assert.match(body, /!isOpeningSource\(l\.sourceType\)/);
 });
 
-test("report keeps opening legs in glSen but out of the uncleared walk", () => {
-  const body = handler('app.get("/bank-reco/report", async (c) => {');
+// The walk moved into computeBankRecoReport (shared by the report AND the
+// finalize snapshot) — the guards follow it there.
+function walkBody() {
+  const start = src.indexOf("async function computeBankRecoReport(");
+  assert.notEqual(start, -1, "computeBankRecoReport not found");
+  const end = src.indexOf("\napp.", start + 1);
+  return src.slice(start, end === -1 ? undefined : end);
+}
+
+test("report walk keeps opening legs in glSen but out of the uncleared list", () => {
+  const body = walkBody();
   // glSen accumulates BEFORE the uncleared guard…
   assert.match(body, /glSen \+= amt;/);
   // …and the uncleared line carries BOTH conditions.
@@ -72,8 +81,8 @@ test("automatch never offers a pre-opening statement line", () => {
   assert.doesNotMatch(body, /for \(const line of lineRes\.results/);
 });
 
-test("report voids pre-opening matches and floors unbooked at the opening date", () => {
-  const body = handler('app.get("/bank-reco/report", async (c) => {');
+test("report walk voids pre-opening matches and floors unbooked at the opening date", () => {
+  const body = walkBody();
   assert.match(body, /\.filter\(\(r\) => !obDateRp \|\| r\.txnDate >= obDateRp\)/);
   assert.match(body, /if \(obDateRp && r\.txnDate < obDateRp\) continue;/);
 });

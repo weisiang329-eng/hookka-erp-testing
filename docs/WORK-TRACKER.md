@@ -49,6 +49,13 @@ Out by 徽章标方向（book above/below bank）。owner restore 4 笔后 5 月
 ⑥ 紧跟 **BUG-175**：作废的开账前配对在写路径仍占着腿——owner 手配 GVP 950→HPV-2605-018 被顶
 「already matched」。修：match/automatch 动手前先清本账户开账前的作废占用（自愈，4 条 undo 行
 免点）；同 PR 把两张对账表改**上下直排全宽**（owner「就不能上下吗？」——左右并排在他屏上仍横滚）。
+⑦ **月结封存（Finalise）**——owner:「照理说我 match 完了就要 save 起来，不会因为往后加新的东西
+就乱了」。`POST /bank-reco/finalize`（{reopen} 可解锁）把当刻报表+**未达账项明细清单**快照进 kv
+`bank_reco_final:<acct>:<month>`；walk 抽成共享 `computeBankRecoReport`（report/finalize 同一份，
+防镜像漂移）；五个写路径（match/unmatch/ignore/del/import-session）拒动已封存月的行；报表卡封存后
+显示**存档数**（🔒 徽章+Print 存档版+Re-open），台账事后被倒填时亮**drift 警告**（存档不变、
+提示查因重封）而不是悄悄变；控件卡新增 ✓ 已封存月 chips 一键跳转；行内动作对封存月显示 🔒。
+守卫 `tests/bank-reco-finalize.test.mjs`（8 测）。
 
 ## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
 

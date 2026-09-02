@@ -9726,11 +9726,24 @@ type RecoLine = {
   ignoredAt?: string | null; ignored_at?: string | null;
   stmtMonth?: string | null; balanceSen?: number | null;
 };
+type RecoOutstanding = { day: string; description: string; amountSen: number };
+// The frozen record a Finalise press stores — shown instead of the live
+// figures once a month is closed, with a drift warning if the ledger moved.
+type RecoFinal = {
+  finalizedAt: string;
+  statementClosingSen: number | null; statementOpeningSen: number | null;
+  glSen: number; computedGlSen: number | null; balanced: boolean;
+  unclearedBookSen: number; unclearedBookCount: number;
+  unbookedStmtSen: number; unbookedStmtCount: number;
+  unclearedBook?: RecoOutstanding[];
+  unbookedStmt?: RecoOutstanding[];
+};
 type RecoReport = {
   statementClosingSen: number | null; statementOpeningSen: number | null; importedAt: string | null;
   unclearedBookSen: number; unclearedBookCount: number;
   unbookedStmtSen: number; unbookedStmtCount: number;
   glSen: number; computedGlSen: number | null; balanced: boolean;
+  final?: RecoFinal | null;
 };
 
 function parseCsvLine(line: string): string[] {
@@ -9762,7 +9775,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
   // pulled in so last month's in-transit cheques can still be ticked off.
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
   const [includeEarlier, setIncludeEarlier] = useState(true);
-  const [data, setData] = useState<{ migrationMissing: boolean; openingDate?: string | null; legs: RecoLeg[]; statementLines: RecoLine[] } | null>(null);
+  const [data, setData] = useState<{ migrationMissing: boolean; openingDate?: string | null; finalizedMonths?: string[]; legs: RecoLeg[]; statementLines: RecoLine[] } | null>(null);
   const [report, setReport] = useState<RecoReport | null>(null);
   const [showImport, setShowImport] = useState(false);
   const [csv, setCsv] = useState("");
@@ -9785,7 +9798,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     if (from) p.set("from", from);
     if (to) p.set("to", to);
     fetch(`/api/accounting/bank-reco?${p.toString()}`)
-      .then((r) => r.json() as Promise<{ success?: boolean; data?: { migrationMissing: boolean; openingDate?: string | null; legs: RecoLeg[]; statementLines: RecoLine[] } }>)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { migrationMissing: boolean; openingDate?: string | null; finalizedMonths?: string[]; legs: RecoLeg[]; statementLines: RecoLine[] } }>)
       .then((j) => { if (j?.success && j.data) setData(j.data); })
       .catch(() => {});
     fetch(`/api/accounting/bank-reco/report?account=${encodeURIComponent(account)}&month=${month}`)
@@ -10005,8 +10018,82 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     else toast.error(j?.error || "Update failed");
   };
 
+  // Freeze / unfreeze the month (owner 2026-09-02: 「match 完了就要 save 起来」).
+  const handleFinalize = async (reopen: boolean) => {
+    if (!account) return;
+    if (!reopen && report && !report.balanced) {
+      const gap = formatCurrency(Math.abs((report.computedGlSen ?? 0) - report.glSen));
+      if (!window.confirm(`Still out by ${gap}. Finalise anyway? The saved record will carry the difference.`)) return;
+    }
+    if (reopen && !window.confirm("Re-open this month? The saved reconciliation record is removed and its lines can be changed again.")) return;
+    setBusy(true);
+    try {
+      const res = await fetch("/api/accounting/bank-reco/finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountCode: account, month, reopen }),
+      });
+      const j = asMutationResponse(await res.json());
+      if (j?.success) {
+        toast.success(reopen ? "Month re-opened" : "Reconciliation finalised — saved for good");
+        load();
+      } else toast.error(j?.error || "Failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Print the SAVED record (never the live view — the point of finalising is
+  // that the paper matches the snapshot).
+  const printFinal = () => {
+    const f = report?.final;
+    if (!f) return;
+    const acct = bankCash.find((a) => a.code === account);
+    const rm = (n: number | null | undefined) => (n == null ? "—" : formatCurrency(n));
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const rows = (items: RecoOutstanding[] | undefined, title: string) =>
+      !items || items.length === 0
+        ? `<h3>${title} — none</h3>`
+        : `<h3>${title} (${items.length})</h3><table><thead><tr><th>Date</th><th>Description</th><th class="r">Amount (RM)</th></tr></thead><tbody>${items
+            .map((i) => `<tr><td>${i.day}</td><td>${esc(i.description || "")}</td><td class="r">${formatCurrency(i.amountSen)}</td></tr>`)
+            .join("")}</tbody></table>`;
+    const w = window.open("", "_blank", "width=900,height=700");
+    if (!w) { toast.error("Pop-up blocked — allow pop-ups to print"); return; }
+    w.document.write(`<!doctype html><html><head><title>Bank Reconciliation ${month}</title><style>
+      body{font-family:Arial,sans-serif;font-size:12px;color:#111;margin:32px}
+      h1{font-size:18px;margin:0 0 2px} h2{font-size:13px;font-weight:normal;color:#555;margin:0 0 16px}
+      h3{font-size:13px;margin:18px 0 6px}
+      table{border-collapse:collapse;width:100%} td,th{border:1px solid #ccc;padding:4px 8px;text-align:left}
+      .r{text-align:right;font-variant-numeric:tabular-nums}
+      .formula td{border:none;padding:3px 8px} .formula .line td{border-top:1px solid #111}
+      .badge{display:inline-block;padding:2px 10px;border:1px solid #111;border-radius:10px;font-weight:bold}
+      footer{margin-top:24px;color:#777;font-size:10px}
+    </style></head><body>
+      <h1>Bank Reconciliation Statement — ${month}</h1>
+      <h2>${account} ${acct ? esc(acct.name) : ""} · finalised ${String(f.finalizedAt).slice(0, 10)}</h2>
+      <p class="badge">${f.balanced ? "BALANCED" : "OUT BY " + formatCurrency(Math.abs((f.computedGlSen ?? 0) - f.glSen))}</p>
+      <table class="formula">
+        <tr><td>Balance per bank statement</td><td class="r">${rm(f.statementClosingSen)}</td></tr>
+        <tr><td>+ In the book, not yet in the bank (${f.unclearedBookCount})</td><td class="r">${rm(f.unclearedBookSen)}</td></tr>
+        <tr><td>− In the bank, not yet in the book (${f.unbookedStmtCount})</td><td class="r">${rm(f.unbookedStmtSen)}</td></tr>
+        <tr class="line"><td><b>= Book balance should be</b></td><td class="r"><b>${rm(f.computedGlSen)}</b></td></tr>
+        <tr><td><b>Book balance per general ledger</b></td><td class="r"><b>${rm(f.glSen)}</b></td></tr>
+      </table>
+      ${rows(f.unclearedBook, "Outstanding — in the book, not yet through the bank")}
+      ${rows(f.unbookedStmt, "Outstanding — in the bank, not yet in the book")}
+      <footer>Generated by Hookka ERP · finalised ${esc(String(f.finalizedAt))}</footer>
+    </body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  };
+
   const legs = data?.legs ?? [];
   const stmt = data?.statementLines ?? [];
+  const recoFinal = report?.final ?? null;
+  const finalDrift = !!(recoFinal && report &&
+    (recoFinal.glSen !== report.glSen || (recoFinal.computedGlSen ?? null) !== (report.computedGlSen ?? null)));
+  const isFinalMonth = (d: string) => (data?.finalizedMonths ?? []).includes(d.slice(0, 7));
   // Dual-key read of the ignore stamp (BUG class C1 — adapter camelCases).
   const ignAt = (s: RecoLine) => s.ignoredAt ?? s.ignored_at ?? null;
   // Bank lines dated before the opening date are already inside the keyed
@@ -10069,6 +10156,21 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
               Statement {stmt.length} lines ({unmatchedStmt.length} open{ignoredStmt.length > 0 ? ` · ${ignoredStmt.length} ignored` : ""}{preStmt.length > 0 ? ` · ${preStmt.length} before opening` : ""}) · Book {legs.length} legs ({unmatchedLegs.length} open)
             </div>
           )}
+          {(data?.finalizedMonths?.length ?? 0) > 0 && (
+            <div className="flex items-center gap-1.5 pb-1.5 flex-wrap w-full">
+              <span className="text-[11px] text-[#6B7280]">Finalised months:</span>
+              {(data?.finalizedMonths ?? []).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setMonth(m)}
+                  className={`rounded-full px-2 py-0.5 text-[11px] border cursor-pointer ${m === month ? "bg-[#EAF3DE] border-[#27500A] text-[#27500A] font-semibold" : "bg-white border-[#E2DDD8] text-[#6B7280] hover:border-[#27500A] hover:text-[#27500A]"}`}
+                  title="Open this month's saved reconciliation"
+                >
+                  ✓ {m}
+                </button>
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -10113,24 +10215,51 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
-              <div className="text-sm font-semibold text-[#1F1D1B]">Reconciliation — {month}</div>
-              {report.balanced ? (
-                <span className="rounded-full bg-[#EAF3DE] text-[#27500A] text-xs font-semibold px-2.5 py-0.5">Balanced ✓</span>
-              ) : (
-                <span className="rounded-full bg-[#F7E5E1] text-[#9A3A2D] text-xs font-semibold px-2.5 py-0.5">
-                  Out by {formatCurrency(Math.abs((report.computedGlSen ?? 0) - report.glSen))} · book {(report.computedGlSen ?? 0) - report.glSen < 0 ? "above" : "below"} bank
-                </span>
-              )}
+              <div className="text-sm font-semibold text-[#1F1D1B]">
+                Reconciliation — {month}
+                {recoFinal && <span className="ml-2 text-[11px] font-normal text-[#6B7280]">finalised {String(recoFinal.finalizedAt).slice(0, 10)}</span>}
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {recoFinal ? (
+                  <span className={`rounded-full text-xs font-semibold px-2.5 py-0.5 ${recoFinal.balanced ? "bg-[#EAF3DE] text-[#27500A]" : "bg-[#F7E5E1] text-[#9A3A2D]"}`}>
+                    🔒 Finalised{recoFinal.balanced ? " · Balanced ✓" : ` · out by ${formatCurrency(Math.abs((recoFinal.computedGlSen ?? 0) - recoFinal.glSen))}`}
+                  </span>
+                ) : report.balanced ? (
+                  <span className="rounded-full bg-[#EAF3DE] text-[#27500A] text-xs font-semibold px-2.5 py-0.5">Balanced ✓</span>
+                ) : (
+                  <span className="rounded-full bg-[#F7E5E1] text-[#9A3A2D] text-xs font-semibold px-2.5 py-0.5">
+                    Out by {formatCurrency(Math.abs((report.computedGlSen ?? 0) - report.glSen))} · book {(report.computedGlSen ?? 0) - report.glSen < 0 ? "above" : "below"} bank
+                  </span>
+                )}
+                {recoFinal ? (
+                  <>
+                    <Button variant="outline" size="sm" onClick={printFinal}>Print</Button>
+                    <Button variant="outline" size="sm" disabled={busy} onClick={() => handleFinalize(true)}>Re-open</Button>
+                  </>
+                ) : (
+                  <Button variant={report.balanced ? "primary" : "outline"} size="sm" disabled={busy} onClick={() => handleFinalize(false)}>
+                    Finalise this month
+                  </Button>
+                )}
+              </div>
             </div>
-            <table className="text-sm w-full max-w-md">
-              <tbody>
-                <tr><td className="py-0.5 text-[#6B7280]">Bank statement closing balance</td><td className="py-0.5 text-right tabular-nums">{report.statementClosingSen != null ? formatCurrency(report.statementClosingSen) : "—"}</td></tr>
-                <tr><td className="py-0.5 text-[#6B7280]">+ In the book, not yet in the bank ({report.unclearedBookCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(report.unclearedBookSen)}</td></tr>
-                <tr><td className="py-0.5 text-[#6B7280]">− In the bank, not yet in the book ({report.unbookedStmtCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(report.unbookedStmtSen)}</td></tr>
-                <tr className="border-t border-[#E2DDD8]"><td className="py-0.5 font-medium">= Book balance should be</td><td className="py-0.5 text-right tabular-nums font-medium">{report.computedGlSen != null ? formatCurrency(report.computedGlSen) : "—"}</td></tr>
-                <tr><td className="py-0.5 font-medium">Book balance today (GL {account})</td><td className="py-0.5 text-right tabular-nums font-medium">{formatCurrency(report.glSen)}</td></tr>
-              </tbody>
-            </table>
+            {finalDrift && report && recoFinal && (
+              <div className="mb-2 rounded-md bg-[#FBF3E4] border border-[#E0C989] px-3 py-2 text-xs text-[#7A5B12]">
+                ⚠ The books have MOVED since this month was finalised — book balance now {formatCurrency(report.glSen)} vs saved {formatCurrency(recoFinal.glSen)}.
+                Something dated in or before {month} was added or changed. Check what, then Re-open and finalise again.
+              </div>
+            )}
+            {(() => { const shown = recoFinal ?? report; return (
+              <table className="text-sm w-full max-w-md">
+                <tbody>
+                  <tr><td className="py-0.5 text-[#6B7280]">Bank statement closing balance</td><td className="py-0.5 text-right tabular-nums">{shown.statementClosingSen != null ? formatCurrency(shown.statementClosingSen) : "—"}</td></tr>
+                  <tr><td className="py-0.5 text-[#6B7280]">+ In the book, not yet in the bank ({shown.unclearedBookCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(shown.unclearedBookSen)}</td></tr>
+                  <tr><td className="py-0.5 text-[#6B7280]">− In the bank, not yet in the book ({shown.unbookedStmtCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(shown.unbookedStmtSen)}</td></tr>
+                  <tr className="border-t border-[#E2DDD8]"><td className="py-0.5 font-medium">= Book balance should be</td><td className="py-0.5 text-right tabular-nums font-medium">{shown.computedGlSen != null ? formatCurrency(shown.computedGlSen) : "—"}</td></tr>
+                  <tr><td className="py-0.5 font-medium">Book balance {recoFinal ? "at finalising" : "today"} (GL {account})</td><td className="py-0.5 text-right tabular-nums font-medium">{formatCurrency(shown.glSen)}</td></tr>
+                </tbody>
+              </table>
+            ); })()}
           </CardContent>
         </Card>
       )}
@@ -10210,18 +10339,24 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                         <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdIn(s.amountSen)}</td>
                         <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1.5 text-right whitespace-nowrap">
-                          {candidates.length > 0 ? (
-                            <select defaultValue="" onChange={(e) => handleMatch(s.id, e.target.value)} className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] max-w-40">
-                              <option value="">match to…</option>
-                              {candidates.map((l) => (
-                                <option key={l.id} value={l.id}>{l.day} {l.description.slice(0, 30)}</option>
-                              ))}
-                            </select>
+                          {isFinalMonth(s.txnDate) ? (
+                            <span className="text-[11px] text-[#9CA3AF]" title="Month finalised — re-open it on the report card to change anything">🔒 finalised</span>
                           ) : (
-                            <span className="text-[11px] text-[#9A3A2D]">not in book</span>
+                            <>
+                              {candidates.length > 0 ? (
+                                <select defaultValue="" onChange={(e) => handleMatch(s.id, e.target.value)} className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] max-w-40">
+                                  <option value="">match to…</option>
+                                  {candidates.map((l) => (
+                                    <option key={l.id} value={l.id}>{l.day} {l.description.slice(0, 30)}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <span className="text-[11px] text-[#9A3A2D]">not in book</span>
+                              )}
+                              <button onClick={() => handleIgnore(s.id, true)} className="ml-2 text-[#9CA3AF] hover:text-[#1F1D1B] text-[11px] underline decoration-dotted cursor-pointer" title="Leave this line out of the reconciliation">ignore</button>
+                              <button onClick={() => handleDeleteLine(s.id)} className="ml-1.5 text-[#9CA3AF] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">del</button>
+                            </>
                           )}
-                          <button onClick={() => handleIgnore(s.id, true)} className="ml-2 text-[#9CA3AF] hover:text-[#1F1D1B] text-[11px] underline decoration-dotted cursor-pointer" title="Leave this line out of the reconciliation">ignore</button>
-                          <button onClick={() => handleDeleteLine(s.id)} className="ml-1.5 text-[#9CA3AF] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">del</button>
                         </td>
                       </tr>
                     );
@@ -10282,7 +10417,11 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                         <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdIn(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right whitespace-nowrap">
-                          <button onClick={() => handleUnmatch(s.id)} className="text-[#6B7280] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">✓ unmatch</button>
+                          {isFinalMonth(s.txnDate) ? (
+                            <span className="text-[11px] text-[#9CA3AF]">🔒</span>
+                          ) : (
+                            <button onClick={() => handleUnmatch(s.id)} className="text-[#6B7280] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">✓ unmatch</button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -10332,7 +10471,11 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                         <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdIn(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1 text-right whitespace-nowrap">
-                          <button onClick={() => handleIgnore(s.id, false)} className="text-[#6B7280] hover:text-[#27500A] text-[11px] underline decoration-dotted cursor-pointer">restore</button>
+                          {isFinalMonth(s.txnDate) ? (
+                            <span className="text-[11px] text-[#9CA3AF]">🔒</span>
+                          ) : (
+                            <button onClick={() => handleIgnore(s.id, false)} className="text-[#6B7280] hover:text-[#27500A] text-[11px] underline decoration-dotted cursor-pointer">restore</button>
+                          )}
                         </td>
                       </tr>
                     ))}

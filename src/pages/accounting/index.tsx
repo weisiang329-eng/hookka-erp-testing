@@ -10183,7 +10183,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
       )}
 
       {account && data && !data.migrationMissing && (
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+        <div className="grid grid-cols-1 gap-4 items-start">
           {/* Bank side — open lines */}
           <Card>
             <CardContent className="p-0 overflow-x-auto">
@@ -10268,7 +10268,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
       )}
 
       {account && data && !data.migrationMissing && (matchedStmt.length > 0 || ignoredStmt.length > 0 || preStmt.length > 0) && (
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+        <div className="grid grid-cols-1 gap-4 items-start">
           {matchedStmt.length > 0 && (
             <details className="rounded-lg border border-[#E2DDD8] bg-white">
               <summary className="cursor-pointer px-4 py-2 text-sm font-medium text-[#1F1D1B]">Matched ({matchedStmt.length})</summary>
@@ -10346,7 +10346,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
       {account && data && !data.migrationMissing && (
         <p className="text-[11px] text-[#9CA3AF]">
-          Left = what the bank says, right = what the book says; a clean month leaves both sides empty.
+          Top = what the bank says, below it = what the book says; a clean month leaves both empty.
           "Not in book" → record it via Payments / Receipts, then match. "Not yet in the bank" → usually an
           uncleared cheque or in-transit transfer — it explains the report difference. Ignored lines stay out of the report.
         </p>

@@ -30,7 +30,7 @@ import { parseDebtorCode } from "../../lib/debtor";
 import { defaultPnlBucket, pnlBucketFor } from "../../lib/pnl-bucket";
 import { bsSectionFor, bsSectionClass } from "../../lib/bs-section";
 import type { BsSection } from "../../lib/bs-section";
-import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
+import { buildStatement, splitByLargestRemainder } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
 import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "../lib/doc-number-service";
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
@@ -38,6 +38,8 @@ import { ensurePartialPaymentColumns } from "../lib/ensure-partial-payment";
 import { ensureFinanceOrgColumns } from "../lib/ensure-finance-org";
 import { apRowBeforeOpening, legBeforeOpening, rowBeforeOpening } from "../../lib/opening-floor";
 import { applyOpeningSlice, windowCoversMonth } from "../../lib/opening-slice";
+import { labourInjectMonths } from "../../lib/labour-inject";
+import { projectedLabourByDept } from "../lib/labour-projection";
 import { groupPayslipsByMonthDept, forecastEntryKind, monthHasDeptForecast, labourMappedAccounts } from "../../lib/salary-dept";
 import { ensureTfTables, getTfSources, saveTfSources, loadTfDraws } from "../lib/trade-finance";
 import type { TfSource } from "../lib/trade-finance";
@@ -6154,6 +6156,53 @@ interface DocDateCtx {
   // periodic-inventory stock chain re-reads overlapping windows; cached
   // results are shared and must be treated as READ-ONLY by callers.
   glMemo?: Map<string, { net: GlWindow; coa: Map<string, { name: string; type: CoaRow["type"] }> }>;
+  // Per-request memo for the report-layer labour injection (key = ym →
+  // debit lines). The dashboard walks many one-month windows on one ctx; a
+  // dry payroll projection must run at most once per month per request.
+  labourMemo?: Map<string, { account: string; sen: number }[]>;
+}
+
+// Report-layer labour for one month (owner 2026-08-31 「任何时候我看P&L 时你都
+// 自动提取」): the payslips' department costs if any were generated, else a
+// dry run of the same payroll engine; mapped to accounts exactly like the
+// Labour tab's Post would. Returns [] when the month has neither payslips nor
+// clock data. Callers must ALREADY have established the month is unrecorded
+// (no salary-accrual credit in the GL) via labourInjectMonths.
+async function labourInjectionLines(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  ym: string,
+  memo?: Map<string, { account: string; sen: number }[]>,
+): Promise<{ account: string; sen: number }[]> {
+  const hit = memo?.get(ym);
+  if (hit) return hit;
+  let byDept: LabourDeptAgg[] = [];
+  let map: LabourMap | null = null;
+  try {
+    const agg = await aggregateLabour(db, ym, orgId);
+    byDept = agg.byDept;
+    map = agg.map;
+  } catch { /* payslips table absent → dry-run below */ }
+  if (!byDept.length) {
+    try {
+      if (!map) map = await getLabourMap(db);
+      const proj = await projectedLabourByDept(db, ym);
+      byDept = proj.map((d) => ({
+        departmentCode: d.departmentCode,
+        account: (map as LabourMap).byDept[d.departmentCode] ?? (map as LabourMap).fallback,
+        workers: d.workers,
+        grossSen: d.grossSen,
+        employerSen: d.epfSen + d.socsoSen + d.eisSen,
+        costSen: d.grossSen + d.epfSen + d.socsoSen + d.eisSen,
+        epfSen: d.epfSen,
+        socsoSen: d.socsoSen,
+        eisSen: d.eisSen,
+      }));
+    } catch { byDept = []; }
+  }
+  const lines = byDept.length && map ? labourDebitLines(byDept, map) : [];
+  memo?.set(ym, lines);
+  return lines;
 }
 
 // Prior-cumulative P&L balances (the old accountant's TB as at the month-end
@@ -6189,6 +6238,7 @@ const PNL_TYPES: ReadonlySet<CoaRow["type"]> = new Set(["REVENUE", "COST", "EXPE
 
 async function glWindowSigned(
   db: Env["Variables"]["DB"],
+  orgId: string,
   startYm: string | null,
   endYm: string | null,
   dc: DocDateCtx,
@@ -6205,6 +6255,30 @@ async function glWindowSigned(
   const { docDate, openingDate: obDate } = dc;
   const net: GlWindow = new Map();
   const openingNet: GlWindow = new Map(); // opening_balance(+reversal) legs, netted
+  // Salary accruals ALREADY in the GL, per month and ACCOUNT: any entry that
+  // credits 410-0010 (a Labour-tab post OR a manual JV) marks the accounts its
+  // debit legs touched. Those (month, account) pairs keep the owner's figures;
+  // everything else still gets the report-layer labour injection below.
+  // Account-level, not month-level (BUG-2026-08-31-172): the owner's Aug'26
+  // office-salary JV (CR 410-0010 55,000 → DR 900-S00x) used to silence the
+  // WHOLE month, wiping the production 750-x auto-extract with it.
+  const salaryEntryYm = new Map<string, string>(); // sourceType::sourceId → ym of its 410-0010 credit
+  for (const l of legRes.results ?? []) {
+    if ((Number(l.creditSen) || 0) <= 0) continue;
+    if (resolve(l.accountCode) !== LABOUR_ACCRUAL_ACCT) continue;
+    const dd = docDate(l.sourceType, l.sourceId, l.postedAt);
+    if (legBeforeOpening(l.sourceType, dd, obDate) || isOpeningSource(l.sourceType)) continue;
+    salaryEntryYm.set(`${l.sourceType}::${l.sourceId}`, dd.slice(0, 7));
+  }
+  const recordedSalaryAccts = new Map<string, Set<string>>(); // ym → debited accounts
+  for (const l of legRes.results ?? []) {
+    if ((Number(l.debitSen) || 0) <= 0) continue;
+    const ym = salaryEntryYm.get(`${l.sourceType}::${l.sourceId}`);
+    if (!ym) continue;
+    let set = recordedSalaryAccts.get(ym);
+    if (!set) { set = new Set(); recordedSalaryAccts.set(ym, set); }
+    set.add(resolve(l.accountCode));
+  }
   for (const l of legRes.results ?? []) {
     const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
     if (legBeforeOpening(l.sourceType, dd, obDate)) continue; // pre-opening: not extracted
@@ -6224,6 +6298,26 @@ async function glWindowSigned(
     if (endYm && ym > endYm) continue;
     const code = resolve(l.accountCode);
     net.set(code, (net.get(code) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
+  }
+  // Report-layer labour (owner 2026-08-31 「任何时候我看P&L 时你都自动提取」):
+  // the payroll figures show up without waiting for a post — stored payslips
+  // if generated, else a dry run of the same engine. Per line: an account the
+  // owner already recorded that month keeps HIS figure (以我记录的为准), the
+  // rest inject. Display-only: TB/BS carry nothing until an actual post (same
+  // trade-off as the opening slice).
+  for (const ym of labourInjectMonths({
+    startYm,
+    endYm,
+    openingYm: obDate ? obDate.slice(0, 7) : null,
+    nowYm: new Date().toISOString().slice(0, 7),
+    recordedYms: new Set(), // recording is handled per account below
+  })) {
+    dc.labourMemo ??= new Map();
+    const recorded = recordedSalaryAccts.get(ym);
+    for (const { account, sen } of await labourInjectionLines(db, orgId, ym, dc.labourMemo)) {
+      if (recorded?.has(account)) continue;
+      net.set(account, (net.get(account) ?? 0) + sen);
+    }
   }
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, { name: a.name, type: a.type }] as const));
   // Mid-year opening: the opening month's P&L = opening cumulative − prior
@@ -6342,6 +6436,15 @@ type MaterialCostData = {
   // nonzero stock figure is verifiably the owner's own number. 'auto' →
   // FIFO/BOM behaviour unchanged.
   rmValuationMode: "auto" | "stock_take_only";
+  // Same rule for FINISHED GOODS (owner 2026-08-31 「让他别自动capture」, kv
+  // `fg_valuation_mode`): 'stock_take_only' → the FG month-end value is only
+  // what the owner keyed (stock_take pseudo-group "FG"; the 30/04 opening seed
+  // counts as its month's number), 0 otherwise — the ~1,600-batch automatic
+  // valuation stops feeding the statements. 'auto' → batch computation as
+  // before. WIP is untouched either way.
+  fgValuationMode: "auto" | "stock_take_only";
+  fgSeedSen: number;
+  fgSeedYm: string | null;
   // Opening seed value per group (material_opening_stock, qty × unitCost) and
   // the month it belongs to (the cutover month) — the one "import" that exists
   // before any stock_take rows.
@@ -6788,6 +6891,12 @@ async function loadMaterialCostData(
     .catch(() => null);
   const rmValuationMode: "auto" | "stock_take_only" =
     (modeRow?.value ?? "").trim() === "stock_take_only" ? "stock_take_only" : "auto";
+  const fgModeRow = await db
+    .prepare("SELECT value FROM kv_config WHERE key = 'fg_valuation_mode'")
+    .first<{ value: string | null }>()
+    .catch(() => null);
+  const fgValuationMode: "auto" | "stock_take_only" =
+    (fgModeRow?.value ?? "").trim() === "stock_take_only" ? "stock_take_only" : "auto";
   const seedByGroup = new Map<string, number>();
   for (const r of openingRows) {
     const g = groupOf.get(r.rmId) ?? "OTHER";
@@ -6828,6 +6937,9 @@ async function loadMaterialCostData(
     piPurchaseCum,
     stockTakeByGroupYm,
     rmValuationMode,
+    fgValuationMode,
+    fgSeedSen: invSeed.fgSen,
+    fgSeedYm: invSeed.asOfDate ? invSeed.asOfDate.slice(0, 7) : null,
     seedByGroup,
     seedYm,
     wipByYm,
@@ -6899,8 +7011,23 @@ function materialWindow(data: MaterialCostData, startYm: string | null, endYm: s
   const wipOpenSen = (prevKey && wipSt?.has(prevKey)) ? (wipSt.get(prevKey) as number) : wipOpenSenAuto;
   const wipCloseSen = wipSt?.has(endKey) ? (wipSt.get(endKey) as number) : wipCloseSenAuto;
   const fgSt = data.stockTakeByGroupYm.get("FG");
-  const fgOpenSen = (prevKey && fgSt?.has(prevKey)) ? (fgSt.get(prevKey) as number) : fgOpenSenAuto;
-  const fgCloseSen = fgSt?.has(endKey) ? (fgSt.get(endKey) as number) : fgCloseSenAuto;
+  // FG periodic mode (owner 2026-08-31 「让他别自动capture」, same v3 rule as
+  // RM): the month-end FG value is exactly the owner's keyed number for that
+  // month (stock_take pseudo-group "FG"; the opening seed counts as its own
+  // month's number), 0 otherwise. 'auto' keeps the per-batch computation.
+  const noAutoFg = data.fgValuationMode === "stock_take_only";
+  const fgImported = (ym: string | null): number => {
+    if (!ym) return 0;
+    if (fgSt?.has(ym)) return fgSt.get(ym) as number;
+    if (data.fgSeedYm && ym === data.fgSeedYm) return data.fgSeedSen;
+    return 0;
+  };
+  const fgOpenSen = noAutoFg
+    ? fgImported(prevKey)
+    : (prevKey && fgSt?.has(prevKey)) ? (fgSt.get(prevKey) as number) : fgOpenSenAuto;
+  const fgCloseSen = noAutoFg
+    ? fgImported(endKey)
+    : fgSt?.has(endKey) ? (fgSt.get(endKey) as number) : fgCloseSenAuto;
   return { rmGroups, wipOpenSen, wipCloseSen, fgOpenSen, fgCloseSen, warnings: data.warnings };
 }
 
@@ -7122,7 +7249,7 @@ async function computePnlWindow(
   // All OTHER P&L lines (labour / overhead / carriage / SST / revenue / other
   // income / expenses) still come from the GL window untouched.
   const [gl, ratio] = await Promise.all([
-    glWindowSigned(db, startYm, endYm, dc),
+    glWindowSigned(db, orgId, startYm, endYm, dc),
     costByLineWindow(db, startYm, endYm),
   ]);
   // Material window derived synchronously from the single-replay checkpoints.
@@ -7536,6 +7663,24 @@ app.get("/cost-expense-classes", async (c) => {
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
   const byAcct = new Map<string, number[]>();
   const openingNetCec = new Map<string, number>(); // opening legs on COST/EXPENSE accounts
+  // Same account-level recorded-salary map as glWindowSigned (BUG-2026-08-31-172).
+  const salaryEntryYmCec = new Map<string, string>();
+  for (const l of legRes.results ?? []) {
+    if ((Number(l.creditSen) || 0) <= 0) continue;
+    if (resolve(l.accountCode) !== LABOUR_ACCRUAL_ACCT) continue;
+    const dd = docDate(l.sourceType, l.sourceId, l.postedAt);
+    if (legBeforeOpening(l.sourceType, dd, obDateCec) || isOpeningSource(l.sourceType)) continue;
+    salaryEntryYmCec.set(`${l.sourceType}::${l.sourceId}`, dd.slice(0, 7));
+  }
+  const recordedSalaryAcctsCec = new Map<string, Set<string>>();
+  for (const l of legRes.results ?? []) {
+    if ((Number(l.debitSen) || 0) <= 0) continue;
+    const ym = salaryEntryYmCec.get(`${l.sourceType}::${l.sourceId}`);
+    if (!ym) continue;
+    let set = recordedSalaryAcctsCec.get(ym);
+    if (!set) { set = new Set(); recordedSalaryAcctsCec.set(ym, set); }
+    set.add(resolve(l.accountCode));
+  }
   for (const l of legRes.results ?? []) {
     const dd = docDate(l.sourceType, l.sourceId, l.postedAt); // by document date
     if (legBeforeOpening(l.sourceType, dd, obDateCec)) continue; // pre-opening: not extracted
@@ -7555,6 +7700,29 @@ app.get("/cost-expense-classes", async (c) => {
     let arr = byAcct.get(code);
     if (!arr) { arr = new Array(12).fill(0); byAcct.set(code, arr); }
     arr[idx] += (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+  }
+  // Report-layer labour — same rule as glWindowSigned (owner 2026-08-31):
+  // payroll figures inject per line; an account the owner recorded that month
+  // keeps his figure.
+  {
+    const injMemo = new Map<string, { account: string; sen: number }[]>();
+    for (const ym of labourInjectMonths({
+      startYm,
+      endYm,
+      openingYm: obDateCec ? obDateCec.slice(0, 7) : null,
+      nowYm: new Date().toISOString().slice(0, 7),
+      recordedYms: new Set(),
+    })) {
+      const idx = cols.indexOf(ym);
+      if (idx < 0) continue;
+      const recorded = recordedSalaryAcctsCec.get(ym);
+      for (const { account, sen } of await labourInjectionLines(db, getOrgId(c), ym, injMemo)) {
+        if (recorded?.has(account)) continue;
+        let arr = byAcct.get(account);
+        if (!arr) { arr = new Array(12).fill(0); byAcct.set(account, arr); }
+        arr[idx] += sen;
+      }
+    }
   }
   // Mid-year opening: show the opening-month slice (opening cumulative − prior
   // month-end TB) in the opening month's column — same rule as glWindowSigned.
@@ -7778,6 +7946,7 @@ async function computeCashflowStatement(
   db: Env["Variables"]["DB"],
   period: string,
   editable: boolean,
+  orgId: string,
 ) {
   // Local alias so the extracted body reads exactly as it did in the route.
   const c: { var: { DB: Env["Variables"]["DB"] } } = { var: { DB: db } };
@@ -7798,8 +7967,8 @@ async function computeCashflowStatement(
   }
 
   const legRes = await c.var.DB.prepare(
-    "SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries WHERE hidden = 0",
-  ).all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>();
+    "SELECT accountCode, sourceType, sourceId, debitSen, creditSen, postedAt, description FROM ledger_journal_entries WHERE hidden = 0",
+  ).all<{ accountCode: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; description: string | null }>();
   const allLegs = (legRes.results ?? [])
     .filter((l) => !legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDate)) // pre-opening: not extracted
     .map((l) => ({
@@ -7809,6 +7978,7 @@ async function computeCashflowStatement(
       debitSen: l.debitSen,
       creditSen: l.creditSen,
       ym: docDate(l.sourceType, l.sourceId, l.postedAt).slice(0, 7), // by document date
+      description: l.description ?? "",
     }));
 
   const byEntry = new Map<string, typeof allLegs>();
@@ -7821,7 +7991,33 @@ async function computeCashflowStatement(
 
   const classified: ClassifiedLeg[] = [];
   const bankLegs: BankLeg[] = [];
-  const piIds = new Set<string>();
+  // Payment NUMBERS, not PI ids — a supplier_payment leg's sourceId is the
+  // voucher number (HPV-…). The old code fed these straight into
+  // `purchase_invoice_items WHERE pi_id = ?`, which matched nothing, so every
+  // raw-material payment fell to "Unallocated raw material" (owner
+  // 2026-08-27: 「unallocated raw material 要分出来」). Family match so
+  // EDITED payments (live legs = supplier_payment_restate_post:…) split too.
+  const paymentNos = new Set<string>();
+  // Other-creditor payments (Houzs Century repayments, GVP, transporters …)
+  // also settle a creditor-control contra and land in the Raw Materials
+  // section, but have no PI behind them. Measured 2026-08-27: they were the
+  // bulk of "Unallocated raw material" (Aug'26 RM 309,463.37 = supplier
+  // payments 62,133.10 + other-party payments 247,330.27, to the sen). Name
+  // each by its payee instead (owner: 「必须要知道还什么」).
+  // Other-creditor payments are NOT classified by their contra (the 405
+  // control) — the owner reads this statement as a receipts-and-payments
+  // report (2026-08-27 「根据purpose 放去相对应的account」), so each payment is
+  // re-routed to the counterAccounts of the bills it settled: transporter
+  // bills land in Transport expense, SMD's in Capex, Houzs Century's (bills
+  // that debit 400-0000, i.e. suppliers paid on our behalf) in Raw Materials.
+  // The legs are stashed here and re-injected as per-account pseudo-legs
+  // below, once the bill mixes are loaded.
+  const opLegs: (ClassifiedLeg & { description: string })[] = [];
+  // Salary settlements (DR 410-0010 · CR bank): the payment voucher's
+  // description names the payroll month it pays ("… Salaries - May'26"), which
+  // is the month whose payslip department mix splits the cash (owner
+  // 2026-08-27 「salary 那边也是要拆散成department」).
+  const salaryLegs: { sourceId: string; description: string; ym: string }[] = [];
   for (const legs of byEntry.values()) {
     const hasBank = legs.some((l) => bankCodes.has(l.code));
     if (!hasBank) continue;
@@ -7830,11 +8026,20 @@ async function computeCashflowStatement(
       if (bankCodes.has(l.code)) {
         bankLegs.push({ accountCode: l.code, debitSen: l.debitSen, creditSen: l.creditSen, ym: l.ym });
       } else if (!opening) {
+        if (l.sourceType.startsWith("other_party_payment")) {
+          opLegs.push({
+            accountCode: l.code, debitSen: l.debitSen, creditSen: l.creditSen,
+            ym: l.ym, sourceType: l.sourceType, sourceId: l.sourceId, description: l.description,
+          });
+          continue;
+        }
         classified.push({
           accountCode: l.code, debitSen: l.debitSen, creditSen: l.creditSen,
           ym: l.ym, sourceType: l.sourceType, sourceId: l.sourceId,
         });
-        if (l.sourceType === "supplier_payment") piIds.add(l.sourceId);
+        if (l.sourceType.startsWith("supplier_payment")) paymentNos.add(l.sourceId);
+        else if (l.code === LABOUR_ACCRUAL_ACCT)
+          salaryLegs.push({ sourceId: l.sourceId, description: l.description, ym: l.ym });
       }
     }
   }
@@ -7842,7 +8047,7 @@ async function computeCashflowStatement(
   const map = await getCashflowMap(c.var.DB);
   const sgOverride = await getCashflowStockGroupMap(c.var.DB);
   const rmSplit: RmSplit = {};
-  if (piIds.size) {
+  if (paymentNos.size || opLegs.length) {
     const rmRes = await c.var.DB.prepare("SELECT * FROM raw_materials").all<Record<string, unknown>>();
     const grpByCode = new Map<string, string>();
     for (const r of rmRes.results ?? []) {
@@ -7850,23 +8055,176 @@ async function computeCashflowStatement(
       const grp = String((r.item_group ?? r.itemGroup) ?? "");
       if (code) grpByCode.set(code, grp);
     }
-    for (const pi of piIds) {
-      const itRes = await c.var.DB.prepare("SELECT * FROM purchase_invoice_items WHERE pi_id = ?").bind(pi).all<Record<string, unknown>>();
-      const weights = new Map<string, number>();
+    // Per-PI material-line weights, computed once per PI and reused across
+    // every payment that touched it. A PI belongs to exactly one supplier, so
+    // the supplier-tagged fallback label is stable under the piId cache key.
+    const piWeightCache = new Map<string, Map<string, number>>();
+    const piWeightsFor = async (piId: string, supplier: string): Promise<Map<string, number>> => {
+      const hit = piWeightCache.get(piId);
+      if (hit) return hit;
+      const w = new Map<string, number>();
+      const itRes = await c.var.DB.prepare("SELECT * FROM purchase_invoice_items WHERE pi_id = ?").bind(piId).all<Record<string, unknown>>();
       for (const it of itRes.results ?? []) {
         const lt = String((it.line_type ?? it.lineType) ?? "STOCKED");
         const amt = Number((it.line_total_sen ?? it.lineTotalSen) ?? 0);
         const mc = String((it.material_code ?? it.materialCode) ?? "");
         const grp = mc ? grpByCode.get(mc) ?? "" : "";
-        const line = lt === "TAX" ? "Purchase of Other & Packaging" : rawMaterialLineFor(grp, sgOverride);
-        weights.set(line, (weights.get(line) ?? 0) + Math.max(0, amt));
+        // Owner 2026-08-27 「拆散」: one row PER STOCK GROUP, not the four
+        // rolled-up lines. The stock-group override map still renames a group
+        // when set; tax rides its own line; a line with no resolvable group is
+        // named by its SUPPLIER (owner 2026-08-31 「这个我也有要分」) so he can
+        // see whose invoice needs a material code — or that it is a service.
+        const line = lt === "TAX" ? "SST / TAX" : grp ? (sgOverride[grp] ?? grp) : `Unallocated — ${supplier}`;
+        w.set(line, (w.get(line) ?? 0) + Math.max(0, amt));
       }
-      rmSplit[pi] = [...weights.entries()].map(([line, weight]) => ({ line, weight }));
+      piWeightCache.set(piId, w);
+      return w;
+    };
+    // What one payment actually settled: its allocation rows, weighted by
+    // the BOOKED amount each row paid off. Rows the system can name but not
+    // split get their own labelled line (owner 2026-08-27 「必须要知道还
+    // 什么」): advances (no PI yet), opening-balance PIs (pi-ob-*, item
+    // lines predate the system), trade-finance repayments. Discount
+    // markers (CREDIT_NOTE) are not cash and stay out.
+    const weightsForPayment = async (payNo: string): Promise<Map<string, number>> => {
+      const rowsRes = await c.var.DB.prepare(
+        `SELECT sp.purchase_invoice_id AS purchase_invoice_id, sp.booked_sen AS booked_sen, sp.amount_sen AS amount_sen,
+                sp.supplier_name AS supplier_name, COALESCE(sp.method,'') AS method
+           FROM supplier_payments sp
+          WHERE sp.payment_no = ? AND COALESCE(sp.method,'') <> 'CREDIT_NOTE'`,
+      ).bind(payNo).all<Record<string, unknown>>();
+      const weights = new Map<string, number>();
+      const bump = (line: string, sen: number) => weights.set(line, (weights.get(line) ?? 0) + sen);
+      for (const row of rowsRes.results ?? []) {
+        const piId = String(row.purchaseInvoiceId ?? row.purchase_invoice_id ?? "");
+        const booked = Math.max(0, Number(row.bookedSen ?? row.booked_sen ?? row.amountSen ?? row.amount_sen) || 0);
+        if (!booked) continue;
+        const supplier = String(row.supplierName ?? row.supplier_name ?? "").trim() || "unknown supplier";
+        if (String(row.method ?? "") === "TF_REPAYMENT") { bump("Trade finance repayment", booked); continue; }
+        if (!piId) { bump("Supplier advance / deposit", booked); continue; }
+        const w = await piWeightsFor(piId, supplier);
+        let totalW = 0;
+        for (const v of w.values()) totalW += v;
+        // Owner 2026-08-31 「我想要分」: pre-system opening invoices carry no
+        // item lines, but they DO carry a supplier — one row per supplier
+        // answers 还了谁的旧账 without inventing a material mix.
+        if (!totalW) { bump(piId.startsWith("pi-ob-") ? `Opening creditors — ${supplier}` : `Unallocated — ${supplier}`, booked); continue; }
+        for (const [line, lw] of w) bump(line, (booked * lw) / totalW);
+      }
+      return weights;
+    };
+    for (const payNo of paymentNos) {
+      const weights = await weightsForPayment(payNo);
+      if (weights.size) {
+        rmSplit[payNo] = [...weights.entries()].map(([line, weight]) => ({ line, weight: Math.round(weight) }));
+      }
+    }
+    if (opLegs.length) {
+    // Purpose mix per other-party payment = its bill allocations × each bill's
+    // item counterAccount mix. A payment whose bills carry no usable items
+    // (opening bills, missing data) keeps its original contra and shows as a
+    // "<payee> (other creditor)" row instead — named, never silently smeared.
+    const allocRes = await c.var.DB.prepare(
+      "SELECT payment_no AS payment_no, bill_id AS bill_id, amount_sen AS amount_sen, party_name AS party_name FROM other_party_payments",
+    ).all<Record<string, unknown>>();
+    const itemsRes = await c.var.DB.prepare(
+      "SELECT billId AS bill_id, counterAccount AS counter_account, amountSen AS amount_sen FROM other_party_bill_items",
+    ).all<Record<string, unknown>>();
+    const billMix = new Map<string, Map<string, number>>();
+    for (const r of itemsRes.results ?? []) {
+      const bid = String(r.billId ?? r.bill_id ?? "");
+      const acct = String(r.counterAccount ?? r.counter_account ?? "").trim();
+      const sen = Math.max(0, Number(r.amountSen ?? r.amount_sen) || 0);
+      if (!bid || !acct || !sen) continue;
+      const m = billMix.get(bid) ?? new Map<string, number>();
+      m.set(acct, (m.get(acct) ?? 0) + sen);
+      billMix.set(bid, m);
+    }
+    const payMix = new Map<string, Map<string, number>>();
+    const partyByNo = new Map<string, string>();
+    for (const r of allocRes.results ?? []) {
+      const no = String(r.paymentNo ?? r.payment_no ?? "");
+      if (!no) continue;
+      const nm = String(r.partyName ?? r.party_name ?? "").trim();
+      if (nm && !partyByNo.has(no)) partyByNo.set(no, nm);
+      const alloc = Math.max(0, Number(r.amountSen ?? r.amount_sen) || 0);
+      const mix = billMix.get(String(r.billId ?? r.bill_id ?? ""));
+      if (!alloc || !mix) continue;
+      let tot = 0;
+      for (const v of mix.values()) tot += v;
+      if (!tot) continue;
+      const pm = payMix.get(no) ?? new Map<string, number>();
+      for (const [acct, w] of mix) pm.set(acct, (pm.get(acct) ?? 0) + (alloc * w) / tot);
+      payMix.set(no, pm);
+    }
+    const isCreditorControl = (code: string): boolean => {
+      const a2 = coa.get(code);
+      const b2 = parseInt(code.split("-")[0] ?? "0", 10) || 0;
+      return a2?.sat === "SCC" || b2 === 400 || b2 === 405;
+    };
+    for (const leg of opLegs) {
+      const mix = payMix.get(leg.sourceId);
+      const payee = partyByNo.get(leg.sourceId) ?? "Other creditor";
+      if (!mix || !mix.size) {
+        classified.push({
+          accountCode: leg.accountCode, debitSen: leg.debitSen, creditSen: leg.creditSen,
+          ym: leg.ym, sourceType: leg.sourceType, sourceId: leg.sourceId,
+        });
+        rmSplit[`${leg.sourceId}@${leg.accountCode}`] ??= [{ line: `${payee} (other creditor)`, weight: 1 }];
+        continue;
+      }
+      const buckets = [...mix.entries()].map(([acct, w]) => ({ key: acct, weight: Math.round(w) }));
+      const dParts = splitByLargestRemainder(leg.debitSen, buckets);
+      const cParts = splitByLargestRemainder(leg.creditSen, buckets);
+      for (const { key: acct } of buckets) {
+        const d = dParts[acct] ?? 0, cr = cParts[acct] ?? 0;
+        if (!d && !cr) continue;
+        const rc = resolveAcct(acct);
+        classified.push({
+          accountCode: rc, debitSen: d, creditSen: cr,
+          ym: leg.ym, sourceType: leg.sourceType, sourceId: leg.sourceId,
+        });
+        // Only the money whose purpose account is itself a creditor control
+        // (Houzs Century's bill lines on 400-0000: suppliers paid on our
+        // behalf — owner 2026-08-29: old pre-system fabric) needs a label;
+        // parts on real purchase/expense accounts keep the account's own
+        // line via the engine. Keyed per account so they don't mix.
+        if (isCreditorControl(rc))
+          rmSplit[`${leg.sourceId}@${rc}`] ??= [{ line: `Suppliers settled via ${payee}`, weight: 1 }];
+      }
+    }
+    }
+  }
+
+  // Salary → department rows. Weights come from aggregateLabour of the payroll
+  // month the voucher description names ("… - May'26"); a leg with no parseable
+  // month uses its own document month; a month with no payslips gets no split
+  // and the leg stays on the account line.
+  const deptSplit: RmSplit = {};
+  if (salaryLegs.length) {
+    if (!map[LABOUR_ACCRUAL_ACCT]) map[LABOUR_ACCRUAL_ACCT] = { section: "DIRECT_LABOUR", order: 10 };
+    const MONTHS3 = { Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06", Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12" } as const;
+    const payrollYm = (desc: string, fallback: string): string => {
+      const m = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'(\d{2})\b/.exec(desc);
+      return m ? `20${m[2]}-${MONTHS3[m[1] as keyof typeof MONTHS3]}` : fallback;
+    };
+    const mixCache = new Map<string, { line: string; weight: number }[]>();
+    for (const leg of salaryLegs) {
+      const ym = payrollYm(leg.description, leg.ym);
+      let mix = mixCache.get(ym);
+      if (!mix) {
+        try {
+          const { byDept } = await aggregateLabour(c.var.DB, ym, orgId);
+          mix = byDept.filter((d) => d.costSen > 0).map((d) => ({ line: d.departmentCode, weight: d.costSen }));
+        } catch { mix = []; }
+        mixCache.set(ym, mix);
+      }
+      if (mix.length && !deptSplit[leg.sourceId]) deptSplit[leg.sourceId] = mix;
     }
   }
 
   const statement = buildStatement({
-    classified, bankLegs, coa, map, rmSplit, stockGroupOverride: sgOverride,
+    classified, bankLegs, coa, map, rmSplit, deptSplit, stockGroupOverride: sgOverride,
     fyeMonth, period, editable,
   });
   // Money IN / OUT straight off the bank legs (DR = in, CR = out). Derived
@@ -7889,7 +8247,7 @@ app.get("/cashflow-statement", async (c) => {
   if (denied) return denied;
   const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
   const editable = c.req.query("editable") === "1";
-  const { bankByMonth: _bank, ...statement } = await computeCashflowStatement(c.var.DB, period, editable);
+  const { bankByMonth: _bank, ...statement } = await computeCashflowStatement(c.var.DB, period, editable, getOrgId(c));
   return c.json({ success: true, data: { period, ...statement } });
 });
 
@@ -9599,10 +9957,25 @@ app.get("/labor/departments", async (c) => {
     const coaRes = await c.var.DB.prepare("SELECT code, type FROM chart_of_accounts")
       .all<{ code: string; type: string }>();
     const coaTypes = new Map((coaRes.results ?? []).map((a) => [a.code, a.type] as const));
+    // Owner 2026-08-29 「不想要改labour tab, 直接forecast 映射在non production」:
+    // the department master's is_production flag wins the SECTION a dept files
+    // under — a non-production dept sits in NON-PRODUCTION SALARIES even while
+    // its labour-map account (which still decides where wages POST) is 750-x.
+    const nonProd = new Set<string>();
+    try {
+      const flags = await c.var.DB.prepare(`SELECT code, is_production FROM departments`)
+        .all<{ code: string | null; isProduction: number | null; is_production: number | null }>();
+      for (const r of flags.results ?? []) {
+        const t = String(r.code ?? "").trim();
+        if (t && Number(r.isProduction ?? r.is_production ?? 1) === 0) nonProd.add(t);
+      }
+    } catch { /* master predates the flag — bucket logic decides alone */ }
     const departments = [...codes].sort().map((code) => {
       const account = map.byDept[code] ?? map.fallback;
       const type = coaTypes.get(account) ?? "COST";
-      const bucket = pnlBucketFor(account, type, override) ?? "DIRECT_LABOUR";
+      const bucket = nonProd.has(code)
+        ? "OPEX_SALARIES"
+        : pnlBucketFor(account, type, override) ?? "DIRECT_LABOUR";
       return { code, account, bucket };
     });
     return c.json({ success: true, data: { departments, mappedAccounts: labourMappedAccounts(map) } });
@@ -10186,7 +10559,7 @@ app.get("/dashboard", async (c) => {
   // Bump for a changed SHAPE *or* a changed default WINDOW: the stored copy is
   // keyed by the range string, and the default range's key is blank either way,
   // so a wider-or-narrower default would keep serving the old month list.
-  const DASH_PAYLOAD_V = "v9"; // v9: dept forecasts file by labour-map bucket; v8: + forecastSen; v7: + salaryByDept
+  const DASH_PAYLOAD_V = "v14"; // v14: non-prod actuals = clocked-hours share of payroll; v13: salaryByDept carries nonProd flag; v12: non-prod dept forecasts count in COGS; v11: report-layer labour injection (unrecorded months); v10: master non-prod depts file under staff cost; v9: dept forecasts file by labour-map bucket; v8: + forecastSen; v7: + salaryByDept
   // The explicit window is part of the identity — otherwise two different
   // ranges would share one cached copy.
   const dashRangeKey = `${String(c.req.query("from") ?? "")}~${String(c.req.query("to") ?? "")}`;
@@ -10213,6 +10586,12 @@ app.get("/dashboard", async (c) => {
         // salaryByDept reads payslips — without it a payroll edit leaves the
         // department stacks stale.
         "payslips",
+        // Report-layer labour injection (2026-08-31) dry-runs payroll from
+        // these when a month has no payslips yet — new clock entries, docks
+        // or a raise must refresh the injected P&L figures.
+        "working_hour_entries",
+        "payroll_hour_deductions",
+        "worker_salary_history",
       ],
     },
     dashOrgId,
@@ -10398,6 +10777,80 @@ app.get("/dashboard", async (c) => {
   } catch {
     /* payslips table absent → card simply shows no dept split */
   }
+  // Non-production ACTUALS (owner 2026-08-31 「actual资料不是能从payroll 提取
+  // 出来吗」): a payslip files the worker's whole month under his MASTER
+  // (production) department, so the non-prod card had no actuals. Instead,
+  // each worker's payroll cost (gross + employer statutory — the same ringgit
+  // the Labour tab posts) is split across the departments he actually CLOCKED
+  // in, and the shares landing on master-flagged non-production departments
+  // become that card's actuals. Deliberate overlap with the production card:
+  // a borrowed worker's R&D days are inside his production dept's payslip AND
+  // shown as R&D activity — two views of one wage bill, disclosed on the card.
+  const nonProdDash = new Set<string>();
+  try {
+    const flags = await db.prepare(`SELECT code, is_production FROM departments`)
+      .all<{ code: string | null; isProduction: number | null; is_production: number | null }>();
+    for (const r of flags.results ?? []) {
+      const t = String(r.code ?? "").trim();
+      if (t && Number(r.isProduction ?? r.is_production ?? 1) === 0) nonProdDash.add(t);
+    }
+  } catch { /* master predates the flag */ }
+  const nonProdActualByYm = new Map<string, Map<string, number>>();
+  if (nonProdDash.size) {
+    try {
+      const psW = await db
+        .prepare(
+          `SELECT period, employeeId, grossPaySen, epfEmployerSen, socsoEmployerSen, eisEmployerSen
+             FROM payslips WHERE orgId = ? AND status != 'CANCELLED'`,
+        )
+        .bind(orgIdDash)
+        .all<Record<string, unknown>>();
+      const costByYmWorker = new Map<string, number>();
+      for (const r of psW.results ?? []) {
+        const ym = String(r.period ?? "").slice(0, 7);
+        const wid = String(r.employeeId ?? r.employee_id ?? "");
+        if (!/^\d{4}-\d{2}$/.test(ym) || !wid) continue;
+        const cost =
+          (Number(r.grossPaySen ?? r.gross_pay_sen) || 0) +
+          (Number(r.epfEmployerSen ?? r.epf_employer_sen) || 0) +
+          (Number(r.socsoEmployerSen ?? r.socso_employer_sen) || 0) +
+          (Number(r.eisEmployerSen ?? r.eis_employer_sen) || 0);
+        const k = `${ym}::${wid}`;
+        costByYmWorker.set(k, (costByYmWorker.get(k) ?? 0) + cost);
+      }
+      const earliestIso = allMonths.length ? `${allMonths[0]}-01` : "2000-01-01";
+      const wheRes = await db
+        .prepare("SELECT workerId, departmentCode, date, hours FROM working_hour_entries WHERE date >= ?")
+        .bind(earliestIso)
+        .all<Record<string, unknown>>();
+      const hoursByYmWorker = new Map<string, { total: number; byDept: Map<string, number> }>();
+      for (const r of wheRes.results ?? []) {
+        const ym = String(r.date ?? "").slice(0, 7);
+        const wid = String(r.workerId ?? r.worker_id ?? "");
+        const dept = String(r.departmentCode ?? r.department_code ?? "").trim();
+        const h = Number(r.hours) || 0;
+        if (!wid || !dept || h <= 0 || !/^\d{4}-\d{2}$/.test(ym)) continue;
+        const k = `${ym}::${wid}`;
+        let rec = hoursByYmWorker.get(k);
+        if (!rec) { rec = { total: 0, byDept: new Map<string, number>() }; hoursByYmWorker.set(k, rec); }
+        rec.total += h;
+        rec.byDept.set(dept, (rec.byDept.get(dept) ?? 0) + h);
+      }
+      for (const [k, rec] of hoursByYmWorker) {
+        const cost = costByYmWorker.get(k);
+        if (!cost || rec.total <= 0) continue;
+        const ym = k.slice(0, 7);
+        for (const [dept, h] of rec.byDept) {
+          if (!nonProdDash.has(dept)) continue;
+          const sen = Math.round((cost * h) / rec.total);
+          if (!sen) continue;
+          let m = nonProdActualByYm.get(ym);
+          if (!m) { m = new Map<string, number>(); nonProdActualByYm.set(ym, m); }
+          m.set(dept, (m.get(dept) ?? 0) + sen);
+        }
+      }
+    } catch { /* hours/payslips unavailable → non-prod actuals stay blank */ }
+  }
   const BEDFRAME_SALES = "500-0000";
   const csLineOf = (name: string): "bedframe" | "sofa" | "shared" => {
     const t = name.toUpperCase();
@@ -10539,7 +10992,7 @@ app.get("/dashboard", async (c) => {
       pred: (r: { kind: string; label: string; section?: string }) => boolean,
     ) => rowsCf.filter(pred).reduce((s, r) => s + (Number(r.values[idx]) || 0), 0);
     for (const anchor of fyKeys.values()) {
-      const st = await computeCashflowStatement(db, anchor, false);
+      const st = await computeCashflowStatement(db, anchor, false, orgIdDash);
       const cols = (st.columns ?? []) as { key: string; accum?: boolean }[];
       const rowsCf = (st.rows ?? []) as { kind: string; label: string; section?: string; values: (number | null)[] }[];
       cols.forEach((col, i) => {
@@ -10586,10 +11039,14 @@ app.get("/dashboard", async (c) => {
   // wages to (owner 2026-08-24): production → DIRECT_LABOUR, warehouse/maint
   // → FACTORY_OVERHEAD, office/R&D → staff cost. A dept-mode month supersedes
   // every account that map can post to (or dept rows + those accounts would
-  // double-count).
+  // double-count). Owner 2026-08-29 refinement: a dept the MASTER flags
+  // non-production files under staff cost regardless of the labour map — the
+  // map keeps deciding where wages POST, not where the forecast SITS.
   const labourMapDash = await getLabourMap(db);
   const labourMappedDash = new Set(labourMappedAccounts(labourMapDash));
+  // nonProdDash is loaded once, earlier, beside the hours-share actuals.
   const deptBucketDash = (dept: string): string => {
+    if (nonProdDash.has(dept)) return "OPEX_SALARIES";
     const acct = labourMapDash.byDept[dept] ?? labourMapDash.fallback;
     const meta = coaDash.get(resolveDash(acct)) ?? coaDash.get(acct);
     return (meta ? pnlBucketFor(acct, meta.type, overrideDash) : null) ?? "DIRECT_LABOUR";
@@ -10614,8 +11071,10 @@ app.get("/dashboard", async (c) => {
         const deptAmt = fcLineAmt(m, v);
         const deptName = code.slice(5);
         const bucketD = deptBucketDash(deptName);
-        if (bucketD === "OPEX_SALARIES") { slice.staffCost += deptAmt; slice.expenses += deptAmt; }
-        else if (bucketD === "OPERATING_EXPENSE") { slice.otherOpex += deptAmt; slice.expenses += deptAmt; }
+        // Owner 2026-08-31 「算法也要改」: non-production salary dept rows
+        // count inside COGS (they reduce gross profit) — mirrors the Forecast
+        // page's cogsRows, so both screens print the same GP for a month.
+        if (bucketD === "OPEX_SALARIES" || bucketD === "OPERATING_EXPENSE") { slice.labour += deptAmt; slice.cogs += deptAmt; }
         else if (bucketD === "FACTORY_OVERHEAD") { slice.overhead += deptAmt; slice.cogs += deptAmt; }
         else { slice.labour += deptAmt; slice.cogs += deptAmt; }
         const dm = fcDeptByMonth.get(ym) ?? new Map<string, number>();
@@ -10713,6 +11172,10 @@ app.get("/dashboard", async (c) => {
     const salDeptFc = new Map<string, number>();
     for (const ym of b.months) {
       for (const d of salByMonth.get(ym) ?? []) salDept.set(d.dept, (salDept.get(d.dept) ?? 0) + d.costSen);
+      // Non-production actuals: clocked-hours share of payroll (see the
+      // hours-share block above) — the master-dept payslip sums carry nothing
+      // for these departments.
+      for (const [dept, sen] of nonProdActualByYm.get(ym) ?? []) salDept.set(dept, (salDept.get(dept) ?? 0) + sen);
       for (const [dept, sen] of fcDeptByMonth.get(ym) ?? []) salDeptFc.set(dept, (salDeptFc.get(dept) ?? 0) + sen);
     }
     return {
@@ -10725,7 +11188,10 @@ app.get("/dashboard", async (c) => {
       // fg_batches double-counts some completions (parked defect).
       labourBase: { headcount, unitsCompleted: units > 0 ? units : null },
       salaryByDept: [...new Set([...salDept.keys(), ...salDeptFc.keys()])]
-        .map((dept) => ({ dept, costSen: salDept.get(dept) ?? 0, forecastSen: salDeptFc.get(dept) ?? 0 }))
+        // nonProd = the departments master's is_production flag (owner
+        // 2026-08-31: the dashboard grows a Non-Production Salary twin card;
+        // the flag is what splits one dept list into the two cards).
+        .map((dept) => ({ dept, costSen: salDept.get(dept) ?? 0, forecastSen: salDeptFc.get(dept) ?? 0, nonProd: nonProdDash.has(dept) || undefined }))
         .filter((d) => d.costSen !== 0 || d.forecastSen !== 0)
         .sort((a, b2) => a.dept.localeCompare(b2.dept)),
       costStructure: {
@@ -11489,6 +11955,27 @@ app.post("/fixed-assets/depreciation-run", async (c) => {
 // list (in book not bank / in bank not book).
 // ---------------------------------------------------------------------------
 
+// Monthly-session columns (owner 2026-09-01 「每个月我upload文件自动对账」):
+// stmt_month ties a line to its statement month (re-upload replaces the
+// month's unmatched lines), balance_sen keeps the printed running balance
+// for audit, ignored_at marks statement noise the owner dismissed. Runtime
+// self-apply — migration files alone are inert on this stack.
+let _pendingBankRecoCols: Promise<void> | null = null;
+function ensureBankRecoCols(db: Env["Variables"]["DB"]): Promise<void> {
+  if (_pendingBankRecoCols) return _pendingBankRecoCols;
+  _pendingBankRecoCols = (async () => {
+    await runSelfApply(db, "accounting", [
+      `ALTER TABLE bank_statement_lines ADD COLUMN IF NOT EXISTS stmt_month TEXT`,
+      `ALTER TABLE bank_statement_lines ADD COLUMN IF NOT EXISTS balance_sen INTEGER`,
+      `ALTER TABLE bank_statement_lines ADD COLUMN IF NOT EXISTS ignored_at TEXT`,
+    ]);
+  })().catch((err) => {
+    _pendingBankRecoCols = null;
+    throw err;
+  });
+  return _pendingBankRecoCols;
+}
+
 async function bankAccountOrError(
   db: Env["Variables"]["DB"],
   code: string,
@@ -11543,13 +12030,14 @@ app.get("/bank-reco", async (c) => {
       sourceId: l.sourceId,
       amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
     }))
-    .filter((l) => !legBeforeOpening(l.sourceType, l.day, obDateBr) && l.day >= from && l.day <= to); // pre-opening: not extracted
+    .filter((l) => !legBeforeOpening(l.sourceType, l.day, obDateBr) && !isOpeningSource(l.sourceType) && l.day >= from && l.day <= to); // pre-opening + opening legs: not matchable (BUG-2026-09-02-173)
   let stmtLines: unknown[] = [];
   let migrationMissing = false;
   const matchedLegIds = new Set<string>();
   try {
+    await ensureBankRecoCols(c.var.DB);
     const res = await c.var.DB.prepare(
-      `SELECT id, txnDate, description, amountSen, matchedLegId, matchedAt
+      `SELECT id, txnDate, description, amountSen, matchedLegId, matchedAt, stmt_month, balance_sen, ignored_at
          FROM bank_statement_lines
         WHERE accountCode = ? AND txnDate >= ? AND txnDate <= ?
         ORDER BY txnDate ASC, id ASC`,
@@ -11718,11 +12206,11 @@ app.post("/bank-reco/automatch", async (c) => {
         .bind(...equivalents)
         .all<{ id: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
       c.var.DB.prepare(
-        `SELECT id, txnDate, amountSen FROM bank_statement_lines
-          WHERE accountCode = ? AND matchedLegId IS NULL AND txnDate >= ? AND txnDate <= ?`,
+        `SELECT id, txnDate, amountSen, description FROM bank_statement_lines
+          WHERE accountCode = ? AND matchedLegId IS NULL AND ignored_at IS NULL AND txnDate >= ? AND txnDate <= ?`,
       )
         .bind(account, from || "0000-01-01", to)
-        .all<{ id: string; txnDate: string; amountSen: number }>(),
+        .all<{ id: string; txnDate: string; amountSen: number; description: string | null }>(),
       c.var.DB.prepare(
         "SELECT matchedLegId FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
       )
@@ -11732,17 +12220,46 @@ app.post("/bank-reco/automatch", async (c) => {
     const takenLegs = new Set((matchedRes.results ?? []).map((r) => r.matchedLegId));
     const { docDate, openingDate: obDateAm } = await loadDocDateResolver(c.var.DB);
     const freeLegs = (legRes.results ?? [])
-      .filter((l) => !takenLegs.has(l.id) && !legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDateAm)) // pre-opening: not a match candidate
+      .filter((l) => !takenLegs.has(l.id) && !isOpeningSource(l.sourceType) && !legBeforeOpening(l.sourceType, docDate(l.sourceType, l.sourceId, l.postedAt), obDateAm)) // pre-opening + opening legs: not match candidates (BUG-2026-09-02-173)
       .map((l) => ({
         id: l.id,
+        sourceId: String(l.sourceId ?? ""),
         day: docDate(l.sourceType, l.sourceId, l.postedAt), // by document date
         amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
       }));
     const dayMs = 86400000;
     const updates: D1PreparedStatement[] = [];
     const usedLeg = new Set<string>();
+    const usedLine = new Set<string>();
     let matched = 0;
+    const take = (lineId: string, legId: string) => {
+      usedLeg.add(legId);
+      usedLine.add(lineId);
+      updates.push(
+        c.var.DB.prepare(
+          "UPDATE bank_statement_lines SET matchedLegId = ?, matchedAt = ? WHERE id = ?",
+        ).bind(legId, new Date().toISOString(), lineId),
+      );
+      matched++;
+    };
+    // Pass 1 — REFERENCE match (owner 2026-09-01): HLBB prints the transfer
+    // reference, which is our own voucher number (HPV-…, PV-…, OR-…). A
+    // statement line whose text contains exactly one free leg's voucher
+    // number, amount agreeing, is that leg — regardless of date drift.
+    const voucherLegs = freeLegs
+      .map((l) => ({ ...l, token: /^[A-Z]{2,5}-\d{3,4}-\d+$/i.test(l.sourceId) ? l.sourceId.toUpperCase() : null }))
+      .filter((l) => l.token);
     for (const line of lineRes.results ?? []) {
+      const desc = String(line.description ?? "").toUpperCase();
+      if (!desc) continue;
+      const hits = voucherLegs.filter(
+        (l) => !usedLeg.has(l.id) && desc.includes(l.token as string) && l.amountSen === Number(line.amountSen),
+      );
+      if (hits.length === 1) take(line.id, hits[0].id);
+    }
+    // Pass 2 — unique exact-amount candidates within ±7 days.
+    for (const line of lineRes.results ?? []) {
+      if (usedLine.has(line.id)) continue;
       const lineT = Date.parse(line.txnDate);
       const candidates = freeLegs.filter(
         (l) =>
@@ -11751,15 +12268,7 @@ app.post("/bank-reco/automatch", async (c) => {
           Math.abs(Date.parse(l.day) - lineT) <= 7 * dayMs,
       );
       // Only match when the candidate is UNAMBIGUOUS.
-      if (candidates.length === 1) {
-        usedLeg.add(candidates[0].id);
-        updates.push(
-          c.var.DB.prepare(
-            "UPDATE bank_statement_lines SET matchedLegId = ?, matchedAt = ? WHERE id = ?",
-          ).bind(candidates[0].id, new Date().toISOString(), line.id),
-        );
-        matched++;
-      }
+      if (candidates.length === 1) take(line.id, candidates[0].id);
     }
     if (updates.length > 0) await c.var.DB.batch(updates);
     return c.json({ success: true, data: { matched } });
@@ -11783,6 +12292,197 @@ app.delete("/bank-reco/line/:id", async (c) => {
   }
   await c.var.DB.prepare("DELETE FROM bank_statement_lines WHERE id = ?").bind(id).run();
   return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
+// Monthly statement session (owner 2026-09-01 「每个月我upload文件自动对账」).
+// The client parses the bank's PDF (src/lib/hlbb-statement.ts — every figure
+// triple-locked against the statement's own running balances and totals) and
+// posts the rows here WITH the locks, which are re-verified server-side: a
+// payload whose sums don't reproduce its own opening→closing arithmetic is
+// refused. Importing a month REPLACES that month's unmatched lines (matched
+// ones stay; an incoming duplicate of a kept matched line is skipped), so a
+// re-upload can never double-import.
+// ---------------------------------------------------------------------------
+app.post("/bank-reco/import-session", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    await ensureBankRecoCols(c.var.DB);
+    const body = await c.req.json() as {
+      accountCode?: string;
+      month?: string;
+      lines?: { date: string; description?: string; amountSen: number; balanceSen?: number | null }[];
+      meta?: { openingSen: number; closingSen: number; totalInSen: number; totalOutSen: number; countIn: number; countOut: number };
+    };
+    const account = String(body.accountCode || "");
+    const month = String(body.month || "");
+    const err = await bankAccountOrError(c.var.DB, account);
+    if (err) return c.json({ success: false, error: err }, 400);
+    if (!/^\d{4}-\d{2}$/.test(month)) return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+    const lines = Array.isArray(body.lines) ? body.lines : [];
+    const meta = body.meta;
+    if (!lines.length || lines.length > 2000 || !meta) {
+      return c.json({ success: false, error: "1–2000 lines plus the statement's own totals are required" }, 400);
+    }
+    let sumIn = 0, sumOut = 0, nIn = 0, nOut = 0;
+    for (const l of lines) {
+      const amt = Math.round(Number(l.amountSen) || 0);
+      if (!String(l.date).startsWith(month) || amt === 0) {
+        return c.json({ success: false, error: `Line outside ${month} or zero amount (${l.date} / ${l.amountSen})` }, 400);
+      }
+      if (amt > 0) { sumIn += amt; nIn++; } else { sumOut += -amt; nOut++; }
+    }
+    if (sumIn !== Math.round(meta.totalInSen) || sumOut !== Math.round(meta.totalOutSen) ||
+        nIn !== meta.countIn || nOut !== meta.countOut ||
+        Math.round(meta.openingSen) + sumIn - sumOut !== Math.round(meta.closingSen)) {
+      return c.json({ success: false, error: "Statement arithmetic does not reproduce — refusing the import (opening + deposits − withdrawals must equal closing)" }, 400);
+    }
+    // Keep matched lines of this month; drop the unmatched; skip incoming
+    // duplicates of a kept line.
+    const kept = await c.var.DB.prepare(
+      `SELECT txnDate, description, amountSen FROM bank_statement_lines
+        WHERE accountCode = ? AND matchedLegId IS NOT NULL AND txnDate >= ? AND txnDate <= ?`,
+    )
+      .bind(account, `${month}-01`, `${month}-31`)
+      .all<Record<string, unknown>>();
+    const keptKeys = new Set(
+      (kept.results ?? []).map((r) => `${r.txnDate}|${Math.round(Number(r.amountSen) || 0)}|${String(r.description ?? "")}`),
+    );
+    await c.var.DB.prepare(
+      `DELETE FROM bank_statement_lines
+        WHERE accountCode = ? AND matchedLegId IS NULL AND txnDate >= ? AND txnDate <= ?`,
+    )
+      .bind(account, `${month}-01`, `${month}-31`)
+      .run();
+    const now = new Date().toISOString();
+    const inserts: D1PreparedStatement[] = [];
+    let skippedDupes = 0;
+    for (const l of lines) {
+      const amt = Math.round(Number(l.amountSen) || 0);
+      const key = `${l.date}|${amt}|${String(l.description ?? "")}`;
+      if (keptKeys.has(key)) { skippedDupes++; continue; }
+      inserts.push(
+        c.var.DB.prepare(
+          `INSERT INTO bank_statement_lines (id, accountCode, txnDate, description, amountSen, importedAt, created_at, stmt_month, balance_sen)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(`bsl-${crypto.randomUUID().slice(0, 10)}`, account, l.date, String(l.description ?? ""), amt, now, now, month,
+          l.balanceSen === null || l.balanceSen === undefined ? null : Math.round(Number(l.balanceSen))),
+      );
+    }
+    if (inserts.length) await c.var.DB.batch(inserts);
+    // Session meta for the reconciliation report.
+    await c.var.DB.prepare(
+      `INSERT INTO kv_config (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    )
+      .bind(`bank_reco_meta:${account}:${month}`, JSON.stringify({ ...meta, importedAt: now }), now)
+      .run();
+    return c.json({ success: true, data: { imported: inserts.length, keptMatched: keptKeys.size, skippedDupes } }, 201);
+  } catch {
+    return c.json({ success: false, error: "Import failed — is migration 0160 applied?" }, 400);
+  }
+});
+
+// Ignore / un-ignore a statement noise line (bank adverts etc.) — it leaves
+// the unmatched list and the reconciliation maths without being deleted.
+app.post("/bank-reco/ignore", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    await ensureBankRecoCols(c.var.DB);
+    const body = await c.req.json() as { statementLineId?: string; ignored?: boolean };
+    const id = String(body.statementLineId || "");
+    const row = await c.var.DB.prepare(
+      "SELECT id, matchedLegId FROM bank_statement_lines WHERE id = ?",
+    ).bind(id).first<{ id: string; matchedLegId: string | null }>();
+    if (!row) return c.json({ success: false, error: "Statement line not found" }, 404);
+    if (row.matchedLegId) return c.json({ success: false, error: "Unmatch the line before ignoring it" }, 400);
+    await c.var.DB.prepare("UPDATE bank_statement_lines SET ignored_at = ? WHERE id = ?")
+      .bind(body.ignored === false ? null : new Date().toISOString(), id)
+      .run();
+    return c.json({ success: true });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// The classic closing statement:
+//   statement closing ± items not yet through the bank = GL balance.
+app.get("/bank-reco/report", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const account = c.req.query("account") || "";
+  const month = c.req.query("month") || "";
+  const err = await bankAccountOrError(c.var.DB, account);
+  if (err) return c.json({ success: false, error: err }, 400);
+  if (!/^\d{4}-\d{2}$/.test(month)) return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+  await ensureBankRecoCols(c.var.DB);
+  const monthEnd = `${month}-31`;
+  const metaRow = await c.var.DB.prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind(`bank_reco_meta:${account}:${month}`)
+    .first<{ value: string | null }>()
+    .catch(() => null);
+  let meta: { openingSen?: number; closingSen?: number; importedAt?: string } | null = null;
+  try { meta = metaRow?.value ? JSON.parse(metaRow.value) : null; } catch { meta = null; }
+  const resolveRp = await loadAccountResolver(c.var.DB);
+  let equivalents = [account];
+  try {
+    const aliasRows = await c.var.DB.prepare("SELECT oldCode FROM account_aliases").all<{ oldCode: string }>();
+    for (const a of aliasRows.results ?? []) if (resolveRp(a.oldCode) === account) equivalents.push(a.oldCode);
+  } catch { equivalents = [account]; }
+  const marks = equivalents.map(() => "?").join(",");
+  const [legRes, matchedRes, stmtRes] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT id, sourceType, sourceId, debitSen, creditSen, postedAt FROM ledger_journal_entries
+        WHERE accountCode IN (${marks}) AND hidden = 0`,
+    ).bind(...equivalents).all<{ id: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; postedAt: string }>(),
+    c.var.DB.prepare(
+      "SELECT matchedLegId FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
+    ).bind(account).all<{ matchedLegId: string }>(),
+    c.var.DB.prepare(
+      `SELECT amountSen FROM bank_statement_lines
+        WHERE accountCode = ? AND matchedLegId IS NULL AND ignored_at IS NULL AND txnDate <= ?`,
+    ).bind(account, monthEnd).all<{ amountSen: number }>(),
+  ]);
+  const matchedIds = new Set((matchedRes.results ?? []).map((r) => r.matchedLegId));
+  const { docDate, openingDate: obDateRp } = await loadDocDateResolver(c.var.DB);
+  let glSen = 0;
+  let unclearedBookSen = 0;
+  let unclearedBookCount = 0;
+  for (const l of legRes.results ?? []) {
+    const day = docDate(l.sourceType, l.sourceId, l.postedAt);
+    if (legBeforeOpening(l.sourceType, day, obDateRp) || day > monthEnd) continue;
+    const amt = (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+    glSen += amt;
+    // Opening legs stay in glSen (they ARE the account's floor) but are never
+    // 未达账项 — the bank has no "opening balance" transaction to clear them
+    // against. Counting them made the report insensitive to the keyed opening
+    // figure entirely (BUG-2026-09-02-173).
+    if (!matchedIds.has(l.id) && !isOpeningSource(l.sourceType)) { unclearedBookSen += amt; unclearedBookCount++; }
+  }
+  let unbookedStmtSen = 0;
+  let unbookedStmtCount = 0;
+  for (const r of stmtRes.results ?? []) {
+    unbookedStmtSen += Math.round(Number(r.amountSen) || 0);
+    unbookedStmtCount++;
+  }
+  const closingSen = meta?.closingSen ?? null;
+  const computedGlSen = closingSen === null ? null : closingSen + unclearedBookSen - unbookedStmtSen;
+  return c.json({
+    success: true,
+    data: {
+      account, month,
+      statementClosingSen: closingSen,
+      statementOpeningSen: meta?.openingSen ?? null,
+      importedAt: meta?.importedAt ?? null,
+      unclearedBookSen, unclearedBookCount,
+      unbookedStmtSen, unbookedStmtCount,
+      glSen,
+      computedGlSen,
+      balanced: computedGlSen !== null && computedGlSen === glSen,
+    },
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -12763,7 +13463,46 @@ app.get("/stock-take", async (c) => {
     .first<{ value: string | null }>()
     .catch(() => null);
   const rmValuationMode = (modeRow?.value ?? "").trim() === "stock_take_only" ? "stock_take_only" : "auto";
-  return c.json({ success: true, data, total: data.length, rmValuationMode });
+  const fgModeRow = await c.var.DB
+    .prepare("SELECT value FROM kv_config WHERE key = 'fg_valuation_mode'")
+    .first<{ value: string | null }>()
+    .catch(() => null);
+  const fgValuationMode = (fgModeRow?.value ?? "").trim() === "stock_take_only" ? "stock_take_only" : "auto";
+  return c.json({ success: true, data, total: data.length, rmValuationMode, fgValuationMode });
+});
+
+// PUT /api/accounting/fg-valuation-mode — the FG twin of the RM switch below
+// (owner 2026-08-31 「让他别自动capture」): 'stock_take_only' → the FG closing
+// on every statement is only what the owner keyed (stock_take pseudo-group
+// "FG"; the opening seed stays); no per-batch auto valuation. 'auto' →
+// batch computation as before.
+app.put("/fg-valuation-mode", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as { mode?: string };
+  const mode = String(body.mode ?? "").trim();
+  if (mode !== "auto" && mode !== "stock_take_only") {
+    return c.json(
+      { success: false, error: "mode must be 'auto' or 'stock_take_only'" },
+      400,
+    );
+  }
+  await c.var.DB.prepare(
+    `INSERT INTO kv_config (key, value, updated_at)
+       VALUES ('fg_valuation_mode', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+  )
+    .bind(mode, new Date().toISOString())
+    .run();
+  await emitAudit(c, {
+    resource: "accounting",
+    resourceId: "fg_valuation_mode",
+    action: "update",
+    after: { mode },
+  });
+  return c.json({ success: true, data: { mode } });
 });
 
 // PUT /api/accounting/rm-valuation-mode — periodic-inventory switch (owner rule

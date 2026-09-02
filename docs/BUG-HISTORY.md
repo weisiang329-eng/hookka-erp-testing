@@ -34,7 +34,7 @@ Entries themselves stay newest-first.
 
 ---
 
-## BUG-2026-08-31-170 — an outsourced worker logged 4 hours against a 9-hour day and was paid the full day `payroll` `outsourced` 🟢
+## BUG-2026-09-02-174 — an outsourced worker logged 4 hours against a 9-hour day and was paid the full day `payroll` `outsourced` 🟢
 
 - **Symptom (owner, 2026-08-31)**: CHAU (OSC-001, RM 85 for a 9-hour day)
   logged **four hours on 17 Aug 2026** and August paid the full RM 85 — 24 days
@@ -68,6 +68,85 @@ Entries themselves stay newest-first.
 - **Regression**: `tests/outsource-daily-pay.test.mjs` — the two tests that
   pinned the OLD policy were rewritten rather than deleted, each carrying the
   date and the quote that changed it, plus CHAU's August as an end-to-end case.
+
+## BUG-2026-09-02-173 — opening legs counted as 未达账项 made the reco report blind to the opening figure `accounting` `bank-reco` 🟢
+
+Found while answering the owner's「直接给你5月22号 opening bank balance 可以吗?」
+the day after bank-reco v1 shipped. Measured on prod: the posted opening batch
+carries 310-0010 DR 1,600.00, yet the July report's algebra only reproduced its
+"Out by 4,936.17" if the opening contributed ZERO — because every unmatched
+opening_balance / opening_balance_reversal leg was summed into BOTH glSen and
+unclearedBookSen, cancelling out of (computedGl − gl). Consequences: (a) keying
+the correct opening would not move the report by one sen; (b) the opening rows
+polluted the "Book — not yet in the bank" list (the bank has no "opening
+balance" transaction that could ever clear them); (c) automatch could
+amount-grab an opening leg for a real statement line within ±7 days of 开账日.
+
+Fix ([accounting.ts](../src/api/routes/accounting.ts): GET /bank-reco leg
+filter, automatch freeLegs filter, report uncleared walk): opening-family legs
+(existing `isOpeningSource` helper) stay in glSen — they ARE the account's
+floor — and are excluded everywhere they were treated as open items. Verified
+on prod: Out by moved 4,936.17 → 3,336.17, exactly the predicted
+4,286.17 (July stmt opening) − 1,600.00 (keyed GL opening) + 650.00 (stray
+June test statement line). Guard: `tests/bank-reco-opening-legs.test.mjs`.
+
+## BUG-2026-08-31-172 — one office-salary JV silenced a whole month's labour auto-extract `accounting` `pnl` 🟢
+
+Owner (Monthly P&L screenshot, hours after the auto-extract shipped):
+「monthly p&L direct labour 没有salary」— Aug'26 DIRECT LABOUR read 0.00 while
+May (injected) and Jun/Jul (recorded) were fine. Measured: he had just posted
+a manual JV (je-1643c94b, 31/08, CR 410-0010 RM 55,000 — office salaries to
+900-S00x). The injection's guard was MONTH-level ("any 410-0010 credit → the
+GL owns the month"), so his office JV switched off the production 750-x
+injection along with it — a mixed month (office recorded, production not)
+was flagged as a known simplification at design time and the owner hit it the
+same day.
+
+Fix: the guard is per (month, ACCOUNT). Entries crediting 410-0010 mark the
+accounts their DEBIT legs touched; injection then skips exactly those lines
+and still fills the rest. Jun/Jul stay owner-figures (their postings debit
+the labour accounts, which now individually match); Aug shows his 55k office
+JV AND the injected production payroll side by side. Applied in both
+glWindowSigned and /cost-expense-classes' mirrored loop.
+
+## BUG-2026-08-31-171 — JV amount cells reformatted to ".00" on every keystroke `accounting` `ui` `money-input` 🟢
+
+Owner (editing JE-2608-0002): 「这里输入amount这里很不友好，按了一次就跑去分和sen」.
+Typing in the journal form's Debit/Credit cells was fighting the user twice
+over: ① the controlled value re-rendered `(sen/100).toFixed(2)` after every
+keystroke — the `debitStr`/`creditStr` raw-text fields existed (added for the
+2026-06-12 reformat bug) but `updateLine` NEVER WROTE THEM, so the "raw text"
+path was dead code and one keypress became "5.00"; ② `type="number"
+step="0.01"` gave the field spinner arrows that stepped one SEN at a time.
+
+Fix: both cells are now `MoneyInput` (the house money field — free typing
+while focused, commit on blur/Enter, no mid-type reformatting), and the dead
+`debitStr`/`creditStr` fields are deleted. Same reformat family as
+BUG-2026-06-12 (payment dialog) and BUG-2026-08-13-095; note the accounting
+page still carries many raw money `<input>`s (see money-input.tsx header) —
+this closes the instance the owner hit, the class sweep remains open.
+
+## BUG-2026-08-31-170 — a DRAFT journal could be duplicated but never edited `accounting` `ui` 🟢
+
+Owner (JE-2608-0002 screenshot): 「我duplicate 了但是点不开edit」. He duplicated
+July's salary JV as an August template and could not change its date or
+description — the draft's ⋮ menu offered only Print/Post/Delete/Duplicate.
+
+Root cause: the old "Edit" menu item was a `() => {}` NO-OP and was correctly
+REMOVED in BUG-2026-08-13-090 — but a real editor was never built, leaving the
+Duplicate-as-template flow (Phase 3.1) advertising a workflow whose second
+step did not exist. The backend PUT `/journals/:id` has supported draft edits
+(date/description/lines, balance-checked) all along; only the UI was missing.
+
+Fix: `JournalEntryForm` gains an `editing` prop (prefills from the draft,
+saves via PUT instead of POST, title says "Edit JE-… (draft)"); the DRAFT
+branch of the Journal Entries context menu gains a real "Edit" item. No
+backend change. No automated UI harness covers this page — verified live on
+prod (menu shows Edit → form prefilled → Cancel leaves the draft untouched).
+
+Class link: same family as BUG-2026-08-13-090 (controls that advertise
+actions that do not exist) — this is the other half: removing the lying
+control without shipping the real one turns the lie into a dead end.
 
 ## BUG-2026-08-28-169 — a price-list refresh would have written per-BOX prices into a per-PIECE list `procurement` `money` 🟢
 

@@ -14,7 +14,135 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-08-24 — 🔵 Forecast/dashboard 开放非生产部门 key 工资，按人工映射表分段 · main（推送后验 prod）
+## 2026-09-02 — ✅ 每月银行对账：上传 HLBB PDF 自动对账 + Cash Book 视图重整（bank reco v1）
+
+Owner：「我要做到每个月我upload文件自动对账。你先看清楚再回答我」+（看完别家系统的对账模块，
+inter-contra/多对多先不要）「可以，然后顺便优化正看的咨询amount等等，现在太乱了」。
+① 新 `src/lib/hlbb-statement.ts`：HLBB PrimeBiz PDF 纯前端解析（pdfjs 文字坐标 → 按列右缘分列，
+页脚 Total Deposits 与 Closing Balance 同一行、Rebate Summary 侧栏都处理了）。**三重锁**：
+每行 running balance 连算、期初+Σ入−Σ出=期末、页脚合计/笔数对得上；锁断=整份拒收，绝不吞半份。
+真实 7 月账单 golden 验证：69/69 行、4,286.17→74,618.66、入 270,927.78(6)/出 200,595.29(63)、
+errors=[]。真银行 PDF **不进 repo**——`tests/hlbb-statement.test.mjs` 用合成坐标 fixture。
+② 后端（accounting.ts）：`ensureBankRecoCols` self-apply 三列 `stmt_month/balance_sen/ignored_at`
+（migration 0231/0212 仅为记录）；`POST /bank-reco/import-session` 服务端**复验**合计与期末锁，
+按月重导——matched 行保留、unmatched 行换新；`POST /bank-reco/ignore`（可恢复，不算未达账项）；
+`GET /bank-reco/report`：账单期末 + 未达（书有银无 − 银有书无）= 账面应有数 vs GL，balanced 徽章；
+automatch 升级 **Pass 1 凭证号优先**（statement 描述含我方单号如 HPV-2607-002 + 金额相等即配，
+无视日期差）→ Pass 2 原金额唯一±7天。
+③ Cash Book 视图重做（「现在太乱了」）：From/To 换 **Month 选择 + 「含旧月未配」勾**；
+Upload bank PDF → 预览卡（期初/入/出/期末+警告，确认才导入+自动配）；报表卡；
+金额拆 In/Out 两列正数（不再满屏红色负数）、按日排序、待配两侧表 + Matched/Ignored 折叠区。
+④ 同日补修 **BUG-2026-09-02-173**（owner 问「直接给 22/05 opening balance 可以吗」引出）：
+开账腿被当未达账项 → 报表对 opening 数完全不敏感（改了也不动）+ 开账行污染待配名单 +
+automatch 可能按金额误抓开账腿。修：`isOpeningSource` 腿三处排除（GET 列表 / automatch
+候选 / report 未达 walk），glSen 保留。修后 prod 实测 Out by 4,936.17 → 3,336.17
+（= 7 月账单期初 4,286.17 − 开账记的 1,600 + 6 月测试行 650，一分不差）。
+守卫 `tests/bank-reco-opening-legs.test.mjs`。
+
+## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
+
+Owner 三点裁决：「2. 我想要分（Opening creditors）」「3. 第三就留着（advance 原样）」
+「4. 这个我也有要分（Unallocated）」+「点开无法看到 detail. 我要看 bill 的全部 detail」。
+① 报表：开账旧票/缺料号的钱按**供应商**一家一行（`Opening creditors — SUNMAT`、
+`Unallocated — NLY`——旧票无明细但供应商是真的；缺料号行标出谁家，好补码），advance 行不动；
+weightsForPayment/piWeightsFor 带 supplier，rmLineOrder 加前缀区（15/13）。
+② Bill 展开面板重做：单头（单号/对方/日期/状态/Reference/Description/OPENING 标）+ 行表
+（#/科目码+**科目名**/行描述/金额）+ Tax/Total/Paid/Outstanding——原来五行 400-0000 分不清谁是谁。
+
+## 2026-08-31 — ✅ Non-Production 卡的 actual 从 payroll 按钟点摊（追加）
+
+Owner：「non-production 的 actual 资料不是能从 payroll 提取出来吗？」——能：payslip 把人整月
+记在所属生产部门，但钟点记着他被借去哪。规则：**每个工人的 payroll 成本（毛薪+雇主统筹，
+与 Labour tab 同一条钱）× 该部门时数占比**，落在主档 Non-prod 部门的份 = 非生产卡 actual。
+与生产卡刻意重叠（借调天数同时在生产 payslip 里和 R&D 活动里——一笔工资两个视角，卡副标已注明
+"actual = clocked-hours share of payroll"）。v14；没生成工资单的月份非生产 actual 留空。
+
+## 2026-08-31 — ✅ Dashboard 新增 Non-Production Salary 卡（和 Production 一模一样）
+
+Owner：「dashboard 多一个non production 的，和production 一模一样，只是变成non production
+的数据，然后拿forecast 的 non production」。做法：Production Salary 卡整块抽成
+`SalaryDeptCard` 组件（finance-dashboard.tsx，chips/图/Actual|Forecast 表全套，隐藏状态
+每卡自管；TOTAL/forecast 线/百分比都按**本卡部门子集**加总，无部门数据的期间 fallback 到
+base——生产卡用 labour bucket，非生产卡用 null 显 "-"，绝不借数）。两个实例：Production
+（8 生产部门+denominators+units 警示）/ Non-Production（主档 Non-prod 五部门，无
+per-head/per-unit）。后端 salaryByDept 每项加 `nonProd` 标签（departments.is_production），
+`DASH_PAYLOAD_V` v13。非生产卡只在有数据（payslips 或 forecast key 过）时出现。
+
+## 2026-08-31 — ✅ FG 期末「别自动 capture」：fg_valuation_mode 开关（照 RM v3 同哲学）
+
+Owner 看完 FG 102,186.49 的来路（≈1,600 个自动算的小批）后拍板「让他别自动capture」（选项确认
+= Finished Goods 期末）。镜像 RM 的 stock_take_only：新 kv `fg_valuation_mode`——
+'stock_take_only' 时 FG 月末=业主 key 的数（stock_take 伪组 "FG"；30/04 期初种子算 4 月的数），
+没 key = 0，不逐批推算；'auto'（默认）照旧。改点：MaterialCostData +fgValuationMode/fgSeed、
+materialWindow FG 分支、GET /stock-take 回传、新 PUT /fg-valuation-mode（audit）、Stock Take 页
+新「Finished-goods source」卡二键切换。WIP 不动。⚠ 开了之后没 key 的月份 GP 会掉
+（少了 −FG closing 冲减）——owner 已知情选择。开关本身不动数据，他自己按。
+
+## 2026-08-31 — ✅ Draft JV 可以 Edit 了（BUG-170）+ JV 金额格换 MoneyInput（BUG-171）+ Forecast non-prod 段进 COGS（PR #392）
+
+① Owner：「我 duplicate 了但是点不开 edit」——draft JV 从来没有编辑器（旧 Edit 是空壳被
+BUG-090 拆掉后没重建；后端 PUT /journals/:id 一直支持）。修：JournalEntryForm +`editing`
+prop（预填、PUT、标题 Edit JE-…），⋮ 菜单 DRAFT 加 Edit。
+② Owner：「把 non-production salaries 整个放在 direct labour 和 factory overhead 之间」+
+「算法也要改」——段位挪 + labourExpDepts 进 cogsRows/退 expenses（GP 承担、NP 不变）；
+dashboard forecast 切片同口径（v12）。均已上 prod 验证。
+
+## 2026-08-31 — ✅ P&L 人工「看时自动提取」（report-layer，三层无缝）
+
+Owner：「任何时候我看 P&L 你都自动提取…当当月我已经记录 salary 了，就以我记录的为准」+
+先解剖了他抓到的同刻两数（钟点页 68,563.26 vs Labour tab 70,833.22 = 归属方式
+[小时在哪 vs 人属哪] × 算法 [粗估 vs 完整 payroll] 之差，两个都对）。三层规则：
+**GL 有 410-0010 贷方（Post 或手工 JV）→ 读 GL；有 payslips（含 DRAFT）→ 注入工资单数；
+都没有 → `projectedLabourByDept`（新 api/lib/labour-projection.ts，与 Generate 同引擎
+干算：computeMonthlyLabor + 效率津贴 + 雇主 EPF/SOCSO/EIS，PCB 关闭）**。
+纯月份规则 `src/lib/labour-inject.ts`（labourInjectMonths，5 测：开账月/今天/已记录月裁剪）。
+注入点：glWindowSigned（+orgId，收集 recordedSalaryYms，dc.labourMemo 每月一次）+
+/cost-expense-classes 自己的循环镜像；dashboard snapshot sourceTables +working_hour_entries/
+payroll_hour_deductions/worker_salary_history，`DASH_PAYLOAD_V` v11。TB/BS 不含注入
+（与开账切片同性质，owner 已知情）；月份一旦记录（Post/JV）注入自动让位。
+副作用修复：May'26 人工从未过账 → P&L 自动补上（payslips 层）。
+
+## 2026-08-29 — ✅ Forecast/Dashboard：主档 Non-prod 标签直接决定分区（不动 Labour tab）
+
+Owner（贴 14 部门表截图）：「non production 的 warehouse, repair, maint, shortfall, r&d 有再
+forecast 表？」→ 实测有 14 部门但 REPAIR/MAINT/SHORTFALL/R&D 没映射 → fallback 750 → 挤在
+DIRECT LABOUR 区。Owner 追令：「我不想要改 labour tab，不能直接 forecast 映射在 non
+production 吗？」→ 新口径：**departments.is_production=0 的部门，分区一律 NON-PRODUCTION
+SALARIES（bucket 压成 OPEX_SALARIES），科目映射只管工资过账、不再管分区**。改两处：
+`/labor/departments`（forecast 分区源）+ dashboard `deptBucketDash`（forecast 切片同规则，
+`DASH_PAYLOAD_V` v9→v10）。Labour tab / 过账 / supersede 规则零改动。
+
+## 2026-08-29 — ✅ Cash Flow 重排成 Receipts & Payments + 工资按部门拆（branch `feat/cashflow-receipts-payments`）
+
+Owner 连环指令（08-27→08-29 迭代五轮）：①「排版重新改，我能当场看到 result，确定没问题才
+push」②「unallocated raw material 要分出来」③「拆散」（按料组一组一行）④「不应该还有这么多
+[unallocated]…必须要知道还什么」⑤「根据 purpose 放去相对应的 account，当做 receipts and
+payment report」+「salary 那边也是要拆散成 department」+「supplier settled via houzs century
+也是需要放去相对应的费用」。Owner 08-29 拍板「可以」→ push。
+
+实测根因（逐月对到一分）：RM 段=所有还 creditor 的银行腿；Aug 309,463.37 = supplier_payment
+62,133.10 + other_party_payment 247,330.27。旧拆链只认 supplier payment → other-party 整笔掉
+Unallocated；开账 PI（pi-ob-*，无 item 行）也拆不出组。
+
+最终口径（三层同规则）：
+- `cashflow-engine.ts`：`rmLineOrder()` 行序；`deptSplit`（DIRECT_LABOUR 按部门）；rmSplit 支持
+  `sourceId@account` 精确键；RM 段非 control 户口腿保留科目名行；`defaultSectionFor`：
+  70x「PURCHASE - *」→ RAW_MATERIALS、440-459+480 → LOAN。
+- `accounting.ts` `computeCashflowStatement`（+orgId，两调用点）：other_party_payment 按 bill
+  `counterAccount` 拆伪腿再分类（运输→TRANSPORT EXPENSE、SMD→CAPEX、Houzs Venture 440-0030→
+  Loan/(Repayment)；creditor-control 用途→RM 段 "Suppliers settled via <payee>"，按 @account 键）；
+  supplier 权重：TF_REPAYMENT→"Trade finance repayment"、无 PI→"Supplier advance / deposit"、
+  pi-ob→"Opening creditors settlement"；工资 410-0010 腿按 voucher 描述的工资月取 payslip 部门
+  costSen 权重（aggregateLabour），默认落 DIRECT_LABOUR。
+- `index.tsx` CashFlowTab：DEV-only shim 同规则（devRp+devSalRows，import.meta.env.DEV 死代码；
+  部署后后端出拆分行、shim 自动不触发）。vite.config.ts `/api`→prod 代理（⚠ 连真库）随本分支上。
+
+验证：本地逐列加总=组头、Cash Surplus 53,176.55 与银行腿分毫不差；tests 4,417 全过
+（+8 个 cashflow 回归）；tsc 0。**悬**：OCB-2608-008 五行科目 owner 说「到时我手动改」——改完
+"Suppliers settled via Houzs Century 129,080.07" 自动散（布料→701-0000 等，建议表已给）；
+7 月四张 Houzs 代付 94,822.92 仍挂 310-0020 未还，将来走 TF 通道。
+
+## 2026-08-24 — ✅ Forecast/dashboard 开放非生产部门 key 工资，按人工映射表分段（merged #362，prod 已验 14 部门）
 
 Owner 发现 forecast 只有 8 个生产部门能 key（种子来自 payslips），部门主档其实有 14 个
 （Warehouse/Repair/Maint/Shortfall/R&D 等 Non-prod）。Owner 拍板口径：**按人工映射表分段**
@@ -34,7 +162,7 @@ Owner（贴 Fund Transfer 截图）：「这个 fund transfer 没有办法 print
 但行上只有 void/delete，没有任何入口提示 → owner 找不到。修 = 行尾加 `print` 链接
 （同 JV 表的行内打印，走同一个 `printVoucher`/`print-voucher.ts` 渲染器），一行改动。
 本地已验：4 行都出链接，点击生成完整 FUND TRANSFER VOUCHER（抬头/单号/户口/金额/大写/签名栏）。
-**待办**：owner 用 weisiang329-eng approve 本 PR（连同 #378、#362 一起批）→ 部署后在 prod 点一次 print 验证。
+2026-08-29：**已合并（#379）、prod 已验**（4 行 print 全通，凭证单号/金额正确）。
 ## 2026-08-27 — 🔵 JV 行菜单全灭（Post 打 /journals/undefined）· BUG-2026-08-27-001 · PR 待合
 
 Owner:「每次 JV 都会 merge 不上」（JE-2608-0001 七月薪水 35,370.50 过不了账，

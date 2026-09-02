@@ -161,3 +161,147 @@ test("buildStatement — editable emits empty section headers as drop targets", 
   assert.equal(hasDeposit(off), false);
   assert.equal(hasDeposit(on), true);
 });
+
+test("buildStatement — RM block orders groups, payees, opening, advance, unallocated", () => {
+  // Owner 2026-08-27 「必须要知道还什么」: creditor settlements the split can
+  // name (other-creditor payees, opening PIs, advances) get labelled rows in a
+  // fixed order; "Unallocated raw material" is always the last RM line.
+  const classified = [
+    L("400-0000", 0, 10000, "2026-03", "supplier_payment", "PV-1"),
+    L("400-0000", 0, 20000, "2026-03", "other_party_payment", "HPV-1"),
+    L("400-0000", 0, 30000, "2026-03", "supplier_payment", "PV-2"),
+    L("400-0000", 0, 4000, "2026-03", "journal", "JV-1"), // no split → unallocated
+  ];
+  const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 64000, ym: "2026-03" }];
+  const st = cf.buildStatement({
+    classified, bankLegs, coa: coaMap, map: {},
+    rmSplit: {
+      "PV-1": [
+        { line: "PLYWOOD", weight: 60 },
+        { line: "Supplier advance / deposit", weight: 40 },
+      ],
+      "HPV-1": [{ line: "Houzs Century Sdn Bhd (other creditor)", weight: 1 }],
+      "PV-2": [{ line: "Opening creditors settlement", weight: 1 }],
+    },
+    stockGroupOverride: {}, fyeMonth: 8, period: "2026-03",
+  });
+  const rmLines = st.rows.filter((r) => r.kind === "line" && r.section === "RAW_MATERIALS");
+  assert.deepEqual(rmLines.map((r) => r.label), [
+    "PLYWOOD",
+    "Houzs Century Sdn Bhd (other creditor)",
+    "Opening creditors settlement",
+    "Supplier advance / deposit",
+    "Unallocated raw material",
+  ]);
+  const mIdx = st.columns.findIndex((c) => c.key === "2026-03");
+  const val = (label) => rmLines.find((r) => r.label === label).values[mIdx];
+  assert.equal(val("PLYWOOD"), 6000);
+  assert.equal(val("Supplier advance / deposit"), 4000);
+  assert.equal(val("Houzs Century Sdn Bhd (other creditor)"), 20000);
+  assert.equal(val("Opening creditors settlement"), 30000);
+  assert.equal(val("Unallocated raw material"), 4000);
+});
+
+test("rmLineOrder — unallocated always after every named row", () => {
+  const u = cf.rmLineOrder("Unallocated raw material");
+  for (const n of ["PLYWOOD", "SST / TAX", "X (other creditor)", "Trade finance repayment",
+    "Opening creditors settlement", "Supplier advance / deposit"]) {
+    assert.ok(cf.rmLineOrder(n) < u, n);
+  }
+});
+
+test("buildStatement — DIRECT_LABOUR legs split by department via deptSplit", () => {
+  // Owner 2026-08-27 「salary 那边也是要拆散成department」: a salary settlement
+  // leg splits across department rows; without a split it stays on the
+  // account's own line.
+  const coa2 = new Map(coaMap);
+  coa2.set("410-0010", acct("410-0010", "LIABILITY", null, "ACCRUAL - SALARY"));
+  const classified = [L("410-0010", 0, 10000, "2026-03", "payment_voucher", "pv-1")];
+  const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 10000, ym: "2026-03" }];
+  const map = { "410-0010": { section: "DIRECT_LABOUR", order: 10 } };
+  const st = cf.buildStatement({
+    classified, bankLegs, coa: coa2, map, rmSplit: {},
+    deptSplit: { "pv-1": [{ line: "SEWING", weight: 70 }, { line: "CUTTING", weight: 30 }] },
+    stockGroupOverride: {}, fyeMonth: 8, period: "2026-03",
+  });
+  const mIdx = st.columns.findIndex((c) => c.key === "2026-03");
+  const val = (label) => st.rows.find((r) => r.kind === "line" && r.label === label).values[mIdx];
+  assert.equal(val("SEWING"), 7000);
+  assert.equal(val("CUTTING"), 3000);
+  assert.ok(!st.rows.some((r) => r.kind === "line" && r.label === "ACCRUAL - SALARY"));
+
+  const st2 = cf.buildStatement({
+    classified, bankLegs, coa: coa2, map, rmSplit: {},
+    stockGroupOverride: {}, fyeMonth: 8, period: "2026-03",
+  });
+  const acc = st2.rows.find((r) => r.kind === "line" && r.label === "ACCRUAL - SALARY");
+  assert.equal(acc.section, "DIRECT_LABOUR");
+  assert.equal(acc.values[mIdx], 10000);
+});
+
+test("rmLineOrder — 'Suppliers settled via' rows sit with the other-creditor zone", () => {
+  assert.equal(cf.rmLineOrder("Suppliers settled via Houzs Century Sdn Bhd"), 12);
+  assert.ok(cf.rmLineOrder("PLYWOOD") < 12);
+  assert.ok(cf.rmLineOrder("Opening creditors settlement") > 12);
+});
+
+test("defaultSectionFor — 440-band related-party / HP loans → LOAN", () => {
+  assert.equal(cf.defaultSectionFor(acct("440-0030", "LIABILITY", null, "LOAN FROM RELATED PARTY - HOUZS VENTURE")), "LOAN");
+  assert.equal(cf.defaultSectionFor(acct("450-0010", "LIABILITY")), "LOAN");
+});
+
+test("defaultSectionFor — 480 HP creditor band → LOAN", () => {
+  assert.equal(cf.defaultSectionFor(acct("480-0000", "LIABILITY", null, "HIRE PURCHASE CREDITOR")), "LOAN");
+  assert.equal(cf.defaultSectionFor(acct("480-0010", "LIABILITY", null, "HIRE PURCHASE INTEREST SUSPENSE")), "LOAN");
+});
+
+test("defaultSectionFor — PURCHASE 70x accounts → RAW_MATERIALS, other 70x stay overhead", () => {
+  assert.equal(cf.defaultSectionFor(acct("701-0000", "COST", null, "PURCHASE - FABRIC")), "RAW_MATERIALS");
+  assert.equal(cf.defaultSectionFor(acct("702-0010", "COST", null, "PURCHASE - PLYWOOD")), "RAW_MATERIALS");
+  assert.equal(cf.defaultSectionFor(acct("700-0010", "COST", null, "Rental - factory")), "FACTORY_OVERHEAD");
+});
+
+test("buildStatement — RM leg on a non-control account keeps its own name", () => {
+  const coa2 = new Map(coaMap);
+  coa2.set("701-0000", acct("701-0000", "COST", null, "PURCHASE - FABRIC"));
+  const classified = [L("701-0000", 0, 8000, "2026-03", "other_party_payment", "HPV-1")];
+  const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 8000, ym: "2026-03" }];
+  const st = cf.buildStatement({
+    classified, bankLegs, coa: coa2, map: {}, rmSplit: {},
+    stockGroupOverride: {}, fyeMonth: 8, period: "2026-03",
+  });
+  const mIdx = st.columns.findIndex((c) => c.key === "2026-03");
+  const line = st.rows.find((r) => r.kind === "line" && r.label === "PURCHASE - FABRIC");
+  assert.equal(line.section, "RAW_MATERIALS");
+  assert.equal(line.values[mIdx], 8000);
+  assert.ok(!st.rows.some((r) => r.kind === "line" && r.label === "Unallocated raw material"));
+});
+
+test("buildStatement — rmSplit keyed sourceId@account overrides the plain key", () => {
+  const classified = [
+    L("400-0000", 0, 6000, "2026-03", "other_party_payment", "HPV-2"),
+    L("405-0000", 0, 4000, "2026-03", "other_party_payment", "HPV-2"),
+  ];
+  const coa2 = new Map(coaMap);
+  coa2.set("405-0000", acct("405-0000", "LIABILITY", "SCC", "OTHER CREDITORS"));
+  const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 10000, ym: "2026-03" }];
+  const st = cf.buildStatement({
+    classified, bankLegs, coa: coa2, map: {},
+    rmSplit: {
+      "HPV-2": [{ line: "fallback line", weight: 1 }],
+      "HPV-2@400-0000": [{ line: "Suppliers settled via X", weight: 1 }],
+    },
+    stockGroupOverride: {}, fyeMonth: 8, period: "2026-03",
+  });
+  const mIdx = st.columns.findIndex((c) => c.key === "2026-03");
+  const val = (label) => st.rows.find((r) => r.kind === "line" && r.label === label)?.values[mIdx];
+  assert.equal(val("Suppliers settled via X"), 6000);
+  assert.equal(val("fallback line"), 4000);
+});
+
+test("rmLineOrder — per-supplier opening/unallocated rows keep their zones", () => {
+  assert.equal(cf.rmLineOrder("Opening creditors — SUNMAT INDUSTRIES SDN. BHD"), 13);
+  assert.equal(cf.rmLineOrder("Unallocated — NLY SDN BHD"), 15);
+  assert.ok(cf.rmLineOrder("Supplier advance / deposit") < cf.rmLineOrder("Unallocated — NLY SDN BHD"));
+  assert.ok(cf.rmLineOrder("Unallocated — NLY SDN BHD") < cf.rmLineOrder("Unallocated raw material"));
+});

@@ -115,7 +115,7 @@ function CompanySelect({
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "supplier-discount" | "debtorledger" | "creditorledger" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "stocktake" | "opening" | "audit" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "supplier-discount" | "debtorledger" | "creditorledger" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "dailycash" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "stocktake" | "opening" | "audit" | "maint";
 
 // =============== VOUCHER PRINTING (PV / OR / JV) ===============
 //
@@ -488,6 +488,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   { key: "payments", label: "Expense Payment", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
   { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
   { key: "transfer", label: "Fund Transfer", icon: <Wallet className="h-4 w-4" />, group: "Daily Operation" },
+  { key: "dailycash", label: "Cash Position", icon: <Wallet className="h-4 w-4" />, group: "Daily Operation" },
   // Monthly Operation
   { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" />, group: "Monthly Operation" },
   { key: "cashbook", label: "Cash Book", icon: <BookOpen className="h-4 w-4" />, group: "Monthly Operation" },
@@ -602,6 +603,7 @@ export default function AccountingPage() {
           {tab === "payments" && <PaymentsTab accounts={accounts} />}
           {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
           {tab === "transfer" && <FundTransferTab accounts={accounts} />}
+          {tab === "dailycash" && <DailyCashTab />}
           {tab === "cashbook" && <CashBookTab accounts={accounts} />}
           {tab === "assets" && <FixedAssetsTab accounts={accounts} />}
           {tab === "labor" && <LaborTab accounts={accounts} />}
@@ -9727,6 +9729,152 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 // book legs on the right. CSV paste with column mapping; exact-amount
 // matching (manual pick or unambiguous auto-match); whatever stays
 // unmatched on either side IS the 未达账项 list.
+
+// =============== TAB: DAILY CASH POSITION ===============
+// The owner's external "BANK BALANCE AVAILABLE" board rebuilt inside the ERP
+// (2026-09-03, his source choice (b)): estimated bank balance per account =
+// book ± reconciliation state, pending list = recorded vouchers the bank
+// hasn't processed. Accounts with no imported statements show book-only.
+type CashPosAccount = {
+  code: string; name: string; reconciled: boolean;
+  bookSen: number; pendingSen: number; unbookedSen: number; unbookedCount: number;
+  bankEstSen: number; availableSen: number;
+  pending: { day: string; sourceId: string; description: string; amountSen: number }[];
+};
+type CashPosData = { date: string; accounts: CashPosAccount[]; totalBankEstSen: number; totalAvailableSen: number };
+
+function DailyCashTab() {
+  const { toast } = useToast();
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [data, setData] = useState<CashPosData | null>(null);
+  useEffect(() => {
+    let dead = false;
+    fetch(`/api/accounting/cash-position?date=${date}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: CashPosData }>)
+      .then((j) => { if (!dead && j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [date]);
+  const cur = data && data.date === date ? data : null;
+  const shiftDay = (delta: number) => {
+    const d = new Date(`${date}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + delta);
+    setDate(d.toISOString().slice(0, 10));
+  };
+  const tdInC = (n: number) => (n > 0 ? formatCurrency(n) : "");
+  const tdOutC = (n: number) => (n < 0 ? formatCurrency(-n) : "");
+
+  const printBoard = () => {
+    if (!cur) return;
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const acctBlock = (a: CashPosAccount) => `
+      <h2>${a.code} ${esc(a.name)} — Bank balance (est.) <b>${formatCurrency(a.bankEstSen)}</b>${a.reconciled ? "" : " (book only)"}</h2>
+      ${a.pending.length ? `<table><thead><tr><th>Date</th><th>PV No.</th><th>Description</th><th class="r">Received</th><th class="r">Pending payment</th></tr></thead><tbody>${a.pending
+        .map((p) => `<tr><td>${p.day}</td><td>${esc(p.sourceId)}</td><td>${esc(p.description)}</td><td class="r">${p.amountSen > 0 ? formatCurrency(p.amountSen) : ""}</td><td class="r">${p.amountSen < 0 ? formatCurrency(-p.amountSen) : ""}</td></tr>`)
+        .join("")}</tbody></table>` : ""}
+      <p class="avail">Available (after pending): <b>${formatCurrency(a.availableSen)}</b></p>`;
+    const w = window.open("", "_blank", "width=900,height=700");
+    if (!w) { toast.error("Pop-up blocked — allow pop-ups to print"); return; }
+    w.document.write(`<!doctype html><html><head><title>Cash Position ${cur.date}</title><style>
+      body{font-family:Arial,sans-serif;font-size:12px;color:#111;margin:32px}
+      h1{font-size:18px;margin:0 0 12px} h2{font-size:13px;margin:18px 0 6px}
+      table{border-collapse:collapse;width:100%} td,th{border:1px solid #ccc;padding:4px 8px;text-align:left}
+      .r{text-align:right;font-variant-numeric:tabular-nums}
+      .avail{margin:6px 0 0;text-align:right}
+      .total{margin-top:20px;font-size:15px;text-align:right}
+      footer{margin-top:24px;color:#777;font-size:10px}
+    </style></head><body>
+      <h1>Cash Position — ${cur.date}</h1>
+      ${cur.accounts.map(acctBlock).join("")}
+      <p class="total">CURRENT CASH AVAILABLE: <b>${formatCurrency(cur.totalAvailableSen)}</b></p>
+      <footer>Estimated from the books ± bank reconciliation · Hookka ERP</footer>
+    </body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center flex-wrap gap-2">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Daily Cash Position</h2>
+        <Button variant="outline" size="sm" disabled={!cur} onClick={printBoard}>Print</Button>
+      </div>
+      <Card>
+        <CardContent className="p-4 flex flex-wrap items-center gap-3 bg-[#F7F4EF] rounded-lg">
+          <Button variant="outline" size="sm" onClick={() => shiftDay(-1)}>‹</Button>
+          <input type="date" value={date} onChange={(e) => { if (e.target.value) setDate(e.target.value); }} className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm" />
+          <Button variant="outline" size="sm" onClick={() => shiftDay(1)}>›</Button>
+          <Button variant="outline" size="sm" onClick={() => setDate(new Date().toISOString().slice(0, 10))}>Today</Button>
+          <span className="text-[11px] text-[#9CA3AF]">
+            Estimated from the books ± bank reconciliation — as fresh as the last imported statement.
+          </span>
+        </CardContent>
+      </Card>
+      {!cur ? (
+        <Card><CardContent className="p-8 text-center text-sm text-[#9CA3AF]">Loading…</CardContent></Card>
+      ) : (
+        <>
+          {cur.accounts.map((a) => (
+            <Card key={a.code}>
+              <CardContent className="p-0">
+                <div className="flex items-center justify-between flex-wrap gap-2 px-4 py-3 bg-[#1F2937] rounded-t-lg">
+                  <div className="text-sm font-semibold text-white">{a.code} {a.name}{!a.reconciled && <span className="ml-2 text-[10px] font-normal text-[#D1D5DB]">book only — no statements imported</span>}</div>
+                  <div className="text-sm text-white">Bank balance (est.) <span className="font-bold tabular-nums">{formatCurrency(a.bankEstSen)}</span></div>
+                </div>
+                {a.unbookedCount > 0 && (
+                  <div className="px-4 py-1.5 text-[11px] text-[#7A5B12] bg-[#FBF3E4]">
+                    Includes {a.unbookedCount} bank item{a.unbookedCount === 1 ? "" : "s"} not booked yet ({formatCurrency(a.unbookedSen)}) — record them via the Cash Book.
+                  </div>
+                )}
+                {a.pending.length > 0 && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                          <th className="px-3 py-2 text-left">Date</th>
+                          <th className="px-3 py-2 text-left">PV No.</th>
+                          <th className="px-3 py-2 text-left">Description</th>
+                          <th className="px-3 py-2 text-right">Received</th>
+                          <th className="px-3 py-2 text-right">Pending payment</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {a.pending.map((p, i) => (
+                          <tr key={`${p.day}-${p.sourceId}-${i}`} className="border-b border-[#F0ECE9]">
+                            <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{p.day}</td>
+                            <td className="px-3 py-1 text-xs whitespace-nowrap">{p.sourceId}</td>
+                            <td className="px-3 py-1 text-xs w-full max-w-0"><div className="truncate" title={p.description}>{p.description}</div></td>
+                            <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap text-[#27500A]">{tdInC(p.amountSen)}</td>
+                            <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdOutC(p.amountSen)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                <div className="flex justify-between px-4 py-2.5 bg-[#EAF3DE]/60 rounded-b-lg text-sm font-medium">
+                  <span>Available (after pending)</span>
+                  <span className="tabular-nums font-bold">{formatCurrency(a.availableSen)}</span>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+          <Card>
+            <CardContent className="p-4 flex justify-between items-center">
+              <span className="text-sm font-semibold text-[#1F1D1B]">CURRENT CASH AVAILABLE</span>
+              <span className="text-xl font-bold tabular-nums text-[#27500A]">{formatCurrency(cur.totalAvailableSen)}</span>
+            </CardContent>
+          </Card>
+          <p className="text-[11px] text-[#9CA3AF]">
+            "Pending payment" = vouchers recorded in the book that the bank had not processed by this date (owner:
+            「我开 PV 了，银行还没付款」). They drop off automatically as statements are imported and matched.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
 
 type RecoLeg = { id: string; day: string; description: string; sourceType: string; sourceId: string; amountSen: number; matched: boolean };
 type RecoLine = {

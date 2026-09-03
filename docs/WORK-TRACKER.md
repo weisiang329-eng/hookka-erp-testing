@@ -63,6 +63,14 @@ Out by 徽章标方向（book above/below bank）。owner restore 4 笔后 5 月
 差额变动那天高亮 ▲（book 侧复用共享 walk 的 bookPreSen/bookByDay，bank 侧=账单期初+全部行累加，
 不信行序）；④ aging 旧数据两针：aging tab 激活即 refreshAging + supplier-payments 四个写路径补
 invalidateCachePrefix("/api/accounting")。
+⑨ **Daily Cash Position 上线**（owner 拿他外部「BANK BALANCE AVAILABLE」板要求做进 ERP；裁决
+b/已录未清全自动/先 HOOKKA）：新 `GET /cash-position?date=` —— 每个 SBK/SCH 户口：推算银行数 =
+账面 − pending + 银行未入账（走对账状态），pending = 已录 voucher 银行未扣（未配或配的行日期>D），
+**没导过账单的户口走纯账面**（现金/CIMB 不会全腿变 pending）；Available = 银行推算 + pending =
+账面+未入账。walk 数据装载抽共享 `loadBankRecoState`（report/finalize/daily/cash-position 同一份
+alias+地板+174 作废规则）。UI：Accounting 新 tab「Cash Position」（Daily Operation 组+侧栏）——
+‹日期› /Today、每户口卡（深头条+pending 表+Available 绿条）、总 CURRENT CASH AVAILABLE、Print。
+计划付款 link creditor aging = owner 说的下一步，未做。守卫 +2 测。
 
 ## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
 

@@ -81,10 +81,25 @@ test("automatch never offers a pre-opening statement line", () => {
   assert.doesNotMatch(body, /for \(const line of lineRes\.results/);
 });
 
-test("report walk voids pre-opening matches and floors unbooked at the opening date", () => {
-  const body = walkBody();
-  assert.match(body, /\.filter\(\(r\) => !obDateRp \|\| r\.txnDate >= obDateRp\)/);
-  assert.match(body, /if \(obDateRp && r\.txnDate < obDateRp\) continue;/);
+test("shared loader voids pre-opening matches; report floors unbooked at the opening date", () => {
+  // The alias/floor/void rules live ONCE in loadBankRecoState (report,
+  // finalise snapshot and cash position all consume it).
+  const start = src.indexOf("async function loadBankRecoState(");
+  assert.notEqual(start, -1, "loadBankRecoState not found");
+  const loader = src.slice(start, src.indexOf("async function computeBankRecoReport("));
+  assert.match(loader, /if \(!openingDate \|\| r\.txnDate >= openingDate\) clearedOn\.set/);
+  assert.match(loader, /legBeforeOpening\(l\.sourceType, l\.day, openingDate\)/);
+  assert.match(walkBody(), /if \(obDateRp && r\.txnDate < obDateRp\) continue;/);
+});
+
+test("cash position rides the shared loader and skips opening legs as pending", () => {
+  const start = src.indexOf('app.get("/cash-position", async (c) => {');
+  assert.notEqual(start, -1, "cash-position route not found");
+  const body = src.slice(start, src.indexOf("\napp.", start + 1));
+  assert.match(body, /loadBankRecoState\(/);
+  assert.match(body, /isOpeningSource\(l\.sourceType\)/);
+  // Book-only accounts (no imported statements) must not treat legs as pending.
+  assert.match(body, /if \(!reconciled\) continue;/);
 });
 
 test("GET /bank-reco only flags legs matched by post-opening lines", () => {

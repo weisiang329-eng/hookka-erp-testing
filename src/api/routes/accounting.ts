@@ -12515,9 +12515,59 @@ type BankRecoComputed = {
   bookByDay: Record<string, number>;
 };
 
-// One walk, used by BOTH the live report and the finalise snapshot — a
-// duplicated mirror of this loop is exactly the class of bug that keeps
+// Shared loader for every bank-reconciliation walk (report, finalise
+// snapshot, daily cash position). Resolves aliases, applies the opening
+// floor, and voids matches held by pre-opening lines (BUG-2026-09-02-174).
+// A duplicated mirror of these rules is exactly the bug class that keeps
 // recurring in this repo, so there is only one copy.
+type BankRecoLegState = {
+  legs: { id: string; day: string; sourceType: string; sourceId: string; description: string; amountSen: number }[];
+  // legId → txnDate of the (post-opening) statement line that cleared it.
+  clearedOn: Map<string, string>;
+  openingDate: string | null;
+};
+
+async function loadBankRecoState(
+  db: Env["Variables"]["DB"],
+  account: string,
+): Promise<BankRecoLegState> {
+  const resolveRp = await loadAccountResolver(db);
+  let equivalents = [account];
+  try {
+    const aliasRows = await db.prepare("SELECT oldCode FROM account_aliases").all<{ oldCode: string }>();
+    for (const a of aliasRows.results ?? []) if (resolveRp(a.oldCode) === account) equivalents.push(a.oldCode);
+  } catch { equivalents = [account]; }
+  const marks = equivalents.map(() => "?").join(",");
+  const [legRes, matchedRes] = await Promise.all([
+    db.prepare(
+      `SELECT id, sourceType, sourceId, debitSen, creditSen, description, postedAt FROM ledger_journal_entries
+        WHERE accountCode IN (${marks}) AND hidden = 0`,
+    ).bind(...equivalents).all<{ id: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; description: string | null; postedAt: string }>(),
+    db.prepare(
+      "SELECT matchedLegId, txnDate FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
+    ).bind(account).all<{ matchedLegId: string; txnDate: string }>(),
+  ]);
+  const { docDate, openingDate } = await loadDocDateResolver(db);
+  const legs = (legRes.results ?? [])
+    .map((l) => ({
+      id: l.id,
+      day: docDate(l.sourceType, l.sourceId, l.postedAt),
+      sourceType: l.sourceType,
+      sourceId: String(l.sourceId ?? ""),
+      description: l.description ?? "",
+      amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
+    }))
+    .filter((l) => !legBeforeOpening(l.sourceType, l.day, openingDate));
+  // A match on a pre-opening statement line is void for reconciliation — that
+  // bank movement is inside the keyed opening balance (BUG-2026-09-02-174).
+  const clearedOn = new Map<string, string>();
+  for (const r of matchedRes.results ?? []) {
+    if (!openingDate || r.txnDate >= openingDate) clearedOn.set(r.matchedLegId, r.txnDate);
+  }
+  return { legs, clearedOn, openingDate };
+}
+
+// One walk, used by BOTH the live report and the finalise snapshot.
 async function computeBankRecoReport(
   db: Env["Variables"]["DB"],
   account: string,
@@ -12530,34 +12580,12 @@ async function computeBankRecoReport(
     .catch(() => null);
   let meta: { openingSen?: number; closingSen?: number; importedAt?: string } | null = null;
   try { meta = metaRow?.value ? JSON.parse(metaRow.value) : null; } catch { meta = null; }
-  const resolveRp = await loadAccountResolver(db);
-  let equivalents = [account];
-  try {
-    const aliasRows = await db.prepare("SELECT oldCode FROM account_aliases").all<{ oldCode: string }>();
-    for (const a of aliasRows.results ?? []) if (resolveRp(a.oldCode) === account) equivalents.push(a.oldCode);
-  } catch { equivalents = [account]; }
-  const marks = equivalents.map(() => "?").join(",");
-  const [legRes, matchedRes, stmtRes] = await Promise.all([
-    db.prepare(
-      `SELECT id, sourceType, sourceId, debitSen, creditSen, description, postedAt FROM ledger_journal_entries
-        WHERE accountCode IN (${marks}) AND hidden = 0`,
-    ).bind(...equivalents).all<{ id: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; description: string | null; postedAt: string }>(),
-    db.prepare(
-      "SELECT matchedLegId, txnDate FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
-    ).bind(account).all<{ matchedLegId: string; txnDate: string }>(),
-    db.prepare(
-      `SELECT amountSen, txnDate, description FROM bank_statement_lines
-        WHERE accountCode = ? AND matchedLegId IS NULL AND ignored_at IS NULL AND txnDate <= ?`,
-    ).bind(account, monthEnd).all<{ amountSen: number; txnDate: string; description: string | null }>(),
-  ]);
-  const { docDate, openingDate: obDateRp } = await loadDocDateResolver(db);
-  // A match on a pre-opening statement line is void for reconciliation — that
-  // bank movement is inside the keyed opening balance (BUG-2026-09-02-174).
-  const matchedIds = new Set(
-    (matchedRes.results ?? [])
-      .filter((r) => !obDateRp || r.txnDate >= obDateRp)
-      .map((r) => r.matchedLegId),
-  );
+  const { legs: stateLegs, clearedOn, openingDate: obDateRp } = await loadBankRecoState(db, account);
+  const stmtRes = await db.prepare(
+    `SELECT amountSen, txnDate, description FROM bank_statement_lines
+      WHERE accountCode = ? AND matchedLegId IS NULL AND ignored_at IS NULL AND txnDate <= ?`,
+  ).bind(account, monthEnd).all<{ amountSen: number; txnDate: string; description: string | null }>();
+  const matchedIds = new Set(clearedOn.keys());
   let glSen = 0;
   let unclearedBookSen = 0;
   let unclearedBookCount = 0;
@@ -12565,10 +12593,10 @@ async function computeBankRecoReport(
   const monthStart = `${month}-01`;
   let bookPreSen = 0;
   const bookByDay: Record<string, number> = {};
-  for (const l of legRes.results ?? []) {
-    const day = docDate(l.sourceType, l.sourceId, l.postedAt);
-    if (legBeforeOpening(l.sourceType, day, obDateRp) || day > monthEnd) continue;
-    const amt = (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+  for (const l of stateLegs) {
+    const day = l.day;
+    if (day > monthEnd) continue;
+    const amt = l.amountSen;
     glSen += amt;
     if (day < monthStart) bookPreSen += amt;
     else bookByDay[day] = (bookByDay[day] ?? 0) + amt;
@@ -12667,6 +12695,85 @@ app.get("/bank-reco/daily", async (c) => {
     days.push({ day, bookSen, bankSen, diffSen: bankSen === null ? null : bookSen - bankSen });
   }
   return c.json({ success: true, data: { account, month, days } });
+});
+
+// Daily cash position (owner 2026-09-03 — his external "BANK BALANCE
+// AVAILABLE" board, rebuilt inside the ERP). Per bank/cash account, as at a
+// date D: estimated bank balance = book(≤D) − pending + unbooked, where
+// pending = recorded legs the bank hasn't processed by D (unmatched, or
+// matched to a statement line dated after D — 「我开 PV 了，银行还没付款」),
+// and unbooked = bank lines ≤D nobody booked yet. Available (after pending)
+// = bank estimate + pending(signed) = what's truly spendable once the queue
+// clears. Source is the book ± reconciliation ONLY — the estimate is as
+// fresh as the last imported statement, by the owner's explicit choice (b).
+app.get("/cash-position", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const date = c.req.query("date") || new Date().toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ success: false, error: "date must be YYYY-MM-DD" }, 400);
+  await ensureBankRecoCols(c.var.DB);
+  const coaRes = await c.var.DB.prepare(
+    "SELECT code, name, specialAccountType FROM chart_of_accounts WHERE isActive = 1 ORDER BY code",
+  ).all<{ code: string; name: string; specialAccountType?: string | null; special_account_type?: string | null }>();
+  const bankAccounts = (coaRes.results ?? []).filter((a) => {
+    const t = a.specialAccountType ?? a.special_account_type ?? "";
+    return t === "SBK" || t === "SCH";
+  });
+  const accounts: {
+    code: string; name: string; reconciled: boolean;
+    bookSen: number; pendingSen: number; unbookedSen: number; unbookedCount: number;
+    bankEstSen: number; availableSen: number;
+    pending: { day: string; sourceId: string; description: string; amountSen: number }[];
+  }[] = [];
+  for (const a of bankAccounts) {
+    const { legs, clearedOn, openingDate } = await loadBankRecoState(c.var.DB, a.code);
+    // An account with no imported statement lines (cash in hand, banks not
+    // yet under reconciliation) is BOOK-ONLY: no pending concept, estimate =
+    // book balance. Otherwise every leg would read as "pending" forever.
+    let reconciled = false;
+    try {
+      const probe = await c.var.DB.prepare(
+        "SELECT id FROM bank_statement_lines WHERE accountCode = ? LIMIT 1",
+      ).bind(a.code).first<{ id: string }>();
+      reconciled = !!probe;
+    } catch { reconciled = false; }
+    let bookSen = 0;
+    let pendingSen = 0;
+    const pending: { day: string; sourceId: string; description: string; amountSen: number }[] = [];
+    for (const l of legs) {
+      if (l.day > date) continue;
+      bookSen += l.amountSen;
+      if (!reconciled) continue;
+      if (isOpeningSource(l.sourceType)) continue; // the floor itself is never pending
+      const cleared = clearedOn.get(l.id);
+      if (!cleared || cleared > date) {
+        pendingSen += l.amountSen;
+        if (pending.length < 300) pending.push({ day: l.day, sourceId: l.sourceId, description: l.description, amountSen: l.amountSen });
+      }
+    }
+    pending.sort((x, y) => x.day.localeCompare(y.day));
+    let unbookedSen = 0;
+    let unbookedCount = 0;
+    if (reconciled) {
+      try {
+        const ub = await c.var.DB.prepare(
+          `SELECT amountSen, txnDate FROM bank_statement_lines
+            WHERE accountCode = ? AND matchedLegId IS NULL AND ignored_at IS NULL AND txnDate <= ?`,
+        ).bind(a.code, date).all<{ amountSen: number; txnDate: string }>();
+        for (const r of ub.results ?? []) {
+          if (openingDate && r.txnDate < openingDate) continue; // inside the opening balance
+          unbookedSen += Math.round(Number(r.amountSen) || 0);
+          unbookedCount++;
+        }
+      } catch { /* statement table absent — book-only estimate */ }
+    }
+    const bankEstSen = bookSen - pendingSen + unbookedSen;
+    const availableSen = bankEstSen + pendingSen; // = bookSen + unbookedSen
+    accounts.push({ code: a.code, name: a.name, reconciled, bookSen, pendingSen, unbookedSen, unbookedCount, bankEstSen, availableSen, pending });
+  }
+  const totalBankEstSen = accounts.reduce((s, x) => s + x.bankEstSen, 0);
+  const totalAvailableSen = accounts.reduce((s, x) => s + x.availableSen, 0);
+  return c.json({ success: true, data: { date, accounts, totalBankEstSen, totalAvailableSen } });
 });
 
 // Freeze (or re-open) a month's reconciliation. POST {accountCode, month} to

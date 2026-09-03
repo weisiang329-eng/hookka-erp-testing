@@ -12697,6 +12697,103 @@ app.get("/bank-reco/daily", async (c) => {
   return c.json({ success: true, data: { account, month, days } });
 });
 
+// Cash-board side tables (owner 2026-09-03 完整体):
+//   bank_board_cleared — the DAILY TICK. The owner sees a voucher go through
+//   in his banking app and ticks it on the board; the leg leaves the pending
+//   queue and the bank estimate turns daily-accurate. A tick is board
+//   metadata only — the monthly statement import + matching supersedes it,
+//   and a ticked leg whose month HAS a statement but no match raises a red
+//   warning instead of being silently believed.
+//   planned_payments — money he intends to pay that has no voucher yet
+//   (default-off section; he may never use it).
+// ⚠ Migration files 0232/0213 are the record; THIS self-apply is the
+// mechanism.
+let _pendingCashBoardTables: Promise<void> | null = null;
+function ensureCashBoardTables(db: Env["Variables"]["DB"]): Promise<void> {
+  if (!_pendingCashBoardTables) {
+    _pendingCashBoardTables = (async () => {
+      await db.prepare(
+        `CREATE TABLE IF NOT EXISTS bank_board_cleared (
+           leg_id       TEXT PRIMARY KEY,
+           account_code TEXT NOT NULL,
+           cleared_on   TEXT NOT NULL,
+           created_at   TEXT
+         )`,
+      ).run();
+      await db.prepare(
+        `CREATE TABLE IF NOT EXISTS planned_payments (
+           id            TEXT PRIMARY KEY,
+           party_name    TEXT NOT NULL,
+           ref           TEXT,
+           expected_date TEXT NOT NULL,
+           amount_sen    INTEGER NOT NULL,
+           created_at    TEXT,
+           done_at       TEXT
+         )`,
+      ).run();
+    })().catch((e) => {
+      _pendingCashBoardTables = null;
+      throw e;
+    });
+  }
+  return _pendingCashBoardTables;
+}
+
+// Tick / untick one pending voucher: 「我在银行 app 看到已经扣了」.
+app.post("/cash-position/tick", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    await ensureCashBoardTables(c.var.DB);
+    const body = await c.req.json() as { legId?: string; accountCode?: string; cleared?: boolean; date?: string };
+    const legId = String(body.legId || "");
+    if (!legId) return c.json({ success: false, error: "legId required" }, 400);
+    if (body.cleared === false) {
+      await c.var.DB.prepare("DELETE FROM bank_board_cleared WHERE leg_id = ?").bind(legId).run();
+      return c.json({ success: true });
+    }
+    const clearedOn = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date || "")) ? String(body.date) : new Date().toISOString().slice(0, 10);
+    await c.var.DB.prepare(
+      `INSERT INTO bank_board_cleared (leg_id, account_code, cleared_on, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(leg_id) DO UPDATE SET cleared_on = excluded.cleared_on`,
+    ).bind(legId, String(body.accountCode || ""), clearedOn, new Date().toISOString()).run();
+    return c.json({ success: true });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// Planned payments (default-off section): add / mark done / delete.
+app.post("/cash-position/planned", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    await ensureCashBoardTables(c.var.DB);
+    const body = await c.req.json() as { partyName?: string; ref?: string; expectedDate?: string; amountSen?: number };
+    const party = String(body.partyName || "").trim();
+    const dateS = String(body.expectedDate || "");
+    const amt = Math.round(Number(body.amountSen) || 0);
+    if (!party || !/^\d{4}-\d{2}-\d{2}$/.test(dateS) || amt <= 0) {
+      return c.json({ success: false, error: "partyName, expectedDate (YYYY-MM-DD) and a positive amountSen are required" }, 400);
+    }
+    const id = `plan-${crypto.randomUUID().slice(0, 10)}`;
+    await c.var.DB.prepare(
+      "INSERT INTO planned_payments (id, party_name, ref, expected_date, amount_sen, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).bind(id, party, String(body.ref || "") || null, dateS, amt, new Date().toISOString()).run();
+    return c.json({ success: true, data: { id } }, 201);
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.delete("/cash-position/planned/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "delete");
+  if (denied) return denied;
+  await ensureCashBoardTables(c.var.DB);
+  await c.var.DB.prepare("DELETE FROM planned_payments WHERE id = ?").bind(c.req.param("id")).run();
+  return c.json({ success: true });
+});
+
 // Daily cash position (owner 2026-09-03 — his external "BANK BALANCE
 // AVAILABLE" board, rebuilt inside the ERP). Per bank/cash account, as at a
 // date D: estimated bank balance = book(≤D) − pending + unbooked, where
@@ -12704,14 +12801,28 @@ app.get("/bank-reco/daily", async (c) => {
 // matched to a statement line dated after D — 「我开 PV 了，银行还没付款」),
 // and unbooked = bank lines ≤D nobody booked yet. Available (after pending)
 // = bank estimate + pending(signed) = what's truly spendable once the queue
-// clears. Source is the book ± reconciliation ONLY — the estimate is as
-// fresh as the last imported statement, by the owner's explicit choice (b).
+// clears. Source is the book ± reconciliation, plus the owner's DAILY TICKS
+// (bank_board_cleared) so the estimate stays daily-accurate between monthly
+// statements. The pending LIST shows only fresh vouchers (after each
+// account's last finalised month); older reconciliation debt is one summary
+// line — same maths, less noise.
 app.get("/cash-position", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   const date = c.req.query("date") || new Date().toISOString().slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ success: false, error: "date must be YYYY-MM-DD" }, 400);
   await ensureBankRecoCols(c.var.DB);
+  await ensureCashBoardTables(c.var.DB);
+  // The owner's daily ticks: legId → the day he saw the bank process it.
+  const tickRows = await c.var.DB.prepare(
+    "SELECT leg_id, cleared_on FROM bank_board_cleared",
+  ).all<{ leg_id?: string; legId?: string; cleared_on?: string; clearedOn?: string }>().catch(() => ({ results: [] as { leg_id?: string; legId?: string; cleared_on?: string; clearedOn?: string }[] }));
+  const tickMap = new Map<string, string>();
+  for (const r of tickRows.results ?? []) {
+    const k = r.legId ?? r.leg_id;
+    const v = r.clearedOn ?? r.cleared_on;
+    if (k && v) tickMap.set(k, v);
+  }
   const coaRes = await c.var.DB.prepare(
     "SELECT code, name, specialAccountType FROM chart_of_accounts WHERE isActive = 1 ORDER BY code",
   ).all<{ code: string; name: string; specialAccountType?: string | null; special_account_type?: string | null }>();
@@ -12723,10 +12834,36 @@ app.get("/cash-position", async (c) => {
     code: string; name: string; reconciled: boolean;
     bookSen: number; pendingSen: number; unbookedSen: number; unbookedCount: number;
     bankEstSen: number; availableSen: number;
-    pending: { day: string; sourceId: string; description: string; amountSen: number }[];
+    oldPendingSen: number; oldPendingCount: number;
+    pending: { legId: string; day: string; sourceId: string; description: string; amountSen: number; ticked: boolean }[];
   }[] = [];
+  const tickWarnings: { account: string; day: string; sourceId: string; description: string; amountSen: number }[] = [];
   for (const a of bankAccounts) {
     const { legs, clearedOn, openingDate } = await loadBankRecoState(c.var.DB, a.code);
+    // The pending LIST only itemises vouchers after this account's last
+    // FINALISED month — earlier leftovers are reconciliation debt, collapsed
+    // into one summary line (the maths still counts them).
+    let freshFloor = "";
+    try {
+      const fRows = await c.var.DB.prepare("SELECT key FROM kv_config WHERE key LIKE ?")
+        .bind(`bank_reco_final:${a.code}:%`).all<{ key: string }>();
+      const months = (fRows.results ?? [])
+        .map((r) => String(r.key).slice(`bank_reco_final:${a.code}:`.length))
+        .filter((m) => /^\d{4}-\d{2}$/.test(m))
+        .sort();
+      if (months.length) freshFloor = `${months[months.length - 1]}-31`;
+    } catch { freshFloor = ""; }
+    // Which months have an imported statement — a tick on a leg of such a
+    // month that STILL has no match means the bank never showed it: warn.
+    const importedMonths = new Set<string>();
+    try {
+      const mRows = await c.var.DB.prepare("SELECT key FROM kv_config WHERE key LIKE ?")
+        .bind(`bank_reco_meta:${a.code}:%`).all<{ key: string }>();
+      for (const r of mRows.results ?? []) {
+        const m = String(r.key).slice(`bank_reco_meta:${a.code}:`.length);
+        if (/^\d{4}-\d{2}$/.test(m)) importedMonths.add(m);
+      }
+    } catch { /* none */ }
     // An account with no imported statement lines (cash in hand, banks not
     // yet under reconciliation) is BOOK-ONLY: no pending concept, estimate =
     // book balance. Otherwise every leg would read as "pending" forever.
@@ -12739,16 +12876,37 @@ app.get("/cash-position", async (c) => {
     } catch { reconciled = false; }
     let bookSen = 0;
     let pendingSen = 0;
-    const pending: { day: string; sourceId: string; description: string; amountSen: number }[] = [];
+    let oldPendingSen = 0;
+    let oldPendingCount = 0;
+    const pending: { legId: string; day: string; sourceId: string; description: string; amountSen: number; ticked: boolean }[] = [];
     for (const l of legs) {
       if (l.day > date) continue;
       bookSen += l.amountSen;
       if (!reconciled) continue;
       if (isOpeningSource(l.sourceType)) continue; // the floor itself is never pending
-      const cleared = clearedOn.get(l.id);
-      if (!cleared || cleared > date) {
+      const matchedOn = clearedOn.get(l.id);
+      const clearedByMatch = !!matchedOn && matchedOn <= date;
+      const tickedOn = tickMap.get(l.id);
+      const clearedByTick = !clearedByMatch && !!tickedOn && tickedOn <= date;
+      if (!clearedByMatch && !clearedByTick) {
         pendingSen += l.amountSen;
-        if (pending.length < 300) pending.push({ day: l.day, sourceId: l.sourceId, description: l.description, amountSen: l.amountSen });
+        if (l.day > freshFloor) {
+          if (pending.length < 300) pending.push({ legId: l.id, day: l.day, sourceId: l.sourceId, description: l.description, amountSen: l.amountSen, ticked: false });
+        } else {
+          oldPendingSen += l.amountSen;
+          oldPendingCount++;
+        }
+      } else if (clearedByTick) {
+        // Still listed (greyed, tick ON) so the owner can untick a mistake —
+        // it just no longer counts as pending.
+        if (l.day > freshFloor && pending.length < 300) {
+          pending.push({ legId: l.id, day: l.day, sourceId: l.sourceId, description: l.description, amountSen: l.amountSen, ticked: true });
+        }
+        // The bank's own statement is the referee: month imported + still
+        // unmatched means the tick claimed something the paper never showed.
+        if (!matchedOn && importedMonths.has(l.day.slice(0, 7))) {
+          tickWarnings.push({ account: a.code, day: l.day, sourceId: l.sourceId, description: l.description, amountSen: l.amountSen });
+        }
       }
     }
     pending.sort((x, y) => x.day.localeCompare(y.day));
@@ -12769,11 +12927,86 @@ app.get("/cash-position", async (c) => {
     }
     const bankEstSen = bookSen - pendingSen + unbookedSen;
     const availableSen = bankEstSen + pendingSen; // = bookSen + unbookedSen
-    accounts.push({ code: a.code, name: a.name, reconciled, bookSen, pendingSen, unbookedSen, unbookedCount, bankEstSen, availableSen, pending });
+    accounts.push({ code: a.code, name: a.name, reconciled, bookSen, pendingSen, unbookedSen, unbookedCount, bankEstSen, availableSen, oldPendingSen, oldPendingCount, pending });
   }
   const totalBankEstSen = accounts.reduce((s, x) => s + x.bankEstSen, 0);
   const totalAvailableSen = accounts.reduce((s, x) => s + x.availableSen, 0);
-  return c.json({ success: true, data: { date, accounts, totalBankEstSen, totalAvailableSen } });
+
+  // TO REPAY / TO RECEIVE — the SAME inclusion rules as the aging tabs
+  // (rowBeforeOpening / apRowBeforeOpening / status filters), so the board
+  // always ties to Creditor & Debtor Aging. Grouped (month, party); the
+  // customer rows also carry the already-due slice (invoice due date = the
+  // customer's terms) for the board's default "due now" scope.
+  const obDateCp = await getOpeningDate(c.var.DB);
+  const apExclCp = await loadOpeningApExcludes(c.var.DB);
+  const [piRes2, invRes2, ocbRes2, plannedRes] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT id, supplierName, amountSen, paidAmountSen, status, invoiceDate, isOpening FROM purchase_invoices",
+    ).all<{ id: string; supplierName: string; amountSen: number; paidAmountSen?: number | null; paid_amount_sen?: number | null; status: string; invoiceDate: string | null; isOpening: number | null }>(),
+    c.var.DB.prepare(
+      "SELECT customerName, totalSen, paidAmount, status, dueDate, invoiceDate, isOpening FROM invoices",
+    ).all<{ customerName: string; totalSen: number; paidAmount: number; status: string; dueDate: string | null; invoiceDate: string | null; isOpening: number | null }>(),
+    c.var.DB.prepare(
+      `SELECT b.partyName, b.billDate, b.totalSen, b.paidAmountSen, b.status, dl.state AS lifecycleState
+         FROM other_party_bills b
+         LEFT JOIN document_lifecycle dl
+           ON dl.sourceType = 'other_party_bill' AND dl.sourceId = b.billNo AND dl.orgId = b.orgId
+        WHERE b.partyType = 'CREDITOR'`,
+    ).all<{ partyName: string; billDate: string | null; totalSen: number; paidAmountSen?: number | null; paid_amount_sen?: number | null; status: string; lifecycleState: string | null }>(),
+    c.var.DB.prepare(
+      "SELECT id, party_name, ref, expected_date, amount_sen FROM planned_payments WHERE done_at IS NULL ORDER BY expected_date",
+    ).all<{ id: string; party_name?: string; partyName?: string; ref: string | null; expected_date?: string; expectedDate?: string; amount_sen?: number; amountSen?: number }>().catch(() => ({ results: [] as never[] })),
+  ]);
+  const repayAgg = new Map<string, number>();
+  for (const p of piRes2.results ?? []) {
+    if (apRowBeforeOpening({ id: p.id, date: p.invoiceDate, isOpening: p.isOpening }, obDateCp, apExclCp)) continue;
+    if (["DRAFT", "CANCELLED", "PAID"].includes(p.status)) continue;
+    const out = (Number(p.amountSen) || 0) - (Number(p.paidAmountSen ?? p.paid_amount_sen) || 0);
+    if (out <= 0) continue;
+    const month = String(p.invoiceDate ?? "").slice(0, 7) || "unknown";
+    const k = `${month}|${p.supplierName || "Unknown"}`;
+    repayAgg.set(k, (repayAgg.get(k) ?? 0) + out);
+  }
+  for (const b of ocbRes2.results ?? []) {
+    if (b.lifecycleState && b.lifecycleState !== "ACTIVE") continue;
+    if (["CANCELLED", "PAID"].includes(b.status)) continue;
+    const out = (Number(b.totalSen) || 0) - (Number(b.paidAmountSen ?? b.paid_amount_sen) || 0);
+    if (out <= 0) continue;
+    const month = String(b.billDate ?? "").slice(0, 7) || "unknown";
+    const k = `${month}|${b.partyName || "Unknown"}`;
+    repayAgg.set(k, (repayAgg.get(k) ?? 0) + out);
+  }
+  const repay = [...repayAgg.entries()]
+    .map(([k, sen]) => ({ month: k.split("|")[0], name: k.split("|")[1], outstandingSen: sen }))
+    .sort((x, y) => x.month.localeCompare(y.month) || x.name.localeCompare(y.name));
+  const recvAgg = new Map<string, { totalSen: number; dueSen: number }>();
+  for (const i of invRes2.results ?? []) {
+    if (rowBeforeOpening(i.invoiceDate, obDateCp, i.isOpening)) continue;
+    if (["DRAFT", "CANCELLED", "PAID"].includes(i.status)) continue;
+    const out = (Number(i.totalSen) || 0) - (Number(i.paidAmount) || 0);
+    if (out <= 0) continue;
+    const month = String(i.invoiceDate ?? "").slice(0, 7) || "unknown";
+    const k = `${month}|${i.customerName || "Unknown"}`;
+    const row = recvAgg.get(k) ?? { totalSen: 0, dueSen: 0 };
+    row.totalSen += out;
+    // No due date recorded = treat as already due (never hide collectible money).
+    if (!i.dueDate || i.dueDate <= date) row.dueSen += out;
+    recvAgg.set(k, row);
+  }
+  const receive = [...recvAgg.entries()]
+    .map(([k, v]) => ({ month: k.split("|")[0], name: k.split("|")[1], totalSen: v.totalSen, dueSen: v.dueSen }))
+    .sort((x, y) => x.month.localeCompare(y.month) || x.name.localeCompare(y.name));
+  const planned = (plannedRes.results ?? []).map((p) => ({
+    id: p.id,
+    partyName: p.partyName ?? p.party_name ?? "",
+    ref: p.ref ?? "",
+    expectedDate: p.expectedDate ?? p.expected_date ?? "",
+    amountSen: Math.round(Number(p.amountSen ?? p.amount_sen) || 0),
+  }));
+  return c.json({
+    success: true,
+    data: { date, accounts, totalBankEstSen, totalAvailableSen, repay, receive, planned, tickWarnings },
+  });
 });
 
 // Freeze (or re-open) a month's reconciliation. POST {accountCode, month} to

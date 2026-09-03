@@ -45,6 +45,7 @@
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "hono": "^4.12.14",
+    "html2canvas": "^1.4.1",
     "jsbarcode": "^3.12.3",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.7",

@@ -12976,8 +12976,21 @@ app.get("/cash-position", async (c) => {
     const k = `${month}|${b.partyName || "Unknown"}`;
     repayAgg.set(k, (repayAgg.get(k) ?? 0) + out);
   }
+  // Unapplied advances net off EXACTLY like the aging tabs (money already
+  // paid/received but not yet knocked to a document) — without this the
+  // board overstates what is still owed/collectible, and the owner's first
+  // cross-check against Creditor/Debtor Aging fails.
+  const orgIdCp = getOrgId(c);
+  for (const [, adv] of await loadUnappliedSupplierAdvances(c.var.DB, orgIdCp)) {
+    for (const it of adv.items) {
+      const month = String(it.date ?? "").slice(0, 7) || "unknown";
+      const k = `${month}|${adv.supplierName || "Unknown"}`;
+      repayAgg.set(k, (repayAgg.get(k) ?? 0) - it.sen);
+    }
+  }
   const repay = [...repayAgg.entries()]
     .map(([k, sen]) => ({ month: k.split("|")[0], name: k.split("|")[1], outstandingSen: sen }))
+    .filter((r) => r.outstandingSen !== 0)
     .sort((x, y) => x.month.localeCompare(y.month) || x.name.localeCompare(y.name));
   const recvAgg = new Map<string, { totalSen: number; dueSen: number }>();
   for (const i of invRes2.results ?? []) {
@@ -12993,8 +13006,20 @@ app.get("/cash-position", async (c) => {
     if (!i.dueDate || i.dueDate <= date) row.dueSen += out;
     recvAgg.set(k, row);
   }
+  for (const [, adv] of await loadUnappliedCustomerAdvances(c.var.DB, orgIdCp)) {
+    for (const it of adv.items) {
+      const month = String(it.date ?? "").slice(0, 7) || "unknown";
+      const k = `${month}|${adv.customerName || "Unknown"}`;
+      const row = recvAgg.get(k) ?? { totalSen: 0, dueSen: 0 };
+      // Cash in hand reduces both scopes — an advance is due-neutral.
+      row.totalSen -= it.sen;
+      row.dueSen -= it.sen;
+      recvAgg.set(k, row);
+    }
+  }
   const receive = [...recvAgg.entries()]
     .map(([k, v]) => ({ month: k.split("|")[0], name: k.split("|")[1], totalSen: v.totalSen, dueSen: v.dueSen }))
+    .filter((r) => r.totalSen !== 0 || r.dueSen !== 0)
     .sort((x, y) => x.month.localeCompare(y.month) || x.name.localeCompare(y.name));
   const planned = (plannedRes.results ?? []).map((p) => ({
     id: p.id,

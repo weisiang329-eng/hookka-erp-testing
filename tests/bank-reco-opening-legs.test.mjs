@@ -104,9 +104,13 @@ test("cash position rides the shared loader and skips opening legs as pending", 
   // whose statement showed no such transaction must raise a warning.
   assert.match(body, /const clearedByTick = !clearedByMatch && /);
   assert.match(body, /importedMonths\.has\(l\.day\.slice\(0, 7\)\)/);
-  // The repay/receive panels must reuse the AGING inclusion rules, not fork them.
+  // The repay/receive panels must reuse the AGING inclusion rules, not fork
+  // them — including the unapplied-advance netting (money already paid /
+  // received nets off, so the board always ties to the aging tabs).
   assert.match(body, /apRowBeforeOpening\(/);
   assert.match(body, /rowBeforeOpening\(/);
+  assert.match(body, /loadUnappliedSupplierAdvances\(/);
+  assert.match(body, /loadUnappliedCustomerAdvances\(/);
 });
 
 test("GET /bank-reco only flags legs matched by post-opening lines", () => {

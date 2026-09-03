@@ -100,6 +100,13 @@ test("cash position rides the shared loader and skips opening legs as pending", 
   assert.match(body, /isOpeningSource\(l\.sourceType\)/);
   // Book-only accounts (no imported statements) must not treat legs as pending.
   assert.match(body, /if \(!reconciled\) continue;/);
+  // A real statement match ALWAYS beats a board tick, and a tick on a month
+  // whose statement showed no such transaction must raise a warning.
+  assert.match(body, /const clearedByTick = !clearedByMatch && /);
+  assert.match(body, /importedMonths\.has\(l\.day\.slice\(0, 7\)\)/);
+  // The repay/receive panels must reuse the AGING inclusion rules, not fork them.
+  assert.match(body, /apRowBeforeOpening\(/);
+  assert.match(body, /rowBeforeOpening\(/);
 });
 
 test("GET /bank-reco only flags legs matched by post-opening lines", () => {

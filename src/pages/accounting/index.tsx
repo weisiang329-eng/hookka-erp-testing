@@ -9739,14 +9739,109 @@ type CashPosAccount = {
   code: string; name: string; reconciled: boolean;
   bookSen: number; pendingSen: number; unbookedSen: number; unbookedCount: number;
   bankEstSen: number; availableSen: number;
-  pending: { day: string; sourceId: string; description: string; amountSen: number }[];
+  oldPendingSen: number; oldPendingCount: number;
+  pending: { legId: string; day: string; sourceId: string; description: string; amountSen: number; ticked: boolean }[];
 };
-type CashPosData = { date: string; accounts: CashPosAccount[]; totalBankEstSen: number; totalAvailableSen: number };
+type CashPosPartyRow = { month: string; name: string; outstandingSen?: number; totalSen?: number; dueSen?: number };
+type CashPosData = {
+  date: string; accounts: CashPosAccount[]; totalBankEstSen: number; totalAvailableSen: number;
+  repay: CashPosPartyRow[]; receive: CashPosPartyRow[];
+  planned: { id: string; partyName: string; ref: string; expectedDate: string; amountSen: number }[];
+  tickWarnings: { account: string; day: string; sourceId: string; description: string; amountSen: number }[];
+};
+
+// Month-grouped breakdown the owner sketched: per month → one row per party
+// → month total → grand total.
+function CashPosPartyPanel({ title, rows, amountOf, scopeLabel, scopeAlt, scope, onScope, tone }: {
+  title: string;
+  rows: CashPosPartyRow[];
+  amountOf: (r: CashPosPartyRow) => number;
+  scopeLabel: string; scopeAlt: string;
+  scope: boolean; onScope: (v: boolean) => void;
+  tone: "pay" | "receive";
+}) {
+  const byMonth = new Map<string, CashPosPartyRow[]>();
+  for (const r of rows) {
+    if (amountOf(r) === 0) continue;
+    const list = byMonth.get(r.month) ?? [];
+    list.push(r);
+    byMonth.set(r.month, list);
+  }
+  const months = [...byMonth.keys()].sort();
+  const grand = rows.reduce((s, r) => s + amountOf(r), 0);
+  const monthLabel = (m: string) => {
+    const names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const mm = Number(m.slice(5, 7));
+    return mm >= 1 && mm <= 12 ? `${names[mm - 1]}'${m.slice(2, 4)}` : m;
+  };
+  return (
+    <Card>
+      <CardContent className="p-0">
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#E2DDD8]">
+          <span className="text-sm font-semibold text-[#1F1D1B]">{title}</span>
+          <button
+            onClick={() => onScope(!scope)}
+            className="rounded-full border border-[#E2DDD8] px-2 py-0.5 text-[11px] text-[#6B7280] hover:border-[#6B5C32] cursor-pointer"
+            title="Switch scope"
+          >
+            {scope ? scopeLabel : scopeAlt} ⇄
+          </button>
+        </div>
+        {months.length === 0 ? (
+          <div className="px-4 py-5 text-sm text-[#9CA3AF]">Nothing in this scope ✓</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {months.map((m) => {
+                const list = byMonth.get(m)!;
+                const sub = list.reduce((s, r) => s + amountOf(r), 0);
+                return (
+                  <Fragment key={m}>
+                    <tr className="bg-[#F7F4EF]">
+                      <td className="px-4 py-1 text-xs font-semibold text-[#6B7280]" colSpan={2}>{monthLabel(m)}</td>
+                    </tr>
+                    {list.map((r) => (
+                      <tr key={`${m}-${r.name}`} className="border-b border-[#F0ECE9]">
+                        <td className="px-4 py-1 text-xs w-full max-w-0"><div className="truncate" title={r.name}>{r.name}</div></td>
+                        <td className="px-4 py-1 text-right tabular-nums text-xs whitespace-nowrap">{formatCurrency(amountOf(r))}</td>
+                      </tr>
+                    ))}
+                    <tr className="border-b border-[#E2DDD8]">
+                      <td className="px-4 py-1 text-xs font-medium">Total {monthLabel(m)}</td>
+                      <td className="px-4 py-1 text-right tabular-nums text-xs font-medium whitespace-nowrap">{formatCurrency(sub)}</td>
+                    </tr>
+                  </Fragment>
+                );
+              })}
+              <tr className={tone === "pay" ? "bg-[#F7E5E1]/60" : "bg-[#EAF3DE]/60"}>
+                <td className="px-4 py-1.5 text-sm font-semibold">{tone === "pay" ? "TOTAL TO REPAY" : "TOTAL TO RECEIVE"}</td>
+                <td className="px-4 py-1.5 text-right tabular-nums font-bold whitespace-nowrap">{formatCurrency(grand)}</td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 function DailyCashTab() {
   const { toast } = useToast();
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const today = new Date().toISOString().slice(0, 10);
+  const [date, setDate] = useState(today);
   const [data, setData] = useState<CashPosData | null>(null);
+  const [reload, setReload] = useState(0);
+  // Panel scopes (owner defaults: suppliers = everything before this month;
+  // customers = already due per each invoice's terms).
+  const [repayAll, setRepayAll] = useState(false);
+  const [recvAll, setRecvAll] = useState(false);
+  // Planned payments: default OFF (「可以做，但我不一定会用到」).
+  const [showPlanned, setShowPlanned] = useState(() => {
+    try { return localStorage.getItem("cashpos-planned") === "1"; } catch { return false; }
+  });
+  const [planForm, setPlanForm] = useState({ party: "", ref: "", date: "", amount: "" });
+  const boardRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
     let dead = false;
     fetch(`/api/accounting/cash-position?date=${date}`)
@@ -9754,7 +9849,7 @@ function DailyCashTab() {
       .then((j) => { if (!dead && j?.success && j.data) setData(j.data); })
       .catch(() => {});
     return () => { dead = true; };
-  }, [date]);
+  }, [date, reload]);
   const cur = data && data.date === date ? data : null;
   const shiftDay = (delta: number) => {
     const d = new Date(`${date}T00:00:00Z`);
@@ -9763,15 +9858,74 @@ function DailyCashTab() {
   };
   const tdInC = (n: number) => (n > 0 ? formatCurrency(n) : "");
   const tdOutC = (n: number) => (n < 0 ? formatCurrency(-n) : "");
+  const curMonth = date.slice(0, 7);
+
+  const handleTick = async (a: CashPosAccount, legId: string, cleared: boolean) => {
+    const res = await fetch("/api/accounting/cash-position/tick", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ legId, accountCode: a.code, cleared, date }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) setReload((n) => n + 1);
+    else toast.error(j?.error || "Failed");
+  };
+
+  const addPlanned = async () => {
+    const amountSen = moneyFieldToSen(planForm.amount);
+    if (!planForm.party.trim() || !planForm.date || !amountSen || amountSen <= 0) {
+      toast.error("Party, date and a positive amount are required");
+      return;
+    }
+    const res = await fetch("/api/accounting/cash-position/planned", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ partyName: planForm.party.trim(), ref: planForm.ref.trim(), expectedDate: planForm.date, amountSen }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) { setPlanForm({ party: "", ref: "", date: "", amount: "" }); setReload((n) => n + 1); }
+    else toast.error(j?.error || "Failed");
+  };
+
+  const deletePlanned = async (id: string) => {
+    const res = await fetch(`/api/accounting/cash-position/planned/${id}`, { method: "DELETE" });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) setReload((n) => n + 1);
+    else toast.error(j?.error || "Failed");
+  };
+
+  // Future view: planned payments up to the viewed date reduce the projection.
+  const plannedDue = (cur?.planned ?? []).filter((p) => p.expectedDate <= date);
+  const plannedDueSen = plannedDue.reduce((s, p) => s + p.amountSen, 0);
+  const isFuture = date > today;
+
+  const getImage = async () => {
+    if (!boardRef.current) return;
+    try {
+      const { default: html2canvas } = await import("html2canvas");
+      const canvas = await html2canvas(boardRef.current, { backgroundColor: "#FAF8F5", scale: 2 });
+      canvas.toBlob((blob) => {
+        if (!blob) { toast.error("Could not render the image"); return; }
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `cash-position-${date}.png`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      }, "image/png");
+    } catch {
+      toast.error("Image export failed");
+    }
+  };
 
   const printBoard = () => {
     if (!cur) return;
     const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
     const acctBlock = (a: CashPosAccount) => `
       <h2>${a.code} ${esc(a.name)} — Bank balance (est.) <b>${formatCurrency(a.bankEstSen)}</b>${a.reconciled ? "" : " (book only)"}</h2>
-      ${a.pending.length ? `<table><thead><tr><th>Date</th><th>PV No.</th><th>Description</th><th class="r">Received</th><th class="r">Pending payment</th></tr></thead><tbody>${a.pending
+      ${a.pending.filter((p) => !p.ticked).length ? `<table><thead><tr><th>Date</th><th>PV No.</th><th>Description</th><th class="r">Received</th><th class="r">Pending payment</th></tr></thead><tbody>${a.pending.filter((p) => !p.ticked)
         .map((p) => `<tr><td>${p.day}</td><td>${esc(p.sourceId)}</td><td>${esc(p.description)}</td><td class="r">${p.amountSen > 0 ? formatCurrency(p.amountSen) : ""}</td><td class="r">${p.amountSen < 0 ? formatCurrency(-p.amountSen) : ""}</td></tr>`)
         .join("")}</tbody></table>` : ""}
+      ${a.oldPendingCount > 0 ? `<p>Older reconciliation items: ${a.oldPendingCount} · ${formatCurrency(a.oldPendingSen)}</p>` : ""}
       <p class="avail">Available (after pending): <b>${formatCurrency(a.availableSen)}</b></p>`;
     const w = window.open("", "_blank", "width=900,height=700");
     if (!w) { toast.error("Pop-up blocked — allow pop-ups to print"); return; }
@@ -9798,23 +9952,40 @@ function DailyCashTab() {
     <div className="space-y-4">
       <div className="flex justify-between items-center flex-wrap gap-2">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Daily Cash Position</h2>
-        <Button variant="outline" size="sm" disabled={!cur} onClick={printBoard}>Print</Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => { const v = !showPlanned; setShowPlanned(v); try { localStorage.setItem("cashpos-planned", v ? "1" : "0"); } catch { /* ignore */ } }}>
+            {showPlanned ? "Hide planned" : "Show planned"}
+          </Button>
+          <Button variant="outline" size="sm" disabled={!cur} onClick={getImage}>Get image</Button>
+          <Button variant="outline" size="sm" disabled={!cur} onClick={printBoard}>Print</Button>
+        </div>
       </div>
       <Card>
         <CardContent className="p-4 flex flex-wrap items-center gap-3 bg-[#F7F4EF] rounded-lg">
           <Button variant="outline" size="sm" onClick={() => shiftDay(-1)}>‹</Button>
           <input type="date" value={date} onChange={(e) => { if (e.target.value) setDate(e.target.value); }} className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm" />
           <Button variant="outline" size="sm" onClick={() => shiftDay(1)}>›</Button>
-          <Button variant="outline" size="sm" onClick={() => setDate(new Date().toISOString().slice(0, 10))}>Today</Button>
+          <Button variant="outline" size="sm" onClick={() => setDate(today)}>Today</Button>
           <span className="text-[11px] text-[#9CA3AF]">
-            Estimated from the books ± bank reconciliation — as fresh as the last imported statement.
+            Tick a row when your banking app shows it went through — the estimate turns daily-accurate. Statements still referee at month end.
           </span>
         </CardContent>
       </Card>
+      {isFuture && (
+        <div className="rounded-md bg-[#EEF2FB] border border-[#B7C3E0] px-3 py-2 text-xs text-[#2C4170]">
+          Viewing a FUTURE date — this is a projection{plannedDue.length > 0 ? ` including ${plannedDue.length} planned payment${plannedDue.length === 1 ? "" : "s"} (${formatCurrency(plannedDueSen)})` : ""}.
+        </div>
+      )}
+      {(cur?.tickWarnings.length ?? 0) > 0 && (
+        <div className="rounded-md bg-[#F7E5E1] border border-[#D9A79C] px-3 py-2 text-xs text-[#9A3A2D]">
+          ⚠ Ticked as cleared, but the bank statement for that month has NO such transaction — check these:
+          {cur!.tickWarnings.map((wr) => ` ${wr.sourceId || wr.day} (${formatCurrency(Math.abs(wr.amountSen))})`).join(" ·")}
+        </div>
+      )}
       {!cur ? (
         <Card><CardContent className="p-8 text-center text-sm text-[#9CA3AF]">Loading…</CardContent></Card>
       ) : (
-        <>
+        <div ref={boardRef} className="space-y-4">
           {cur.accounts.map((a) => (
             <Card key={a.code}>
               <CardContent className="p-0">
@@ -9832,6 +10003,7 @@ function DailyCashTab() {
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                          <th className="px-3 py-2 text-left">✓</th>
                           <th className="px-3 py-2 text-left">Date</th>
                           <th className="px-3 py-2 text-left">PV No.</th>
                           <th className="px-3 py-2 text-left">Description</th>
@@ -9840,8 +10012,17 @@ function DailyCashTab() {
                         </tr>
                       </thead>
                       <tbody>
-                        {a.pending.map((p, i) => (
-                          <tr key={`${p.day}-${p.sourceId}-${i}`} className="border-b border-[#F0ECE9]">
+                        {a.pending.map((p) => (
+                          <tr key={p.legId} className={`border-b border-[#F0ECE9] ${p.ticked ? "opacity-45" : ""}`}>
+                            <td className="px-3 py-1">
+                              <input
+                                type="checkbox"
+                                checked={p.ticked}
+                                onChange={(e) => void handleTick(a, p.legId, e.target.checked)}
+                                className="h-4 w-4 accent-[#27500A] cursor-pointer"
+                                title={p.ticked ? "Untick — it has NOT gone through after all" : "Tick — my banking app shows this went through"}
+                              />
+                            </td>
                             <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{p.day}</td>
                             <td className="px-3 py-1 text-xs whitespace-nowrap">{p.sourceId}</td>
                             <td className="px-3 py-1 text-xs w-full max-w-0"><div className="truncate" title={p.description}>{p.description}</div></td>
@@ -9851,6 +10032,11 @@ function DailyCashTab() {
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                )}
+                {a.oldPendingCount > 0 && (
+                  <div className="px-4 py-1.5 text-[11px] text-[#9CA3AF] border-t border-[#F0ECE9]">
+                    Older reconciliation items (before the last finalised month): {a.oldPendingCount} · {formatCurrency(a.oldPendingSen)} — handle them in the Cash Book. Still counted in the maths above.
                   </div>
                 )}
                 <div className="flex justify-between px-4 py-2.5 bg-[#EAF3DE]/60 rounded-b-lg text-sm font-medium">
@@ -9863,14 +10049,60 @@ function DailyCashTab() {
           <Card>
             <CardContent className="p-4 flex justify-between items-center">
               <span className="text-sm font-semibold text-[#1F1D1B]">CURRENT CASH AVAILABLE</span>
-              <span className="text-xl font-bold tabular-nums text-[#27500A]">{formatCurrency(cur.totalAvailableSen)}</span>
+              <span className="text-xl font-bold tabular-nums text-[#27500A]">{formatCurrency(cur.totalAvailableSen + (isFuture ? -plannedDueSen : 0))}</span>
             </CardContent>
           </Card>
+          {showPlanned && (
+            <Card>
+              <CardContent className="p-0">
+                <div className="px-4 py-2.5 border-b border-[#E2DDD8] text-sm font-semibold text-[#1F1D1B]">Planned payments <span className="text-[11px] font-normal text-[#9CA3AF]">— no voucher yet, just intentions; used by future-date projections</span></div>
+                {(cur.planned.length > 0) && (
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {cur.planned.map((p) => (
+                        <tr key={p.id} className="border-b border-[#F0ECE9]">
+                          <td className="px-4 py-1 text-xs text-[#6B7280] whitespace-nowrap">{p.expectedDate}</td>
+                          <td className="px-4 py-1 text-xs w-full max-w-0"><div className="truncate">{p.partyName}{p.ref ? ` · ${p.ref}` : ""}</div></td>
+                          <td className="px-4 py-1 text-right tabular-nums text-xs whitespace-nowrap">{formatCurrency(p.amountSen)}</td>
+                          <td className="px-4 py-1 text-right"><button onClick={() => void deletePlanned(p.id)} className="text-[#9CA3AF] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">del</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                <div className="flex flex-wrap items-end gap-2 px-4 py-3">
+                  <input value={planForm.party} onChange={(e) => setPlanForm({ ...planForm, party: e.target.value })} placeholder="Pay to…" className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm w-48" />
+                  <input value={planForm.ref} onChange={(e) => setPlanForm({ ...planForm, ref: e.target.value })} placeholder="Ref (optional)" className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm w-36" />
+                  <input type="date" value={planForm.date} onChange={(e) => setPlanForm({ ...planForm, date: e.target.value })} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+                  <input value={planForm.amount} onChange={(e) => setPlanForm({ ...planForm, amount: e.target.value })} placeholder="Amount (RM)" inputMode="decimal" className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm w-32 text-right" />
+                  <Button variant="outline" size="sm" onClick={() => void addPlanned()}>+ Add</Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+            <CashPosPartyPanel
+              title="TO REPAY — Suppliers & creditors"
+              rows={(cur.repay ?? []).filter((r) => repayAll || r.month < curMonth)}
+              amountOf={(r) => r.outstandingSen ?? 0}
+              scope={!repayAll} scopeLabel="Before this month" scopeAlt="All outstanding"
+              onScope={() => setRepayAll(!repayAll)}
+              tone="pay"
+            />
+            <CashPosPartyPanel
+              title="TO RECEIVE — Customers"
+              rows={cur.receive ?? []}
+              amountOf={(r) => (recvAll ? r.totalSen ?? 0 : r.dueSen ?? 0)}
+              scope={!recvAll} scopeLabel="Due now (per terms)" scopeAlt="All outstanding"
+              onScope={() => setRecvAll(!recvAll)}
+              tone="receive"
+            />
+          </div>
           <p className="text-[11px] text-[#9CA3AF]">
-            "Pending payment" = vouchers recorded in the book that the bank had not processed by this date (owner:
-            「我开 PV 了，银行还没付款」). They drop off automatically as statements are imported and matched.
+            Repay / Receive use the SAME rules as Creditor & Debtor Aging, grouped by invoice month. TF / loans are not
+            included here — they live on the AP tab's Trade Finance block.
           </p>
-        </>
+        </div>
       )}
     </div>
   );

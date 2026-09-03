@@ -71,6 +71,15 @@ b/已录未清全自动/先 HOOKKA）：新 `GET /cash-position?date=` —— �
 alias+地板+174 作废规则）。UI：Accounting 新 tab「Cash Position」（Daily Operation 组+侧栏）——
 ‹日期› /Today、每户口卡（深头条+pending 表+Available 绿条）、总 CURRENT CASH AVAILABLE、Print。
 计划付款 link creditor aging = owner 说的下一步，未做。守卫 +2 测。
+⑩ **Cash Position 完整体（owner 逐条确认后开工）**：a) pending 收窄——只逐行列上次封存月之后的，
+更早的缩一行「Older reconciliation items N · X」（数学不变）；b) **每日打勾**（owner 的重点）——
+新表 `bank_board_cleared`（self-apply，0232/0213 记录），POST /cash-position/tick，勾掉=离开
+pending、推算数当天变准；真账单配对永远压过勾；**勾了但该月账单里没有 → 红警告**；c) Get image
+（html2canvas 懒加载出 PNG）+ Print；d) **TO REPAY / TO RECEIVE 月份分组明细面板**（owner 手绘
+样式：月→每家一行→月合计→总合计；规则同 aging——apRowBeforeOpening/rowBeforeOpening/状态过滤，
+含 other creditor、TF/借款不含；supplier 默认「本月之前」可切全部，customer 默认「已到期按
+发票 due date」可切全部）；e) 计划付款段（新表 `planned_payments`，默认关，Show planned 开关
+localStorage 记忆）+ 未来日期=投影（banner + 计划款推演）。守卫 +4 断言。
 
 ## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
 

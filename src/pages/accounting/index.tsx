@@ -9748,21 +9748,34 @@ type CashPosData = {
   repay: CashPosPartyRow[]; receive: CashPosPartyRow[];
   planned: { id: string; partyName: string; ref: string; expectedDate: string; amountSen: number }[];
   tickWarnings: { account: string; day: string; sourceId: string; description: string; amountSen: number }[];
+  openingMonth?: string | null;
 };
 
 // Month-grouped breakdown the owner sketched: per month → one row per party
 // → month total → grand total.
-function CashPosPartyPanel({ title, rows, amountOf, scopeLabel, scopeAlt, scope, onScope, tone }: {
+function CashPosPartyPanel({ title, rows, amountOf, scopeLabel, scopeAlt, scope, onScope, tone, collapseUpTo, collapseLabel }: {
   title: string;
   rows: CashPosPartyRow[];
   amountOf: (r: CashPosPartyRow) => number;
   scopeLabel: string; scopeAlt: string;
   scope: boolean; onScope: (v: boolean) => void;
   tone: "pay" | "receive";
+  // Months ≤ this collapse into one summary line (owner 2026-09-03: opening-
+  // era customer months live in the 期初工程, not the daily queue) — the
+  // grand total still counts them, same as the pending-list treatment.
+  collapseUpTo?: string | null;
+  collapseLabel?: string;
 }) {
   const byMonth = new Map<string, CashPosPartyRow[]>();
+  let collapsedSen = 0;
+  let collapsedCount = 0;
   for (const r of rows) {
     if (amountOf(r) === 0) continue;
+    if (collapseUpTo && r.month <= collapseUpTo) {
+      collapsedSen += amountOf(r);
+      collapsedCount++;
+      continue;
+    }
     const list = byMonth.get(r.month) ?? [];
     list.push(r);
     byMonth.set(r.month, list);
@@ -9787,7 +9800,7 @@ function CashPosPartyPanel({ title, rows, amountOf, scopeLabel, scopeAlt, scope,
             {scope ? scopeLabel : scopeAlt} ⇄
           </button>
         </div>
-        {months.length === 0 ? (
+        {months.length === 0 && collapsedCount === 0 ? (
           <div className="px-4 py-5 text-sm text-[#9CA3AF]">Nothing in this scope ✓</div>
         ) : (
           <table className="w-full text-sm">
@@ -9802,17 +9815,23 @@ function CashPosPartyPanel({ title, rows, amountOf, scopeLabel, scopeAlt, scope,
                     </tr>
                     {list.map((r) => (
                       <tr key={`${m}-${r.name}`} className="border-b border-[#F0ECE9]">
-                        <td className="px-4 py-1 text-xs w-full max-w-0"><div className="truncate" title={r.name}>{r.name}</div></td>
-                        <td className="px-4 py-1 text-right tabular-nums text-xs whitespace-nowrap">{formatCurrency(amountOf(r))}</td>
+                        <td className="px-4 py-1 text-xs w-full max-w-0"><div className="truncate" title={amountOf(r) < 0 ? `${r.name} — received, not yet knocked to invoices` : r.name}>{r.name}{amountOf(r) < 0 && <span className="ml-1 text-[10px] text-[#27500A]">· money in hand</span>}</div></td>
+                        <td className={`px-4 py-1 text-right tabular-nums text-xs whitespace-nowrap ${amountOf(r) < 0 ? "text-[#27500A]" : ""}`}>{formatCurrency(amountOf(r))}</td>
                       </tr>
                     ))}
                     <tr className="border-b border-[#E2DDD8]">
                       <td className="px-4 py-1 text-xs font-medium">Total {monthLabel(m)}</td>
-                      <td className="px-4 py-1 text-right tabular-nums text-xs font-medium whitespace-nowrap">{formatCurrency(sub)}</td>
+                      <td className={`px-4 py-1 text-right tabular-nums text-xs font-medium whitespace-nowrap ${sub < 0 ? "text-[#27500A]" : ""}`}>{formatCurrency(sub)}</td>
                     </tr>
                   </Fragment>
                 );
               })}
+              {collapsedCount > 0 && (
+                <tr className="border-b border-[#E2DDD8]">
+                  <td className="px-4 py-1 text-[11px] text-[#9CA3AF]">{collapseLabel ?? "Opening era"} — {collapsedCount} part{collapsedCount === 1 ? "y" : "ies"}, handled in Aging / 期初</td>
+                  <td className="px-4 py-1 text-right tabular-nums text-[11px] text-[#9CA3AF] whitespace-nowrap">{formatCurrency(collapsedSen)}</td>
+                </tr>
+              )}
               <tr className={tone === "pay" ? "bg-[#F7E5E1]/60" : "bg-[#EAF3DE]/60"}>
                 <td className="px-4 py-1.5 text-sm font-semibold">{tone === "pay" ? "TOTAL TO REPAY" : "TOTAL TO RECEIVE"}</td>
                 <td className="px-4 py-1.5 text-right tabular-nums font-bold whitespace-nowrap">{formatCurrency(grand)}</td>
@@ -9898,6 +9917,16 @@ function DailyCashTab() {
   const plannedDue = (cur?.planned ?? []).filter((p) => p.expectedDate <= date);
   const plannedDueSen = plannedDue.reduce((s, p) => s + p.amountSen, 0);
   const isFuture = date > today;
+
+  // The bottom line the owner asked for: what's left after paying everything
+  // in the repay scope and collecting everything in the receive scope.
+  const repayRows = (cur?.repay ?? []).filter((r) => repayAll || r.month < curMonth);
+  const repayAmt = (r: CashPosPartyRow) => r.outstandingSen ?? 0;
+  const recvRows = cur?.receive ?? [];
+  const recvAmt = (r: CashPosPartyRow) => (recvAll ? r.totalSen ?? 0 : r.dueSen ?? 0);
+  const repayShownSen = repayRows.reduce((s, r) => s + repayAmt(r), 0);
+  const recvShownSen = recvRows.reduce((s, r) => s + recvAmt(r), 0);
+  const netAfterSen = (cur?.totalAvailableSen ?? 0) - repayShownSen + recvShownSen;
 
   const getImage = async () => {
     if (!boardRef.current) return;
@@ -10083,24 +10112,38 @@ function DailyCashTab() {
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
             <CashPosPartyPanel
               title="TO REPAY — Suppliers & creditors"
-              rows={(cur.repay ?? []).filter((r) => repayAll || r.month < curMonth)}
-              amountOf={(r) => r.outstandingSen ?? 0}
+              rows={repayRows}
+              amountOf={repayAmt}
               scope={!repayAll} scopeLabel="Before this month" scopeAlt="All outstanding"
               onScope={() => setRepayAll(!repayAll)}
               tone="pay"
             />
             <CashPosPartyPanel
               title="TO RECEIVE — Customers"
-              rows={cur.receive ?? []}
-              amountOf={(r) => (recvAll ? r.totalSen ?? 0 : r.dueSen ?? 0)}
+              rows={recvRows}
+              amountOf={recvAmt}
               scope={!recvAll} scopeLabel="Due now (per terms)" scopeAlt="All outstanding"
               onScope={() => setRecvAll(!recvAll)}
               tone="receive"
+              collapseUpTo={cur.openingMonth ?? null}
+              collapseLabel={cur.openingMonth ? `Opening era (≤ ${cur.openingMonth})` : "Opening era"}
             />
           </div>
+          <Card>
+            <CardContent className="p-4">
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-semibold text-[#1F1D1B]">CASH AFTER REPAY &amp; RECEIVE</span>
+                <span className={`text-xl font-bold tabular-nums ${netAfterSen >= 0 ? "text-[#27500A]" : "text-[#9A3A2D]"}`}>{formatCurrency(netAfterSen)}</span>
+              </div>
+              <div className="text-[11px] text-[#9CA3AF] text-right mt-0.5">
+                = available {formatCurrency(cur.totalAvailableSen)} − to repay {formatCurrency(repayShownSen)} + to receive {formatCurrency(recvShownSen)} (current scopes)
+              </div>
+            </CardContent>
+          </Card>
           <p className="text-[11px] text-[#9CA3AF]">
-            Repay / Receive use the SAME rules as Creditor & Debtor Aging, grouped by invoice month. TF / loans are not
-            included here — they live on the AP tab's Trade Finance block.
+            Repay / Receive use the SAME rules as Creditor & Debtor Aging, grouped by invoice month; a green negative
+            row is money already received but not yet knocked to invoices. TF / loans are not included here — they live
+            on the AP tab's Trade Finance block.
           </p>
         </div>
       )}

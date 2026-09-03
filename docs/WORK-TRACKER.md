@@ -79,7 +79,7 @@ pending、推算数当天变准；真账单配对永远压过勾；**勾了但�
 样式：月→每家一行→月合计→总合计；规则同 aging——apRowBeforeOpening/rowBeforeOpening/状态过滤，
 含 other creditor、TF/借款不含；supplier 默认「本月之前」可切全部，customer 默认「已到期按
 发票 due date」可切全部）；e) 计划付款段（新表 `planned_payments`，默认关，Show planned 开关
-localStorage 记忆）+ 未来日期=投影（banner + 计划款推演）。守卫 +4 断言。**#413 补钉**：面板起初没扣「未认领的预收/预付」，TO RECEIVE 比 aging 虚高 229,923.50（收了没勾发票的钱又被算成还能收）——改为复用 aging 同款 loadUnappliedSupplier/CustomerAdvances 按付款月扣减，prod 实测 TO RECEIVE=Debtor Aging 分毫相等、TO REPAY=Creditor Aging+OCB 债主。
+localStorage 记忆）+ 未来日期=投影（banner + 计划款推演）。守卫 +4 断言。**#413 补钉**：面板起初没扣「未认领的预收/预付」，TO RECEIVE 比 aging 虚高 229,923.50（收了没勾发票的钱又被算成还能收）——改为复用 aging 同款 loadUnappliedSupplier/CustomerAdvances 按付款月扣减，prod 实测 TO RECEIVE=Debtor Aging 分毫相等、TO REPAY=Creditor Aging+OCB 债主。**三连微调（owner 看板后）**：底部新增 CASH AFTER REPAY & RECEIVE 净额卡（available−repay+receive 按当前范围，负数红）；负数行标绿+「money in hand」（Houzs 8 月 −212,703.50 = 61,400+168,523.50 未认领收款减 8 月发票 17,220，aging 同款非 bug）；customer 面板开账月及之前缩一行「Opening era」（总数照算，同 pending 待遇）。
 
 ## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
 

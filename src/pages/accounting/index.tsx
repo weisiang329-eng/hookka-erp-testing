@@ -9928,22 +9928,138 @@ function DailyCashTab() {
   const recvShownSen = recvRows.reduce((s, r) => s + recvAmt(r), 0);
   const netAfterSen = (cur?.totalAvailableSen ?? 0) - repayShownSen + recvShownSen;
 
-  const getImage = async () => {
-    if (!boardRef.current) return;
+  // The share image is DRAWN FROM DATA, not screenshotted from the DOM.
+  // Both DOM-capture libraries were tried and rejected on prod: html2canvas
+  // dies silently on modern CSS color functions, and html-to-image spent
+  // 56 SECONDS serialising this board's thousands of nodes (measured
+  // 2026-09-03). A plain canvas render of the same numbers takes <100ms and
+  // can never rot with the stylesheet.
+  const getImage = () => {
+    if (!cur) return;
     try {
-      // html-to-image, not html2canvas: html2canvas 1.x dies silently on the
-      // modern CSS color functions in this stylesheet (owner hit "Image
-      // export failed" on day one). html-to-image serialises COMPUTED styles
-      // (already rgb) so it doesn't care.
-      const { toBlob } = await import("html-to-image");
-      const blob = await toBlob(boardRef.current, { backgroundColor: "#FAF8F5", pixelRatio: 2, cacheBust: true });
-      if (!blob) { toast.error("Could not render the image"); return; }
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `cash-position-${date}.png`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-      toast.success("Image saved to your downloads");
+      const W = 1000;
+      const line = 26;
+      const acctRows = cur.accounts.map((a) => ({ a, rows: a.pending.filter((p) => !p.ticked) }));
+      let H = 96; // title block
+      for (const { a, rows } of acctRows) {
+        H += 44; // dark band
+        if (a.unbookedCount > 0) H += line;
+        if (rows.length > 0) H += line + rows.length * line; // header + rows
+        if (a.oldPendingCount > 0) H += line;
+        H += 36; // available band
+        H += 14; // gap
+      }
+      H += 52 + 46 + 40; // current cash + net + footer
+      const canvas = document.createElement("canvas");
+      canvas.width = W * 2;
+      canvas.height = H * 2;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { toast.error("Canvas unavailable"); return; }
+      ctx.scale(2, 2);
+      const rm = (n: number) => formatCurrency(n);
+      const trunc = (s: string, max: number) => {
+        let t = s;
+        while (t.length > 3 && ctx.measureText(t).width > max) t = t.slice(0, -2);
+        return t === s ? s : `${t}…`;
+      };
+      ctx.fillStyle = "#FAF8F5";
+      ctx.fillRect(0, 0, W, H);
+      let y = 40;
+      ctx.fillStyle = "#1F1D1B";
+      ctx.font = "bold 22px Arial";
+      ctx.fillText(`Cash Position — ${cur.date}`, 24, y);
+      ctx.font = "12px Arial";
+      ctx.fillStyle = "#6B7280";
+      ctx.fillText("Hookka ERP · estimated from the books ± bank reconciliation", 24, y + 20);
+      y += 56;
+      for (const { a, rows } of acctRows) {
+        ctx.fillStyle = "#1F2937";
+        ctx.fillRect(16, y, W - 32, 34);
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "bold 14px Arial";
+        ctx.fillText(trunc(`${a.code} ${a.name}${a.reconciled ? "" : " (book only)"}`, 560), 28, y + 22);
+        const bankTxt = `Bank balance (est.) ${rm(a.bankEstSen)}`;
+        ctx.fillText(bankTxt, W - 28 - ctx.measureText(bankTxt).width, y + 22);
+        y += 44;
+        ctx.font = "12px Arial";
+        if (a.unbookedCount > 0) {
+          ctx.fillStyle = "#7A5B12";
+          ctx.fillText(trunc(`Includes ${a.unbookedCount} bank items not booked yet (${rm(a.unbookedSen)})`, W - 60), 28, y + 12);
+          y += line;
+        }
+        if (rows.length > 0) {
+          ctx.fillStyle = "#6B7280";
+          ctx.fillText("Date", 28, y + 12);
+          ctx.fillText("PV No.", 110, y + 12);
+          ctx.fillText("Description", 230, y + 12);
+          const h1 = "Received", h2 = "Pending payment";
+          ctx.fillText(h1, W - 200 - ctx.measureText(h1).width, y + 12);
+          ctx.fillText(h2, W - 28 - ctx.measureText(h2).width, y + 12);
+          y += line;
+          for (const p of rows) {
+            ctx.fillStyle = "#6B7280";
+            ctx.fillText(p.day, 28, y + 12);
+            ctx.fillStyle = "#1F1D1B";
+            ctx.fillText(trunc(p.sourceId, 110), 110, y + 12);
+            ctx.fillText(trunc(p.description, W - 230 - 260), 230, y + 12);
+            if (p.amountSen > 0) {
+              ctx.fillStyle = "#27500A";
+              const t = rm(p.amountSen);
+              ctx.fillText(t, W - 200 - ctx.measureText(t).width, y + 12);
+            } else {
+              ctx.fillStyle = "#1F1D1B";
+              const t = rm(-p.amountSen);
+              ctx.fillText(t, W - 28 - ctx.measureText(t).width, y + 12);
+            }
+            y += line;
+          }
+        }
+        if (a.oldPendingCount > 0) {
+          ctx.fillStyle = "#9CA3AF";
+          ctx.fillText(`Older reconciliation items: ${a.oldPendingCount} · ${rm(a.oldPendingSen)} (counted above)`, 28, y + 12);
+          y += line;
+        }
+        ctx.fillStyle = "#EAF3DE";
+        ctx.fillRect(16, y, W - 32, 28);
+        ctx.fillStyle = "#1F1D1B";
+        ctx.font = "bold 13px Arial";
+        ctx.fillText("Available (after pending)", 28, y + 19);
+        const avTxt = rm(a.availableSen);
+        ctx.fillText(avTxt, W - 28 - ctx.measureText(avTxt).width, y + 19);
+        y += 36 + 14;
+        ctx.font = "12px Arial";
+      }
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(16, y, W - 32, 40);
+      ctx.strokeStyle = "#E2DDD8";
+      ctx.strokeRect(16, y, W - 32, 40);
+      ctx.fillStyle = "#1F1D1B";
+      ctx.font = "bold 15px Arial";
+      ctx.fillText("CURRENT CASH AVAILABLE", 28, y + 26);
+      ctx.fillStyle = "#27500A";
+      const totTxt = rm(cur.totalAvailableSen);
+      ctx.fillText(totTxt, W - 28 - ctx.measureText(totTxt).width, y + 26);
+      y += 52;
+      ctx.fillStyle = "#1F1D1B";
+      ctx.font = "bold 14px Arial";
+      ctx.fillText("CASH AFTER REPAY & RECEIVE", 28, y + 18);
+      ctx.fillStyle = netAfterSen >= 0 ? "#27500A" : "#9A3A2D";
+      const netTxt = rm(netAfterSen);
+      ctx.fillText(netTxt, W - 28 - ctx.measureText(netTxt).width, y + 18);
+      ctx.fillStyle = "#9CA3AF";
+      ctx.font = "11px Arial";
+      const sub = `= available ${rm(cur.totalAvailableSen)} − to repay ${rm(repayShownSen)} + to receive ${rm(recvShownSen)}`;
+      ctx.fillText(sub, W - 28 - ctx.measureText(sub).width, y + 36);
+      y += 46;
+      canvas.toBlob((blob) => {
+        if (!blob) { toast.error("Could not render the image"); return; }
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = `cash-position-${date}.png`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+        toast.success("Image saved to your downloads");
+      }, "image/png");
     } catch (e) {
       console.error("[cash-position] image export failed:", e);
       toast.error("Image export failed");

@@ -56,6 +56,13 @@ Out by 徽章标方向（book above/below bank）。owner restore 4 笔后 5 月
 显示**存档数**（🔒 徽章+Print 存档版+Re-open），台账事后被倒填时亮**drift 警告**（存档不变、
 提示查因重封）而不是悄悄变；控件卡新增 ✓ 已封存月 chips 一键跳转；行内动作对封存月显示 🔒。
 守卫 `tests/bank-reco-finalize.test.mjs`（8 测）。
+⑧ **09-03 晨 owner 四连问的 ①②④ 落地**（③=6 月 received 是还 5 月的单，owner 令先问他再定，
+问题清单已发等答）：① Matched/Ignored/Before-opening 折叠区改**只显当月**（stmtMonth ?? txnDate
+月），旧月只有未配的跟过来（earlier 标），计数行改「本月 N 行 + M earlier open」；② 新
+`GET /bank-reco/daily` + 报表卡下「Daily book vs bank」折叠表——逐日 银行余额/账面余额/差额，
+差额变动那天高亮 ▲（book 侧复用共享 walk 的 bookPreSen/bookByDay，bank 侧=账单期初+全部行累加，
+不信行序）；④ aging 旧数据两针：aging tab 激活即 refreshAging + supplier-payments 四个写路径补
+invalidateCachePrefix("/api/accounting")。
 
 ## 2026-08-31 — ✅ Cash Flow 残余行按供应商分 + Other Creditor Bill 完整明细面板
 

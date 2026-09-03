@@ -12509,6 +12509,10 @@ type BankRecoComputed = {
   unbookedStmtCount: number;
   unclearedBook: BankRecoOutstanding[];
   unbookedStmt: BankRecoOutstanding[];
+  // Book-side daily building blocks for the day-by-day comparison: total of
+  // legs before the month, then per-day sums inside it (same floor rules).
+  bookPreSen: number;
+  bookByDay: Record<string, number>;
 };
 
 // One walk, used by BOTH the live report and the finalise snapshot — a
@@ -12558,11 +12562,16 @@ async function computeBankRecoReport(
   let unclearedBookSen = 0;
   let unclearedBookCount = 0;
   const unclearedBook: BankRecoOutstanding[] = [];
+  const monthStart = `${month}-01`;
+  let bookPreSen = 0;
+  const bookByDay: Record<string, number> = {};
   for (const l of legRes.results ?? []) {
     const day = docDate(l.sourceType, l.sourceId, l.postedAt);
     if (legBeforeOpening(l.sourceType, day, obDateRp) || day > monthEnd) continue;
     const amt = (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
     glSen += amt;
+    if (day < monthStart) bookPreSen += amt;
+    else bookByDay[day] = (bookByDay[day] ?? 0) + amt;
     // Opening legs stay in glSen (they ARE the account's floor) but are never
     // 未达账项 — the bank has no "opening balance" transaction to clear them
     // against. Counting them made the report insensitive to the keyed opening
@@ -12597,6 +12606,7 @@ async function computeBankRecoReport(
     unclearedBookSen, unclearedBookCount,
     unbookedStmtSen, unbookedStmtCount,
     unclearedBook, unbookedStmt,
+    bookPreSen, bookByDay,
   };
 }
 
@@ -12618,9 +12628,45 @@ app.get("/bank-reco/report", async (c) => {
     .catch(() => null);
   let final: Record<string, unknown> | null = null;
   try { final = finalRow?.value ? JSON.parse(finalRow.value) : null; } catch { final = null; }
-  const { unclearedBook, unbookedStmt, ...figures } = live;
-  void unclearedBook; void unbookedStmt; // the live endpoint stays light — lists ship in the snapshot
+  const { unclearedBook, unbookedStmt, bookPreSen, bookByDay, ...figures } = live;
+  void unclearedBook; void unbookedStmt; void bookPreSen; void bookByDay; // the live endpoint stays light — lists ship in the snapshot, daily in /bank-reco/daily
   return c.json({ success: true, data: { account, month, ...figures, final } });
+});
+
+// Day-by-day book vs bank running balances for one month — the owner's
+// 「逐日对照」view: both balances side by side, so the day the difference
+// CHANGES is the day a discrepancy was born. Bank side is computed from the
+// statement's own opening + every line of the month (any match status — the
+// bank's truth doesn't care what we did with the lines).
+app.get("/bank-reco/daily", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const account = c.req.query("account") || "";
+  const month = c.req.query("month") || "";
+  const err = await bankAccountOrError(c.var.DB, account);
+  if (err) return c.json({ success: false, error: err }, 400);
+  if (!/^\d{4}-\d{2}$/.test(month)) return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+  await ensureBankRecoCols(c.var.DB);
+  const snap = await computeBankRecoReport(c.var.DB, account, month);
+  const lineRes = await c.var.DB.prepare(
+    `SELECT txnDate, amountSen FROM bank_statement_lines
+      WHERE accountCode = ? AND txnDate >= ? AND txnDate <= ?`,
+  ).bind(account, `${month}-01`, `${month}-31`).all<{ txnDate: string; amountSen: number }>();
+  const bankByDay: Record<string, number> = {};
+  for (const r of lineRes.results ?? []) {
+    bankByDay[r.txnDate] = (bankByDay[r.txnDate] ?? 0) + Math.round(Number(r.amountSen) || 0);
+  }
+  const daysInMonth = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate();
+  let bookSen = snap.bookPreSen;
+  let bankSen: number | null = snap.statementOpeningSen;
+  const days: { day: string; bookSen: number; bankSen: number | null; diffSen: number | null }[] = [];
+  for (let i = 1; i <= daysInMonth; i++) {
+    const day = `${month}-${String(i).padStart(2, "0")}`;
+    bookSen += snap.bookByDay[day] ?? 0;
+    if (bankSen !== null) bankSen += bankByDay[day] ?? 0;
+    days.push({ day, bookSen, bankSen, diffSen: bankSen === null ? null : bookSen - bankSen });
+  }
+  return c.json({ success: true, data: { account, month, days } });
 });
 
 // Freeze (or re-open) a month's reconciliation. POST {accountCode, month} to
@@ -12648,11 +12694,13 @@ app.post("/bank-reco/finalize", async (c) => {
     }
     const actorUserId = (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
     const now = new Date().toISOString();
+    const { bookPreSen: _pre, bookByDay: _byDay, ...snapStored } = snap;
+    void _pre; void _byDay; // daily view recomputes live — keep the snapshot lean
     await c.var.DB.prepare(
       `INSERT INTO kv_config (key, value, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
     )
-      .bind(key, JSON.stringify({ v: 1, finalizedAt: now, actorUserId, ...snap }), now)
+      .bind(key, JSON.stringify({ v: 1, finalizedAt: now, actorUserId, ...snapStored }), now)
       .run();
     return c.json({ success: true, data: { finalizedAt: now, balanced: snap.balanced } });
   } catch {

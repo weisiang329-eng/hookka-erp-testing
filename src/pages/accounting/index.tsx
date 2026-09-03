@@ -543,6 +543,15 @@ export default function AccountingPage() {
     refreshAging();
   }, [refreshCoa, refreshJe, refreshAging]);
 
+  // Owner 2026-09-03: the aging tabs kept showing page-load-time data until a
+  // hard refresh — postings made in OTHER tabs of this page (PV/OR/OCB…) never
+  // re-fetched /aging. Re-fetch whenever an aging tab becomes active; the SWR
+  // cache keeps the old rows painted while the fresh ones stream in, so the
+  // tab still opens instantly.
+  useEffect(() => {
+    if (tab === "ar" || tab === "ap") refreshAging();
+  }, [tab, refreshAging]);
+
   return (
     <div className="space-y-6 max-md:space-y-4">
       {/* Header */}
@@ -9789,6 +9798,10 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     warnings: string[];
   } | null>(null);
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
+  // Day-by-day book vs bank (owner 2026-09-03 「2 要优化」) — fetched lazily
+  // when its fold is opened. Keyed by account:month so a stale month's rows
+  // never render for the current view (no reset-in-effect needed).
+  const [daily, setDaily] = useState<{ key: string; days: { day: string; bookSen: number; bankSen: number | null; diffSen: number | null }[] } | null>(null);
   const from = includeEarlier ? "" : `${month}-01`;
   const to = `${month}-31`;
 
@@ -10088,6 +10101,17 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     w.print();
   };
 
+  const dailyKey = `${account}:${month}`;
+  const dailyRows = daily?.key === dailyKey ? daily.days : null;
+  const loadDaily = async () => {
+    if (!account) return;
+    try {
+      const r = await fetch(`/api/accounting/bank-reco/daily?account=${encodeURIComponent(account)}&month=${month}`);
+      const j = await r.json() as { success?: boolean; data?: { days: { day: string; bookSen: number; bankSen: number | null; diffSen: number | null }[] } };
+      if (j?.success && j.data) setDaily({ key: dailyKey, days: j.data.days });
+    } catch { /* fold shows loading text; retry by reopening */ }
+  };
+
   const legs = data?.legs ?? [];
   const stmt = data?.statementLines ?? [];
   const recoFinal = report?.final ?? null;
@@ -10104,10 +10128,18 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const legsSorted = [...legs].sort((a, b) => a.day.localeCompare(b.day));
   const stmtSorted = [...stmt].sort((a, b) => a.txnDate.localeCompare(b.txnDate));
   const unmatchedLegs = legsSorted.filter((l) => !l.matched);
-  const preStmt = stmtSorted.filter(isPre);
+  // Owner 2026-09-03: earlier months' SETTLED lines (matched/ignored/
+  // before-opening) must not follow into the current month's view —
+  // "include earlier" exists ONLY to carry forward earlier月 UNMATCHED
+  // leftovers. Settled buckets are month-scoped; the open bucket keeps
+  // earlier leftovers (tagged "earlier").
+  const inMonth = (s: RecoLine) => (s.stmtMonth ?? s.txnDate.slice(0, 7)) === month;
+  const preStmt = stmtSorted.filter((s) => isPre(s) && inMonth(s));
   const unmatchedStmt = stmtSorted.filter((s) => !isPre(s) && !s.matchedLegId && !ignAt(s));
-  const matchedStmt = stmtSorted.filter((s) => !isPre(s) && !!s.matchedLegId);
-  const ignoredStmt = stmtSorted.filter((s) => !isPre(s) && !s.matchedLegId && !!ignAt(s));
+  const matchedStmt = stmtSorted.filter((s) => !isPre(s) && !!s.matchedLegId && inMonth(s));
+  const ignoredStmt = stmtSorted.filter((s) => !isPre(s) && !s.matchedLegId && !!ignAt(s) && inMonth(s));
+  const earlierOpenCount = unmatchedStmt.filter((s) => !inMonth(s)).length;
+  const monthLineCount = stmtSorted.filter(inMonth).length;
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
   // Owner 2026-09-01 「现在太乱了」: signed red numbers everywhere read as a
   // wall of errors. Split into positive In / Out columns instead.
@@ -10153,7 +10185,7 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
           </label>
           {data && !data.migrationMissing && (
             <div className="text-sm text-[#6B7280] pb-1">
-              Statement {stmt.length} lines ({unmatchedStmt.length} open{ignoredStmt.length > 0 ? ` · ${ignoredStmt.length} ignored` : ""}{preStmt.length > 0 ? ` · ${preStmt.length} before opening` : ""}) · Book {legs.length} legs ({unmatchedLegs.length} open)
+              Statement {monthLineCount} lines this month ({unmatchedStmt.length - earlierOpenCount} open{ignoredStmt.length > 0 ? ` · ${ignoredStmt.length} ignored` : ""}{preStmt.length > 0 ? ` · ${preStmt.length} before opening` : ""}){earlierOpenCount > 0 ? ` + ${earlierOpenCount} earlier open` : ""} · Book {legs.length} legs ({unmatchedLegs.length} open)
             </div>
           )}
           {(data?.finalizedMonths?.length ?? 0) > 0 && (
@@ -10262,6 +10294,47 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
             ); })()}
           </CardContent>
         </Card>
+      )}
+
+      {account && data && !data.migrationMissing && report?.importedAt && !preview && (
+        <details
+          className="rounded-lg border border-[#E2DDD8] bg-white"
+          onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && !dailyRows) void loadDaily(); }}
+        >
+          <summary className="cursor-pointer px-4 py-2 text-sm font-medium text-[#1F1D1B]">
+            Daily book vs bank <span className="font-normal text-[11px] text-[#6B7280]">— the day the difference changes is the day something went missing</span>
+          </summary>
+          <div className="overflow-x-auto">
+            {!dailyRows ? (
+              <div className="px-4 py-4 text-sm text-[#9CA3AF]">Loading…</div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left">Day</th>
+                    <th className="px-3 py-2 text-right">Bank balance</th>
+                    <th className="px-3 py-2 text-right">Book balance</th>
+                    <th className="px-3 py-2 text-right">Difference (book − bank)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dailyRows.map((d, i) => {
+                    const prev = i > 0 ? dailyRows[i - 1].diffSen : null;
+                    const changed = d.diffSen !== null && prev !== null && d.diffSen !== prev;
+                    return (
+                      <tr key={d.day} className={`border-b border-[#F0ECE9] ${changed ? "bg-[#FBF3E4]" : ""}`}>
+                        <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{d.day}{changed && <span className="ml-1 text-[10px] text-[#7A5B12]">▲ changed</span>}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{d.bankSen != null ? formatCurrency(d.bankSen) : "—"}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{formatCurrency(d.bookSen)}</td>
+                        <td className={`px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap ${changed ? "font-semibold text-[#7A5B12]" : d.diffSen === 0 ? "text-[#27500A]" : ""}`}>{d.diffSen != null ? formatCurrency(d.diffSen) : "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </details>
       )}
 
       {showImport && (

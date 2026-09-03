@@ -13028,9 +13028,10 @@ app.get("/cash-position", async (c) => {
     expectedDate: p.expectedDate ?? p.expected_date ?? "",
     amountSen: Math.round(Number(p.amountSen ?? p.amount_sen) || 0),
   }));
+  const openingMonth = (obDateCp ?? "").slice(0, 7) || null;
   return c.json({
     success: true,
-    data: { date, accounts, totalBankEstSen, totalAvailableSen, repay, receive, planned, tickWarnings },
+    data: { date, accounts, totalBankEstSen, totalAvailableSen, repay, receive, planned, tickWarnings, openingMonth },
   });
 });
 

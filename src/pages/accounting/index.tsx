@@ -9931,17 +9931,21 @@ function DailyCashTab() {
   const getImage = async () => {
     if (!boardRef.current) return;
     try {
-      const { default: html2canvas } = await import("html2canvas");
-      const canvas = await html2canvas(boardRef.current, { backgroundColor: "#FAF8F5", scale: 2 });
-      canvas.toBlob((blob) => {
-        if (!blob) { toast.error("Could not render the image"); return; }
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `cash-position-${date}.png`;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-      }, "image/png");
-    } catch {
+      // html-to-image, not html2canvas: html2canvas 1.x dies silently on the
+      // modern CSS color functions in this stylesheet (owner hit "Image
+      // export failed" on day one). html-to-image serialises COMPUTED styles
+      // (already rgb) so it doesn't care.
+      const { toBlob } = await import("html-to-image");
+      const blob = await toBlob(boardRef.current, { backgroundColor: "#FAF8F5", pixelRatio: 2, cacheBust: true });
+      if (!blob) { toast.error("Could not render the image"); return; }
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `cash-position-${date}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      toast.success("Image saved to your downloads");
+    } catch (e) {
+      console.error("[cash-position] image export failed:", e);
       toast.error("Image export failed");
     }
   };

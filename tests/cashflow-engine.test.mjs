@@ -148,6 +148,67 @@ test("buildStatement — raw-material split lines have no accountCode", () => {
   assert.equal(fabric.accountCode, undefined);
 });
 
+// Owner 2026-09-04 「可以自动分一下父子account吗？」— lines nest one level under
+// their COA parent; stock-group RM rows join the purchase parent of their
+// template category. Parent rows are kind "group" with hierarchical groupId
+// "<SECTION>><parentCode>" so the UI's collapse logic sees the ancestry.
+test("buildStatement — account lines nest under their COA parent with a subtotal", () => {
+  const coa2 = new Map(coaMap);
+  coa2.set("900-S001", acct("900-S001", "EXPENSE", null, "SALARIES & CONTRIBUTION"));
+  coa2.set("900-S005", { ...acct("900-S005", "EXPENSE", null, "STAFFS' EPF"), parentCode: "900-S001" });
+  coa2.set("900-S002", { ...acct("900-S002", "EXPENSE", null, "STAFFS' SALARIES"), parentCode: "900-S001" });
+  const classified = [
+    L("900-S005", 0, 10000, "2026-03"),
+    L("900-S002", 0, 90000, "2026-03"),
+    L("900-0001", 0, 15000, "2026-03"), // parentless → stays flat
+  ];
+  const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 115000, ym: "2026-03" }];
+  const st = cf.buildStatement({
+    classified, bankLegs, coa: coa2, map: {}, rmSplit: {},
+    stockGroupOverride: {}, fyeMonth: 8, period: "2026-03",
+  });
+  const mIdx = st.columns.findIndex((c) => c.key === "2026-03");
+  const parent = st.rows.find((r) => r.kind === "group" && r.label === "SALARIES & CONTRIBUTION");
+  assert.ok(parent, "parent cluster row missing");
+  assert.equal(parent.groupId, "GENERAL_EXPENSE>900-S001");
+  assert.equal(parent.accountCode, "900-S001");
+  assert.equal(parent.values[mIdx], 100000); // outflow sections display payments positive
+  const child = st.rows.find((r) => r.kind === "line" && r.label === "STAFFS' EPF");
+  assert.equal(child.groupId, "GENERAL_EXPENSE>900-S001");
+  assert.equal(child.depth, parent.depth + 1);
+  const flatRow = st.rows.find((r) => r.kind === "line" && r.label === "Transport expense");
+  assert.equal(flatRow.groupId, "GENERAL_EXPENSE"); // untouched
+  // The section subtotal still covers everything once.
+  const ge = st.rows.find((r) => r.kind === "group" && r.section === "GENERAL_EXPENSE" && r.groupId === "GENERAL_EXPENSE");
+  assert.equal(ge.values[mIdx], 115000);
+});
+
+test("buildStatement — a lone COA child stays flat; RM stock rows join their purchase parent", () => {
+  const coa2 = new Map(coaMap);
+  coa2.set("900-S001", acct("900-S001", "EXPENSE", null, "SALARIES & CONTRIBUTION"));
+  coa2.set("900-S005", { ...acct("900-S005", "EXPENSE", null, "STAFFS' EPF"), parentCode: "900-S001" });
+  coa2.set("701-0000", acct("701-0000", "COST", null, "PURCHASE - FABRIC"));
+  const classified = [
+    L("900-S005", 0, 10000, "2026-03"), // only child → no cluster
+    L("400-0000", 0, 9000, "2026-03", "supplier_payment", "PI1"),
+  ];
+  const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 19000, ym: "2026-03" }];
+  const st = cf.buildStatement({
+    classified, bankLegs, coa: coa2, map: {},
+    rmSplit: { PI1: [{ line: "B.M-FABR", weight: 1 }] },
+    stockGroupOverride: {}, fyeMonth: 8, period: "2026-03",
+  });
+  assert.equal(st.rows.some((r) => r.kind === "group" && r.label === "SALARIES & CONTRIBUTION"), false);
+  const epf = st.rows.find((r) => r.kind === "line" && r.label === "STAFFS' EPF");
+  assert.equal(epf.groupId, "GENERAL_EXPENSE");
+  // B.M-FABR maps to "Purchase of Fabric" → parent 701-0000, kept even alone.
+  const fabricParent = st.rows.find((r) => r.kind === "group" && r.label === "PURCHASE - FABRIC");
+  assert.ok(fabricParent, "RM category parent missing");
+  assert.equal(fabricParent.groupId, "RAW_MATERIALS>701-0000");
+  const stock = st.rows.find((r) => r.kind === "line" && r.label === "B.M-FABR");
+  assert.equal(stock.groupId, "RAW_MATERIALS>701-0000");
+});
+
 test("buildStatement — editable emits empty section headers as drop targets", () => {
   const classified = [L("900-0001", 0, 15000, "2026-03")];
   const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 15000, ym: "2026-03" }];

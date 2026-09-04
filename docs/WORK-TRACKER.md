@@ -22,7 +22,11 @@ Owner：「回来cash flow template那边」→ 对照完成：样板 `HOOKKA - 
 子分组、Summary 汇总视图。① 「cash flow 能自由拖来吗？」＝能（Edit 模式科目行拖 11 段任意，
 料组/供应商拆行/部门人工行除外）；② 「可以自动分一下父子account吗？」＝可做——**prod 实测 COA
 197 科目 148 个有 parentCode**（701/702/703/704 PURCHASE 父级 = 样板四大类、900-S001 SALARIES &
-CONTRIBUTION ×6、440-0000 related parties ×3），父子嵌套即样板样子，**等 owner「做」**；
+CONTRIBUTION ×6、440-0000 related parties ×3），父子嵌套即样板样子——owner 拍「做」→ **✅ 已做**：
+`buildStatement.emitSection` 按 COA 直接父级聚簇（parent 行 kind=group、groupId=`SEC>父码` 层级式、
+父行=子行合计；孤儿子行不嵌套防噪音；RM 料组行经 rawMaterialLineFor 四类并入 701/702/703/704
+购买父级，样板五行即现）；route COA 查询补 parentCode（resolveAcct 别名归一）；UI 折叠改层级
+前缀判定+零行过滤 alive 按前缀爬祖先；L2 天然=父级小计视图。引擎测试 +2（25/25）。
 ③ ✅「没有amount 的account 可以不显示吗？」＝已做：cleanRows 过滤全零 line/group（组零且组内
 行全零才隐），显示+CSV/Excel/PDF 同步干净，Edit 模式保留全行可拖。④ owner 消息「2.」空的，等补。
 

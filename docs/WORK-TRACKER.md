@@ -14,6 +14,18 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-09-04 — 🔵 Cash Flow template 调整（owner 下午回来这条线）
+
+Owner：「回来cash flow template那边」→ 对照完成：样板 `HOOKKA - Cash Flow Mar''26 (1).xlsx`
+（Monthly Cshflw 明细 + Cshflw Summary 汇总两视图）vs 系统 /cashflow-statement——段落语言已同款
+（11 段引擎全有，Taxation/Finance Cost/Deposit 空则隐）；差距=RM 四大类卷叠、Loan 段 related-party
+子分组、Summary 汇总视图。① 「cash flow 能自由拖来吗？」＝能（Edit 模式科目行拖 11 段任意，
+料组/供应商拆行/部门人工行除外）；② 「可以自动分一下父子account吗？」＝可做——**prod 实测 COA
+197 科目 148 个有 parentCode**（701/702/703/704 PURCHASE 父级 = 样板四大类、900-S001 SALARIES &
+CONTRIBUTION ×6、440-0000 related parties ×3），父子嵌套即样板样子，**等 owner「做」**；
+③ ✅「没有amount 的account 可以不显示吗？」＝已做：cleanRows 过滤全零 line/group（组零且组内
+行全零才隐），显示+CSV/Excel/PDF 同步干净，Edit 模式保留全行可拖。④ owner 消息「2.」空的，等补。
+
 ## 2026-09-04 — ✅ 六月 Out by 600 精查 + 修（BUG-176：跨月配对不按月底切）
 
 Owner（挂图）：「可以帮我检查这个600.00是什么？只检查」→ prod 全量核查（配对差=0、无重复行、

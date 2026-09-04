@@ -12839,14 +12839,29 @@ function CashFlowTab() {
   const months: string[] = [];
   { const now = new Date(); for (let i = 0; i < 18; i++) { const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1)); months.push(d.toISOString().slice(0, 7)); } }
 
-  const visibleRows = rows.filter((r) =>
+  // Owner 2026-09-04: accounts with no amount anywhere in the window stay out
+  // of the statement and its exports. Edit mode still shows every row — you
+  // can't drag what you can't see. A group hides only when its subtotal AND
+  // every line inside it are zero (children can net to zero individually).
+  const hasAmt = (r: CfApiRow) => r.values.some((v) => !!v);
+  const cleanRows = useMemo(() => {
+    const alive = new Set<string>();
+    for (const r of rows) if (r.kind === "line" && r.groupId && hasAmt(r)) alive.add(r.groupId);
+    return rows.filter((r) => {
+      if (r.kind === "line" && !hasAmt(r)) return false;
+      if (r.kind === "group" && !hasAmt(r) && !alive.has(r.groupId ?? "")) return false;
+      return true;
+    });
+  }, [rows]);
+
+  const visibleRows = (edit ? rows : cleanRows).filter((r) =>
     r.depth <= (level >= 3 ? 9 : level) && (!r.groupId || r.kind === "group" || !collapsed.has(r.groupId)),
   );
 
   const buildExport = (): Aoa => {
     const head: (string | number)[] = ["ITEM", ...cols.map((c) => c.label)];
     const aoa: Aoa = [head];
-    for (const r of rows) {
+    for (const r of cleanRows) {
       if (r.kind === "gap") { aoa.push([]); continue; }
       const indent = "  ".repeat(r.depth) + (r.kind === "group" ? "› " : "");
       aoa.push([indent + r.label, ...r.values.map((v) => (v === null ? "" : (v / 100).toFixed(2)))]);

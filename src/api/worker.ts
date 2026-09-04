@@ -1067,6 +1067,7 @@ import jobCards from "./routes/job-cards";
 // detail page so the operator can see "who changed what and when" per record.
 import auditEvents from "./routes/audit-events";
 import dashboardOverview from "./routes/dashboard-overview";
+import dashboardPrototype from "./routes/dashboard-prototype";
 import kpi from "./routes/kpi";
 // Phase C #4 quick-win — MDM duplicate-detection review queue.
 import mdm from "./routes/mdm";
@@ -1302,6 +1303,8 @@ app.route("/api/audit-events", auditEvents);
 // inline by /api/dashboard/overview (per the 2026-05-16 rebuild in
 // BUG-2026-05-16-013) and served via the new dashboard_snapshot cache.
 app.route("/api/dashboard/overview", dashboardOverview);
+// Read-only feed for the /test/dashboard-prototype design page.
+app.route("/api/dashboard/prototype", dashboardPrototype);
 // KPI module (owner 2026-08-06). /me is self-only; every other route is
 // SUPER_ADMIN — enforced in the route, not the page.
 app.route("/api/kpi", kpi);

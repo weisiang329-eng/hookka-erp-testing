@@ -28,7 +28,16 @@ CONTRIBUTION ×6、440-0000 related parties ×3），父子嵌套即样板样子
 购买父级，样板五行即现）；route COA 查询补 parentCode（resolveAcct 别名归一）；UI 折叠改层级
 前缀判定+零行过滤 alive 按前缀爬祖先；L2 天然=父级小计视图。引擎测试 +2（25/25）。
 ③ ✅「没有amount 的account 可以不显示吗？」＝已做：cleanRows 过滤全零 line/group（组零且组内
-行全零才隐），显示+CSV/Excel/PDF 同步干净，Edit 模式保留全行可拖。④ owner 消息「2.」空的，等补。
+行全零才隐），显示+CSV/Excel/PDF 同步干净，Edit 模式保留全行可拖。④ owner 消息「2.」＝误打，已裁「别理」。
+⑤ Unallocated 病因逐笔查清（AMAZON 4,740=装修服务用 PI 录、行无 account 栏可选；WF LEATHER
+401.40=pi-87f586ea 行没选料号；ADD WOOD 700=同类）→ owner 问「不能根据account 分类？」＝有
+account 的（OCB 路）早已按 account 分；PI 行无 account 概念。⑥ ✅「supplier 性质归类」owner
+拍「做」：新 kv `cashflow_supplier_category_map`（supplier→四类之一，""=钉平铺）+
+`computeSupplierCategoryGuess`（按该供应商 PI 行料组 sen 主导类自动猜，override 压猜）；引擎
+`supplierCategory` opts——Opening/Unallocated — X 行**保留供应商标签**、嵌进对应购买父级；
+GET/PUT /cashflow/map 带 supplierCategoryMap（+guess）；Edit 模式新「Supplier categories」卡
+（Auto—猜值/四类/Keep flat 下拉，改即存即刷）。引擎测试 26/26（+1）。⑦ Cshflw Summary 汇总
+视图＝owner 裁「不需要，毕竟我有level了」，关闭。
 
 ## 2026-09-04 — ✅ 六月 Out by 600 精查 + 修（BUG-176：跨月配对不按月底切）
 

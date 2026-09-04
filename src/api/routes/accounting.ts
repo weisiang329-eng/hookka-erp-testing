@@ -30,7 +30,7 @@ import { parseDebtorCode } from "../../lib/debtor";
 import { defaultPnlBucket, pnlBucketFor } from "../../lib/pnl-bucket";
 import { bsSectionFor, bsSectionClass } from "../../lib/bs-section";
 import type { BsSection } from "../../lib/bs-section";
-import { buildStatement, splitByLargestRemainder } from "../../lib/cashflow-engine";
+import { buildStatement, splitByLargestRemainder, rawMaterialLineFor, RM_LINES } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
 import { getDocNumberPrefixes, issueDocNumber, issueDocNumberWithPrefix } from "../lib/doc-number-service";
 import { computeDiscountAlloc, type PiOpen } from "../../lib/discount-alloc";
@@ -8223,9 +8223,15 @@ async function computeCashflowStatement(
     }
   }
 
+  // Supplier → category (guess from their recorded purchases, override wins;
+  // an override of "" pins the supplier flat).
+  const supplierCategory = await computeSupplierCategoryGuess(c.var.DB);
+  for (const [sup, cat] of Object.entries(await getCashflowSupplierCategoryMap(c.var.DB))) {
+    if (cat) supplierCategory[sup] = cat; else delete supplierCategory[sup];
+  }
   const statement = buildStatement({
     classified, bankLegs, coa, map, rmSplit, deptSplit, stockGroupOverride: sgOverride,
-    fyeMonth, period, editable,
+    supplierCategory, fyeMonth, period, editable,
   });
   // Money IN / OUT straight off the bank legs (DR = in, CR = out). Derived
   // here rather than by summing statement lines: the statement's line values
@@ -9733,6 +9739,64 @@ async function getCashflowStockGroupMap(
   return {};
 }
 
+// Owner 2026-09-05 「做」: supplier → raw-material template category, used to
+// nest "Opening creditors — X" / "Unallocated — X" rows under the right
+// purchase parent. The override (kv) beats the guess; an override of "" means
+// "keep this supplier flat" even when a guess exists.
+async function getCashflowSupplierCategoryMap(
+  db: Env["Variables"]["DB"],
+): Promise<Record<string, string>> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'cashflow_supplier_category_map'")
+      .first<{ value: string | null }>();
+    if (row?.value) return JSON.parse(row.value) as Record<string, string>;
+  } catch { /* absent → empty */ }
+  return {};
+}
+
+// Guess each supplier's category from their own recorded purchase lines: the
+// dominant stock group by sen, mapped through the same group→category rule
+// the statement uses. Suppliers with no group-resolvable lines get no guess.
+async function computeSupplierCategoryGuess(
+  db: Env["Variables"]["DB"],
+): Promise<Record<string, string>> {
+  const sgOverride = await getCashflowStockGroupMap(db);
+  const rmRes = await db.prepare("SELECT item_code, item_group FROM raw_materials").all<Record<string, unknown>>();
+  const grpByCode = new Map<string, string>();
+  for (const r of rmRes.results ?? []) {
+    const code = String((r.itemCode ?? r.item_code) ?? "");
+    const grp = String((r.itemGroup ?? r.item_group) ?? "");
+    if (code && grp) grpByCode.set(code, grp);
+  }
+  const agg = await db.prepare(
+    `SELECT pi.supplier_name AS supplier_name, pii.material_code AS material_code, SUM(pii.line_total_sen) AS sen
+       FROM purchase_invoice_items pii
+       JOIN purchase_invoices pi ON pii.pi_id = pi.id
+      WHERE COALESCE(pii.material_code, '') <> ''
+      GROUP BY pi.supplier_name, pii.material_code`,
+  ).all<Record<string, unknown>>();
+  const bySup = new Map<string, Map<string, number>>();
+  for (const r of agg.results ?? []) {
+    const sup = String((r.supplierName ?? r.supplier_name) ?? "").trim();
+    const code = String((r.materialCode ?? r.material_code) ?? "");
+    const grp = grpByCode.get(code);
+    if (!sup || !grp) continue;
+    const cat = rawMaterialLineFor(grp, sgOverride);
+    if (!(RM_LINES as readonly string[]).includes(cat)) continue; // renamed groups can't nest
+    const m = bySup.get(sup) ?? new Map<string, number>();
+    m.set(cat, (m.get(cat) ?? 0) + (Number(r.sen) || 0));
+    bySup.set(sup, m);
+  }
+  const out: Record<string, string> = {};
+  for (const [sup, cats] of bySup) {
+    let best = "", bestSen = 0;
+    for (const [cat, sen] of cats) if (sen > bestSen) { best = cat; bestSen = sen; }
+    if (best) out[sup] = best;
+  }
+  return out;
+}
+
 async function getPnlSectionMap(
   db: Env["Variables"]["DB"],
 ): Promise<Record<string, string>> {
@@ -10158,7 +10222,9 @@ app.get("/cashflow/map", async (c) => {
   if (denied) return denied;
   const map = await getCashflowMap(c.var.DB);
   const sgMap = await getCashflowStockGroupMap(c.var.DB);
-  return c.json({ success: true, data: { map, stockGroupMap: sgMap } });
+  const supplierCategoryMap = await getCashflowSupplierCategoryMap(c.var.DB);
+  const supplierCategoryGuess = await computeSupplierCategoryGuess(c.var.DB);
+  return c.json({ success: true, data: { map, stockGroupMap: sgMap, supplierCategoryMap, supplierCategoryGuess } });
 });
 
 app.put("/cashflow/map", async (c) => {
@@ -10168,6 +10234,7 @@ app.put("/cashflow/map", async (c) => {
     const body = (await c.req.json()) as {
       map?: Record<string, { section?: string; order?: number }>;
       stockGroupMap?: Record<string, string>;
+      supplierCategoryMap?: Record<string, string>;
     };
     const now = new Date().toISOString();
     // Each map is updated independently — a body that omits one key must NOT
@@ -10196,7 +10263,22 @@ app.put("/cashflow/map", async (c) => {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       ).bind(JSON.stringify(sg), now).run();
     }
-    return c.json({ success: true, data: { map, stockGroupMap: sg } });
+    let supCat: Record<string, string> | undefined;
+    if (body.supplierCategoryMap !== undefined) {
+      supCat = {};
+      // Value must be one of the four template categories, or "" = pin flat
+      // (suppress the guess). Anything else is dropped.
+      for (const [sup, cat] of Object.entries(body.supplierCategoryMap ?? {})) {
+        const s = sup.trim();
+        if (!s || typeof cat !== "string") continue;
+        if (cat === "" || (RM_LINES as readonly string[]).includes(cat)) supCat[s] = cat;
+      }
+      await c.var.DB.prepare(
+        `INSERT INTO kv_config (key, value, updated_at) VALUES ('cashflow_supplier_category_map', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      ).bind(JSON.stringify(supCat), now).run();
+    }
+    return c.json({ success: true, data: { map, stockGroupMap: sg, supplierCategoryMap: supCat } });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

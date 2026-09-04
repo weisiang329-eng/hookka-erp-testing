@@ -12319,6 +12319,9 @@ type CfApiRow = {
   accountCode?: string;
 };
 type CfApiData = { period: string; columns: { key: string; label: string; accum?: boolean }[]; rows: CfApiRow[] };
+// The four raw-material template categories a supplier can be assigned to
+// (mirrors RM_LINES in cashflow-engine.ts).
+const RM_CATEGORIES = ["Purchase of Fabric", "Purchase of Wooden", "Purchase of Filler", "Purchase of Other & Packaging"];
 
 function CashFlowTab() {
   const { toast } = useToast();
@@ -12327,6 +12330,10 @@ function CashFlowTab() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [edit, setEdit] = useState(false);
   const [map, setMap] = useState<Record<string, { section: string; order: number }>>({});
+  // Supplier → category (owner 2026-09-05 「做」): override map + auto-guess,
+  // edited from the card that shows in Edit mode.
+  const [supCatMap, setSupCatMap] = useState<Record<string, string>>({});
+  const [supCatGuess, setSupCatGuess] = useState<Record<string, string>>({});
   const [dragCode, setDragCode] = useState<string | null>(null);
   const [dragOverSec, setDragOverSec] = useState<string | null>(null);
   const { data: resp, refresh } = useCachedJson<{ success?: boolean; data?: CfApiData }>(
@@ -12791,10 +12798,42 @@ function CashFlowTab() {
   useEffect(() => {
     if (!edit) return;
     fetch("/api/accounting/cashflow/map")
-      .then((r) => r.json() as Promise<{ data?: { map?: Record<string, { section: string; order: number }> } }>)
-      .then((j) => setMap(j?.data?.map ?? {}))
+      .then((r) => r.json() as Promise<{ data?: { map?: Record<string, { section: string; order: number }>; supplierCategoryMap?: Record<string, string>; supplierCategoryGuess?: Record<string, string> } }>)
+      .then((j) => {
+        setMap(j?.data?.map ?? {});
+        setSupCatMap(j?.data?.supplierCategoryMap ?? {});
+        setSupCatGuess(j?.data?.supplierCategoryGuess ?? {});
+      })
       .catch(() => {});
   }, [edit]);
+
+  // Suppliers currently appearing as per-supplier RM rows — the ones a
+  // category assignment would move.
+  const supRows = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of rows) {
+      if (r.kind !== "line" || r.section !== "RAW_MATERIALS") continue;
+      const m = /^(?:Opening creditors|Unallocated) — (.+)$/.exec(r.label);
+      if (m) s.add(m[1]);
+    }
+    return [...s].sort();
+  }, [rows]);
+  const saveSupCat = async (sup: string, sel: string) => {
+    const next = { ...supCatMap };
+    if (sel === "__auto__") delete next[sup];
+    else if (sel === "__flat__") next[sup] = "";
+    else next[sup] = sel;
+    setSupCatMap(next);
+    try {
+      const res = await fetch("/api/accounting/cashflow/map", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ supplierCategoryMap: next }),
+      });
+      const j = (await res.json()) as { success?: boolean };
+      if (j?.success) { toast.success("Supplier category saved"); refresh(); }
+      else toast.error("Save failed");
+    } catch { toast.error("Save failed"); }
+  };
 
   const cfCollapseForLevel = (rs: CfApiRow[], L: number): Set<string> => {
     const s = new Set<string>();
@@ -12922,6 +12961,38 @@ function CashFlowTab() {
         </div>
       </div>
       {edit && <p className="text-[11px] text-[#6B5C32]">Drag an account row onto a target section heading to reclassify it · this changes the rule, so all months recompute under it · Bank c/f total unchanged · drag back to undo</p>}
+      {edit && supRows.length > 0 && (
+        <Card>
+          <CardContent className="p-4">
+            <div className="text-sm font-semibold text-[#1F1D1B] mb-1">Supplier categories</div>
+            <p className="text-[11px] text-[#6B7280] mb-2">
+              Opening-creditor and uncoded rows file under the purchase parent of their supplier's category.
+              Auto = guessed from that supplier's own recorded purchases; pick a category to override, or "Keep flat".
+            </p>
+            <div className="grid gap-1.5" style={{ gridTemplateColumns: "minmax(220px, 1fr) auto" }}>
+              {supRows.map((sup) => {
+                const cur = supCatMap[sup];
+                const guess = supCatGuess[sup];
+                const val = cur === undefined ? "__auto__" : cur === "" ? "__flat__" : cur;
+                return (
+                  <Fragment key={sup}>
+                    <div className="text-xs text-[#4B5563] self-center truncate">{sup}</div>
+                    <select
+                      value={val}
+                      onChange={(e) => void saveSupCat(sup, e.target.value)}
+                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-xs"
+                    >
+                      <option value="__auto__">Auto{guess ? ` — ${guess.replace("Purchase of ", "")}` : " — no purchase history"}</option>
+                      {RM_CATEGORIES.map((c2) => <option key={c2} value={c2}>{c2.replace("Purchase of ", "")}</option>)}
+                      <option value="__flat__">Keep flat (unclassified)</option>
+                    </select>
+                  </Fragment>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
       <Card>
         <CardContent className="p-4 overflow-x-auto">
           {!data ? (

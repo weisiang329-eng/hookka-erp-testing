@@ -20,6 +20,9 @@ export type CoaLite = {
   name: string;
   type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE" | "COST";
   sat: string | null;
+  // COA tree parent (AutoCount-style). Drives the statement's parent-child
+  // nesting (owner 2026-09-04 「可以自动分一下父子account吗？」).
+  parentCode?: string | null;
 };
 
 // Sections presented as cash OUT (payments shown positive, subtracted).
@@ -244,7 +247,7 @@ export function buildStatement(opts: {
   period: string;
   editable?: boolean;
 }): CfStatement {
-  const { classified, bankLegs, coa, map, rmSplit, deptSplit = {}, fyeMonth, period, editable } = opts;
+  const { classified, bankLegs, coa, map, rmSplit, deptSplit = {}, stockGroupOverride, fyeMonth, period, editable } = opts;
   const months = fyMonths(period, fyeMonth);        // newest first
   const fyStart = months[months.length - 1];        // FY start ym
   const columns: CfColumn[] = [
@@ -342,21 +345,66 @@ export function buildStatement(opts: {
   const sumCols = (aggs: Agg[]): number[] =>
     columns.map((_, i) => aggs.reduce((s, a) => s + a.vals[i], 0));
 
+  // Owner 2026-09-04 「可以自动分一下父子account吗？」— lines nest under their
+  // COA parent (AutoCount-style tree, one level). Raw-material stock-group
+  // rows join the purchase parent their category maps to, so the block reads
+  // like the owner's Excel template (Purchase - Fabric / Wooden / Filler / …).
+  // A parent row is kind "group" with groupId "<SECTION>><parentCode>" — the
+  // ">" makes the hierarchy visible to the UI's collapse logic.
+  const RM_LINE_PARENT: Record<string, string> = {
+    "Purchase of Fabric": "701-0000",
+    "Purchase of Wooden": "702-0000",
+    "Purchase of Filler": "703-0000",
+    "Purchase of Other & Packaging": "704-0000",
+  };
   const emitSection = (sec: CfSection, asGroup: boolean) => {
     const aggs = sectionLines(sec);
     if (aggs.length === 0 && sec !== "REVENUE_COLLECTION" && !editable) return;
     const sign = displaySign(sec);
     const sub = sumCols(aggs);
+    const baseDepth = asGroup ? 2 : 1;
+    type Cluster = { code: string; label: string; members: Agg[] };
+    const clusters = new Map<string, Cluster>();
+    const flat: Agg[] = [];
+    for (const a of aggs) {
+      let pCode: string | undefined;
+      if (a.accountCode) {
+        const p = coa.get(a.accountCode)?.parentCode ?? undefined;
+        if (p && p !== a.accountCode && coa.has(p)) pCode = p;
+      } else if (sec === "RAW_MATERIALS" && rmLineOrder(a.label) === 10) {
+        const p = RM_LINE_PARENT[rawMaterialLineFor(a.label, stockGroupOverride)];
+        if (p && coa.has(p)) pCode = p;
+      }
+      if (pCode) {
+        const cl = clusters.get(pCode) ?? { code: pCode, label: coa.get(pCode)?.name ?? pCode, members: [] };
+        cl.members.push(a);
+        clusters.set(pCode, cl);
+      } else flat.push(a);
+    }
+    // A lone child under a COA parent stays flat (the nest would add a row
+    // saying nothing); Raw-Material template categories keep single members.
+    for (const [k, cl] of [...clusters]) {
+      if (cl.members.length < 2 && sec !== "RAW_MATERIALS") { flat.push(...cl.members); clusters.delete(k); }
+    }
+    flat.sort((x, y) => x.order - y.order || x.label.localeCompare(y.label));
+    const line = (a: Agg, depth: number, gid?: string) =>
+      push({ kind: "line", label: a.label, section: sec, depth, groupId: gid, values: a.vals.map((v) => sign * v), accountCode: a.accountCode });
+    const body = () => {
+      for (const cl of [...clusters.values()].sort((x, y) => x.code.localeCompare(y.code))) {
+        const gid = `${sec}>${cl.code}`;
+        push({ kind: "group", label: cl.label, section: sec, depth: baseDepth, groupId: gid, accountCode: cl.code, values: sumCols(cl.members).map((v) => sign * v) });
+        for (const a of cl.members.sort((x, y) => x.order - y.order || x.label.localeCompare(y.label)))
+          line(a, baseDepth + 1, gid);
+      }
+      for (const a of flat) line(a, baseDepth, asGroup ? sec : undefined);
+    };
     if (asGroup) {
       push({ kind: "group", label: SECTION_LABELS[sec], section: sec, depth: 1,
         groupId: sec, values: sub.map((v) => sign * v) });
-      for (const a of aggs)
-        push({ kind: "line", label: a.label, section: sec, depth: 2,
-          groupId: sec, values: a.vals.map((v) => sign * v), accountCode: a.accountCode });
+      body();
     } else {
       push({ kind: "section", label: SECTION_LABELS[sec], section: sec, depth: 0, values: columns.map(() => null) });
-      for (const a of aggs)
-        push({ kind: "line", label: a.label, section: sec, depth: 1, values: a.vals.map((v) => sign * v), accountCode: a.accountCode });
+      body();
       push({ kind: "subtotal", label: SECTION_LABELS[sec], section: sec, depth: 1, values: sub.map((v) => sign * v) });
     }
   };

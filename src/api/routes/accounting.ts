@@ -7955,13 +7955,13 @@ async function computeCashflowStatement(
   const { docDate, openingDate: obDate } = await loadDocDateResolver(c.var.DB);
 
   const coaRes = await c.var.DB.prepare(
-    "SELECT code, name, type, specialAccountType FROM chart_of_accounts",
-  ).all<{ code: string; name: string; type: CoaLite["type"]; specialAccountType: string | null }>();
+    "SELECT code, name, type, specialAccountType, parentCode FROM chart_of_accounts",
+  ).all<{ code: string; name: string; type: CoaLite["type"]; specialAccountType: string | null; parentCode: string | null }>();
   const coa = new Map<string, CoaLite>();
   const bankCodes = new Set<string>();
   for (const a of coaRes.results ?? []) {
     const code = resolveAcct(a.code);
-    coa.set(code, { code, name: a.name, type: a.type, sat: a.specialAccountType ?? null });
+    coa.set(code, { code, name: a.name, type: a.type, sat: a.specialAccountType ?? null, parentCode: a.parentCode ? resolveAcct(a.parentCode) : null });
     if (a.specialAccountType === "SBK" || a.specialAccountType === "SCH")
       bankCodes.add(code);
   }

@@ -12845,8 +12845,13 @@ function CashFlowTab() {
   // every line inside it are zero (children can net to zero individually).
   const hasAmt = (r: CfApiRow) => r.values.some((v) => !!v);
   const cleanRows = useMemo(() => {
+    // groupIds are hierarchical ("RAW_MATERIALS>701-0000") — a live line keeps
+    // every ancestor group alive, not just its immediate parent.
     const alive = new Set<string>();
-    for (const r of rows) if (r.kind === "line" && r.groupId && hasAmt(r)) alive.add(r.groupId);
+    for (const r of rows) if (r.kind === "line" && r.groupId && hasAmt(r)) {
+      const parts = r.groupId.split(">");
+      for (let i = 1; i <= parts.length; i++) alive.add(parts.slice(0, i).join(">"));
+    }
     return rows.filter((r) => {
       if (r.kind === "line" && !hasAmt(r)) return false;
       if (r.kind === "group" && !hasAmt(r) && !alive.has(r.groupId ?? "")) return false;
@@ -12854,8 +12859,20 @@ function CashFlowTab() {
     });
   }, [rows]);
 
+  // Collapsing a group hides everything under it, parent clusters included —
+  // a row hides when ANY ancestor id is collapsed (its own id only hides the
+  // rows below it, never the group row itself).
+  const hiddenByCollapse = (r: CfApiRow): boolean => {
+    if (!r.groupId) return false;
+    const parts = r.groupId.split(">");
+    for (let i = 1; i <= parts.length; i++) {
+      const id = parts.slice(0, i).join(">");
+      if (collapsed.has(id) && !(r.kind === "group" && id === r.groupId)) return true;
+    }
+    return false;
+  };
   const visibleRows = (edit ? rows : cleanRows).filter((r) =>
-    r.depth <= (level >= 3 ? 9 : level) && (!r.groupId || r.kind === "group" || !collapsed.has(r.groupId)),
+    r.depth <= (level >= 3 ? 9 : level) && !hiddenByCollapse(r),
   );
 
   const buildExport = (): Aoa => {

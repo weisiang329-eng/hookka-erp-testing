@@ -463,6 +463,7 @@ export default function SupplierPaymentsPage() {
           setTfRows({});
           refreshTf();
           invalidateCachePrefix("/api/supplier-payments");
+          invalidateCachePrefix("/api/accounting");
           refreshHistory();
         } else {
           toast.error(j.error || "Failed to record the repayment");
@@ -543,6 +544,9 @@ export default function SupplierPaymentsPage() {
         resetForm();
         invalidateCachePrefix("/api/supplier-payments");
         invalidateCachePrefix("/api/purchase-invoices");
+        // Aging/GL on the accounting page must not keep serving the pre-payment
+        // snapshot (owner 2026-09-03: 「aging 每次点开不是最新的资料」).
+        invalidateCachePrefix("/api/accounting");
         refreshHistory();
       } else {
         toast.error(j.error || `Failed to ${editingNo ? "update" : "record"} payment`);
@@ -572,6 +576,9 @@ export default function SupplierPaymentsPage() {
         toast.success(`Payment ${paymentNo} ${action === "unvoid" ? "restored" : action === "delete" ? "deleted" : "voided"}`);
         invalidateCachePrefix("/api/supplier-payments");
         invalidateCachePrefix("/api/purchase-invoices");
+        // Aging/GL on the accounting page must not keep serving the pre-payment
+        // snapshot (owner 2026-09-03: 「aging 每次点开不是最新的资料」).
+        invalidateCachePrefix("/api/accounting");
         refreshHistory();
         if (selectedSupplierId) loadOpenPIs(selectedSupplierId);
       } else {
@@ -678,6 +685,9 @@ export default function SupplierPaymentsPage() {
         setDetail(null); // its snapshot is now stale — reopen the row to see the fresh split
         invalidateCachePrefix("/api/supplier-payments");
         invalidateCachePrefix("/api/purchase-invoices");
+        // Aging/GL on the accounting page must not keep serving the pre-payment
+        // snapshot (owner 2026-09-03: 「aging 每次点开不是最新的资料」).
+        invalidateCachePrefix("/api/accounting");
         refreshHistory();
       } else {
         toast.error(j?.error || "Failed to apply the advance");

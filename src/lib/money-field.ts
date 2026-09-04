@@ -20,6 +20,7 @@
 // ---------------------------------------------------------------------------
 
 import { parseMoneyInput, parseMoneyToSen } from "./parse-money";
+import { roundUnitPriceSen } from "./unit-price";
 
 /**
  * A form money field → integer SEN.
@@ -41,6 +42,20 @@ export function moneyFieldToRinggit(raw: string | null | undefined): number | nu
   if (raw === null || raw === undefined) return 0;
   if (String(raw).trim() === "") return 0;
   return parseMoneyInput(raw);
+}
+
+/**
+ * A form UNIT-PRICE field → sen, keeping the sub-cent digits.
+ *
+ * Same blank/unreadable contract as `moneyFieldToSen`; the only difference is
+ * that it does NOT round to whole sen. Use it wherever the number will be
+ * multiplied by a quantity — a supplier price, a unit cost. For an amount that
+ * changes hands, `moneyFieldToSen` is still the right one.
+ */
+export function unitPriceFieldToSen(raw: string | null | undefined): number | null {
+  const rm = moneyFieldToRinggit(raw);
+  if (rm === null) return null;
+  return roundUnitPriceSen(rm * 100);
 }
 
 /**

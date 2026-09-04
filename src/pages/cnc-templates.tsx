@@ -53,6 +53,7 @@ import {
 } from "@/lib/cnc-import";
 import type { CncTemplate } from "@/components/cnc/CncTemplatePanel";
 import type { Product } from "@/types";
+import { useSofaSeatHeights } from "@/lib/use-sofa-seat-heights";
 
 type Category = "BEDFRAME" | "SOFA" | "OTHER";
 
@@ -86,7 +87,8 @@ function bedSizeSortKey(label: string): number {
 }
 
 // Standard sofa seat sizes (matches SEAT_HEIGHT_OPTIONS / variants-config).
-const SEAT_SIZE_OPTIONS = ["24", "26", "28", "30", "32", "35"] as const;
+// Follows Maintenance → Sofa → Sizes (owner 2026-08-21). This one at least
+// carried 26"; six of the eight copies did not.
 
 type CncTemplatesResponse = { success?: boolean; data?: CncTemplate[] };
 type ProductsResponse = { success?: boolean; data?: Product[] };
@@ -250,6 +252,7 @@ type CreateDraft = {
 };
 
 export default function CncTemplatesPage() {
+  const SEAT_SIZE_OPTIONS = useSofaSeatHeights();
   const { toast } = useToast();
   const { confirm } = useConfirm();
 

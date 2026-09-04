@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
+import { ensureUnitPricePrecision } from "../lib/unit-price-precision";
 import type { Env } from "../worker";
 import { requirePermission, requireFinance } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
@@ -23,6 +24,7 @@ import {
   ledgerHasSource,
 } from "../lib/journal-hash";
 import { nextMonthDueDate } from "../../lib/terms";
+import { roundUnitPriceSen, lineTotalSen as computeLineTotalSen } from "../../lib/unit-price";
 import { issueDocNumber } from "../lib/doc-number-service";
 import {
   checkConvertAvailability,
@@ -49,6 +51,9 @@ let piMigrationPromise: Promise<void> | null = null;
 function ensurePiMigrations(db: D1Database): Promise<void> {
   if (piMigrationPromise) return piMigrationPromise;
   piMigrationPromise = (async () => {
+    // A unit price is a RATE with four decimals of sen. Shared with the PO and
+    // GRN routes so the three cannot drift apart again.
+    await ensureUnitPricePrecision(db);
     const stmts = [
       "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS grn_id TEXT",
       "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS grn_item_id TEXT",
@@ -60,6 +65,11 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // for lines invoiced straight off a PO with no receipt in between.
       "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS po_id TEXT",
       "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS invoiced_qty NUMERIC DEFAULT 0",
+      // Sub-cent unit prices are NOT here. They used to be — one ALTER in each
+      // of three route files, each awaited on WRITES only, so the column stayed
+      // INTEGER until somebody happened to save a document. It is one
+      // definition in api/lib/unit-price-precision.ts now, and it is applied
+      // from the read paths too. See the call above.
       // Supplier reference numbers (owner 2026-06-21): the supplier's own
       // invoice number AND their delivery-order number. snake_case → no
       // column-rename-map.json entry needed.
@@ -472,7 +482,13 @@ function normalizeItems(
       return { ok: false, error: `items[${i}]: not an object` };
     }
     const qty = Number(it.qty);
-    const unitPriceSen = Math.round(Number(it.unitPriceSen));
+    // NOT Math.round. A unit price is a RATE that gets multiplied by qty, so
+    // rounding it here multiplies the error by the quantity: OCEAN SKY invoice
+    // 2608-461 is "600 PCS @ 0.05500 = 33.00", and whole-sen rounding turned
+    // RM0.055 into RM0.06 and the line into RM36.00. Keep two decimals of sen
+    // (= four of ringgit, which is what suppliers quote at); the LINE TOTAL
+    // below still lands on whole sen, because that is money that changes hands.
+    const unitPriceSen = roundUnitPriceSen(Number(it.unitPriceSen));
     const materialName = String(it.materialName ?? "").trim();
     if (!materialName) {
       return { ok: false, error: `items[${i}]: materialName is required` };
@@ -505,7 +521,9 @@ function normalizeItems(
       supplierSku: supSku,
       qty,
       unitPriceSen,
-      lineTotalSen: Math.round(qty * unitPriceSen),
+      // Round ONCE, on the product — never the rate first. 600 x 5.5 sen is
+      // 3300 sen = RM33.00, which is exactly what the supplier billed.
+      lineTotalSen: computeLineTotalSen(qty, unitPriceSen),
       taxSen,
       lineType,
       notes: it.notes == null ? null : String(it.notes),
@@ -751,6 +769,10 @@ async function generatePiNo(db: D1Database): Promise<string> {
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
   const db = c.var.DB;
+  // Opening the list is enough to widen the unit-price column. Cheap after the
+  // first time (one catalogue read, no DDL), and it removes the dependency on
+  // somebody saving a document before the schema fix reaches production.
+  await ensureUnitPricePrecision(db);
   const statusParam = c.req.query("status") ?? "";
   const supplierIdParam = c.req.query("supplierId") ?? "";
   const dateFrom = c.req.query("dateFrom") ?? "";
@@ -2863,6 +2885,178 @@ app.post("/:id/unvoid", async (c) => {
   return c.json({
     success: true,
     data: { id, piNo: pi.piNo, status: restored, restoredLegs: restoreLegs.length },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/purchase-invoices/:id/resync-gl?dryRun=false
+//
+// Move a CONFIRMED invoice's ledger position to what its lines say TODAY.
+//
+// ## Why this exists
+//
+// The PUT path already posts a correcting double-entry when an edit changes a
+// CONFIRMED invoice's amount. It fires on `recomputedAmount !== existing.amountSen`
+// — so it is blind to a repair that writes the lines directly, which is exactly
+// what `import-completion/rounded-price-repair.ts` does: by the time it finishes,
+// the header already agrees with the lines and there is no delta left to detect.
+// Measured on prod 2026-08-28: five invoices whose face had moved while the GL
+// still carried the old amount, and they were the ONLY `pi_gl_mismatch` rows in
+// the system.
+//
+// ## Why it is safe to run twice
+//
+// It reuses `loadPiLedgerNet` + `buildPiDeltaLegs`, the same pair the void path
+// uses. Those derive the move from WHAT IS ACTUALLY POSTED rather than from a
+// count of button presses — so a second call computes an all-zero delta and
+// writes nothing. Idempotence is a property of the arithmetic here, not a flag.
+//
+// The legs carry `purchase_invoice_restate_post`, deliberately reusing an
+// existing suffix in `doc-date.ts`'s alternation so they date to the INVOICE,
+// not to the day the repair ran. Inventing a new sourceType is a two-file change
+// and forgetting the second file is silent — that is BUG-2026-08-06-001, class
+// C5, which has now happened three times.
+//
+// Refused on anything but CONFIRMED-and-unpaid: a DRAFT was never posted (use
+// backfill-gl-postings), a CANCELLED invoice is deliberately at zero, and a paid
+// one is a credit note, not an edit.
+// ---------------------------------------------------------------------------
+app.post("/:id/resync-gl", async (c) => {
+  const denied = requireFinance(c);
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const db = c.var.DB;
+  await ensurePiMigrations(db);
+  const dryRun = c.req.query("dryRun") !== "false";
+
+  const pi = await db
+    .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
+    .bind(id)
+    .first<PurchaseInvoiceRow>();
+  if (!pi) return c.json({ success: false, error: "Purchase invoice not found" }, 404);
+
+  const status = String(pi.status ?? "");
+  if (status !== "CONFIRMED") {
+    return c.json(
+      {
+        success: false,
+        error:
+          status === "DRAFT"
+            ? "A draft has no posting to re-sync."
+            : status === "CANCELLED"
+              ? "A voided invoice is deliberately netted to zero."
+              : `An invoice in ${status} has money applied — correct it with a credit note, not a re-sync.`,
+      },
+      409,
+    );
+  }
+  const paidSen = Number(
+    (pi as unknown as { paidAmountSen?: number; paid_amount_sen?: number }).paidAmountSen ??
+      (pi as unknown as { paid_amount_sen?: number }).paid_amount_sen ??
+      0,
+  );
+  if (paidSen > 0) {
+    return c.json(
+      {
+        success: false,
+        error: `RM ${(paidSen / 100).toFixed(2)} has been paid against this invoice — un-apply the payment first.`,
+      },
+      409,
+    );
+  }
+
+  const { total, orgId: legOrgId, legs } = await loadPiLedgerNet(db, id);
+  if (legs === 0) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "This invoice has never been posted, so there is nothing to re-sync — use /backfill-gl-postings to post it.",
+      },
+      409,
+    );
+  }
+
+  // The TARGET: what this invoice's CURRENT lines would post as, built through
+  // the same mapper + leg builder the original posting used, so a correction
+  // lands in the same 70x accounts rather than a parallel set.
+  const itemRows =
+    (
+      await db
+        .prepare("SELECT * FROM purchase_invoice_items WHERE pi_id = ?")
+        .bind(id)
+        .all<Record<string, unknown>>()
+    ).results ?? [];
+  const lines = itemRows.map((r) => ({
+    mc: (r.material_code ?? r.materialCode ?? null) as string | null,
+    amt: Number(r.line_total_sen ?? r.lineTotalSen ?? 0),
+    lt: String(r.line_type ?? r.lineType ?? "STOCKED"),
+    taxAmt: Number(r.tax_sen ?? r.taxSen ?? 0),
+  }));
+  const { bucket, pdefault } = await mapPurchaseLinesToAccounts(db, lines);
+  const apTotalSen = Math.round(Number(pi.amountSen) || 0);
+  const wanted = buildPiApprovalLegs({
+    piNo: String(pi.piNo ?? id),
+    supplierName: String(pi.supplierName ?? ""),
+    apTotalSen,
+    drBucket: bucket,
+    pdefault,
+  });
+  const target = new Map<string, number>();
+  for (const l of wanted) {
+    target.set(
+      l.accountCode,
+      (target.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
+    );
+  }
+
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  const orgId = legOrgId ?? getOrgId(c);
+  const deltaLegs = buildPiDeltaLegs(target, total, {
+    sourceType: "purchase_invoice_restate_post",
+    sourceId: id,
+    description: `GL re-sync · PI ${pi.piNo ?? id} · ${pi.supplierName ?? ""}`,
+    actorUserId,
+    orgId,
+  });
+
+  const movement = deltaLegs.map((l) => ({
+    accountCode: l.accountCode,
+    debitSen: l.debitSen,
+    creditSen: l.creditSen,
+  }));
+
+  if (deltaLegs.length === 0) {
+    return c.json({
+      success: true,
+      dryRun,
+      data: { id, piNo: pi.piNo, alreadyInSync: true, apTotalSen, movement: [] },
+    });
+  }
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      data: { id, piNo: pi.piNo, alreadyInSync: false, apTotalSen, movement },
+    });
+  }
+
+  const { statements } = await buildJournalEntryStatements(db, orgId, deltaLegs);
+  await db.batch(statements);
+
+  await emitAudit(c, {
+    resource: "purchase-invoices",
+    resourceId: id,
+    action: "resync-gl",
+    before: { amountSen: pi.amountSen, ledgerLegsSeen: legs },
+    after: { apTotalSen, correctionLegs: movement },
+  });
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    data: { id, piNo: pi.piNo, alreadyInSync: false, apTotalSen, movement },
   });
 });
 

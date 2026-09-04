@@ -115,7 +115,7 @@ function CompanySelect({
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "supplier-discount" | "debtorledger" | "creditorledger" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "stocktake" | "opening" | "audit" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "supplier-discount" | "debtorledger" | "creditorledger" | "odebtor" | "ocreditor" | "odebtorbills" | "odebtorpay" | "ocreditorbills" | "ocreditorpay" | "pl" | "trend" | "plmonthly" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "transfer" | "dailycash" | "cashbook" | "assets" | "labor" | "stock" | "stockmap" | "openstock" | "stocktake" | "opening" | "audit" | "maint";
 
 // =============== VOUCHER PRINTING (PV / OR / JV) ===============
 //
@@ -488,6 +488,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }
   { key: "payments", label: "Expense Payment", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
   { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
   { key: "transfer", label: "Fund Transfer", icon: <Wallet className="h-4 w-4" />, group: "Daily Operation" },
+  { key: "dailycash", label: "Cash Position", icon: <Wallet className="h-4 w-4" />, group: "Daily Operation" },
   // Monthly Operation
   { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" />, group: "Monthly Operation" },
   { key: "cashbook", label: "Cash Book", icon: <BookOpen className="h-4 w-4" />, group: "Monthly Operation" },
@@ -543,6 +544,15 @@ export default function AccountingPage() {
     refreshAging();
   }, [refreshCoa, refreshJe, refreshAging]);
 
+  // Owner 2026-09-03: the aging tabs kept showing page-load-time data until a
+  // hard refresh — postings made in OTHER tabs of this page (PV/OR/OCB…) never
+  // re-fetched /aging. Re-fetch whenever an aging tab becomes active; the SWR
+  // cache keeps the old rows painted while the fresh ones stream in, so the
+  // tab still opens instantly.
+  useEffect(() => {
+    if (tab === "ar" || tab === "ap") refreshAging();
+  }, [tab, refreshAging]);
+
   return (
     <div className="space-y-6 max-md:space-y-4">
       {/* Header */}
@@ -593,6 +603,7 @@ export default function AccountingPage() {
           {tab === "payments" && <PaymentsTab accounts={accounts} />}
           {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
           {tab === "transfer" && <FundTransferTab accounts={accounts} />}
+          {tab === "dailycash" && <DailyCashTab />}
           {tab === "cashbook" && <CashBookTab accounts={accounts} />}
           {tab === "assets" && <FixedAssetsTab accounts={accounts} />}
           {tab === "labor" && <LaborTab accounts={accounts} />}
@@ -1382,19 +1393,22 @@ function StockTakeTab() {
   // Periodic-inventory switch (owner rule 2026-07-03): 'stock_take_only' turns
   // OFF the BOM/FIFO auto-consumption — closing = latest count + purchases since.
   const [rmMode, setRmMode] = useState<"auto" | "stock_take_only" | null>(null);
+  // FG twin of the switch (owner 2026-08-31 「让他别自动capture」).
+  const [fgMode, setFgMode] = useState<"auto" | "stock_take_only" | null>(null);
   const [modeSaving, setModeSaving] = useState(false);
 
   useEffect(() => {
     let stale = false;
     Promise.all([
       fetch("/api/accounting/material-opening-stock").then((r) => r.json() as Promise<{ data?: { itemGroup: string }[] }>),
-      fetch("/api/accounting/stock-take").then((r) => r.json() as Promise<{ data?: { itemGroup: string; ym: string; valueSen: number }[]; rmValuationMode?: "auto" | "stock_take_only" }>),
+      fetch("/api/accounting/stock-take").then((r) => r.json() as Promise<{ data?: { itemGroup: string; ym: string; valueSen: number }[]; rmValuationMode?: "auto" | "stock_take_only"; fgValuationMode?: "auto" | "stock_take_only" }>),
     ])
       .then(([mos, st]) => {
         if (stale) return;
         setGroups([...new Set((mos.data ?? []).map((r) => r.itemGroup).filter(Boolean))].sort());
         setEntries(st.data ?? []);
         setRmMode(st.rmValuationMode ?? "auto");
+        setFgMode(st.fgValuationMode ?? "auto");
       })
       .catch(() => {});
     return () => { stale = true; };
@@ -1420,6 +1434,31 @@ function StockTakeTab() {
       } else toast.error(j?.error || "Failed to switch valuation mode");
     } catch {
       toast.error("Failed to switch valuation mode");
+    } finally {
+      setModeSaving(false);
+    }
+  };
+
+  const saveFgMode = async (mode: "auto" | "stock_take_only") => {
+    if (mode === fgMode) return;
+    setModeSaving(true);
+    try {
+      const res = await fetch("/api/accounting/fg-valuation-mode", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) {
+        setFgMode(mode);
+        toast.success(
+          mode === "stock_take_only"
+            ? "Finished-goods valuation switched to stock-take only — no automatic per-batch value; months without your FG figure show 0."
+            : "Finished-goods valuation switched back to automatic (per completed batch).",
+        );
+      } else toast.error(j?.error || "Failed to switch FG valuation mode");
+    } catch {
+      toast.error("Failed to switch FG valuation mode");
     } finally {
       setModeSaving(false);
     }
@@ -1768,6 +1807,36 @@ function StockTakeTab() {
               onClick={() => void saveMode("auto")}
             >
               Automatic (BOM/FIFO)
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="p-4 flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-[16rem] flex-1">
+            <div className="text-sm font-medium text-[#1F1D1B]">Finished-goods source</div>
+            <p className="text-xs text-[#6B7280] mt-0.5 max-w-3xl">
+              {fgMode === "stock_take_only"
+                ? "Stock take only: month-end finished goods shows exactly the FG figure you keyed for that month (the FG row below) — 0 when you haven't keyed one (the 30/04 opening seed counts as April). No automatic per-batch valuation."
+                : "Automatic: the system values every completed, undelivered production batch (qty × batch unit cost); an FG stock-take entry overrides that month where present."}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              size="sm"
+              variant={fgMode === "stock_take_only" ? "default" : "outline"}
+              disabled={modeSaving || fgMode === null}
+              onClick={() => void saveFgMode("stock_take_only")}
+            >
+              Stock take only
+            </Button>
+            <Button
+              size="sm"
+              variant={fgMode === "auto" ? "default" : "outline"}
+              disabled={modeSaving || fgMode === null}
+              onClick={() => void saveFgMode("auto")}
+            >
+              Automatic (per batch)
             </Button>
           </div>
         </CardContent>
@@ -3027,6 +3096,10 @@ function JournalsTab({
   const { confirm } = useConfirm();
   const { toast } = useToast();
   const [showForm, setShowForm] = useState(false);
+  // DRAFT journal being edited in place (owner 2026-08-31: a duplicated JV had
+  // no way to change its date/description before posting — the old Edit item
+  // was removed as a no-op in BUG-2026-08-13-090 and never rebuilt).
+  const [editingJv, setEditingJv] = useState<JournalEntry | null>(null);
   const [selectedJvs, setSelectedJvs] = useState<JournalEntry[]>([]);
 
   // Owner 2026-07-28 (JE-2607-0001): this used to ignore the response entirely
@@ -3187,6 +3260,7 @@ function JournalsTab({
       { label: "Print voucher", action: (r) => printVoucher(buildJvVoucher(r)) },
     ];
     if (row.status === "DRAFT") {
+      items.push({ label: "Edit", action: (r) => { setShowForm(false); setEditingJv(r); } });
       items.push({ label: "Post", action: (r) => handlePost(r.id) });
       items.push({ label: "Delete", danger: true, action: (r) => handleDelete(r.id) });
     } else {
@@ -3210,12 +3284,21 @@ function JournalsTab({
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Journal Entries</h2>
-        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+        <Button variant="primary" size="sm" onClick={() => { setEditingJv(null); setShowForm(!showForm); }}>
           <FileText className="h-4 w-4" /> New Journal Entry
         </Button>
       </div>
 
       {showForm && <JournalEntryForm accounts={accounts} onSave={() => { setShowForm(false); onRefresh(); }} onCancel={() => setShowForm(false)} />}
+      {editingJv && (
+        <JournalEntryForm
+          key={editingJv.id}
+          accounts={accounts}
+          editing={editingJv}
+          onSave={() => { setEditingJv(null); onRefresh(); }}
+          onCancel={() => setEditingJv(null)}
+        />
+      )}
 
       <BatchActionsBar
         count={selectedJvs.length}
@@ -3261,21 +3344,26 @@ function JournalsTab({
 
 function JournalEntryForm({
   accounts,
+  editing,
   onSave,
   onCancel,
 }: {
   accounts: ChartOfAccount[];
+  // A DRAFT journal to edit in place (PUT instead of POST). The backend has
+  // always supported draft edits; the form just never offered them (owner
+  // 2026-08-31: a duplicated JV was stuck with the template's date/text).
+  editing?: JournalEntry | null;
   onSave: () => void;
   onCancel: () => void;
 }) {
-  const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
-  const [description, setDescription] = useState("");
+  const [date, setDate] = useState(() => (editing?.date ?? "").slice(0, 10) || new Date().toISOString().split("T")[0]);
+  const [description, setDescription] = useState(editing?.description ?? "");
   // Editor rows carry a client-only `_uid` so React keys stay stable as rows
   // are added / removed / reordered. The uid is stripped before POST in
   // handleSave().  See sprint 7 — replacing key={idx} on mutable rows.
-  // debitStr/creditStr keep the raw text being typed so the controlled
-  // inputs never reformat mid-entry (owner bug 2026-06-12).
-  type JournalLineRow = JournalLine & { _uid: string; debitStr?: string; creditStr?: string };
+  // (The old debitStr/creditStr raw-text fields are gone — MoneyInput owns
+  // the mid-typing display now, BUG-2026-08-31-171.)
+  type JournalLineRow = JournalLine & { _uid: string };
   const newRow = (): JournalLineRow => ({
     _uid: crypto.randomUUID(),
     accountCode: "",
@@ -3284,7 +3372,11 @@ function JournalEntryForm({
     creditSen: 0,
     description: "",
   });
-  const [lines, setLines] = useState<JournalLineRow[]>([newRow(), newRow()]);
+  const [lines, setLines] = useState<JournalLineRow[]>(() =>
+    editing && editing.lines.length
+      ? editing.lines.map((l) => ({ ...l, _uid: crypto.randomUUID() }))
+      : [newRow(), newRow()],
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -3355,8 +3447,8 @@ function JournalEntryForm({
     });
 
     setSaving(true);
-    const res = await fetch("/api/accounting/journals", {
-      method: "POST",
+    const res = await fetch(editing ? `/api/accounting/journals/${editing.id}` : "/api/accounting/journals", {
+      method: editing ? "PUT" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ date, description, lines: payloadLines }),
     });
@@ -3373,7 +3465,7 @@ function JournalEntryForm({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle>New Journal Entry</CardTitle>
+        <CardTitle>{editing ? `Edit ${editing.entryNo ?? "Journal Entry"} (draft)` : "New Journal Entry"}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="space-y-4">
@@ -3436,26 +3528,25 @@ function JournalEntryForm({
                         placeholder="Type code or name…"
                       />
                     </td>
+                    {/* Owner 2026-08-31 「按了一次就跑去分和sen」: the raw
+                        number inputs reformatted to .00 after every keystroke
+                        (updateLine never stored the raw text) and their 0.01
+                        spinner stepped by one sen. MoneyInput is the house
+                        answer — free typing while focused, commit on blur. */}
                     <td className="py-1.5 px-2">
-                      <input
-                        type="number" onFocus={(e) => e.currentTarget.select()}
-                        min="0"
-                        step="0.01"
+                      <MoneyInput
+                        value={line.debitSen ? line.debitSen / 100 : null}
+                        onChange={(v) => updateLine(idx, "debitSen", v ?? 0)}
                         placeholder="0.00"
-                        value={line.debitStr ?? (line.debitSen ? (line.debitSen / 100).toFixed(2) : "")}
-                        onChange={(e) => updateLine(idx, "debitSen", e.target.value)}
-                        className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                        className="h-auto rounded px-2 py-1.5"
                       />
                     </td>
                     <td className="py-1.5 px-2">
-                      <input
-                        type="number" onFocus={(e) => e.currentTarget.select()}
-                        min="0"
-                        step="0.01"
+                      <MoneyInput
+                        value={line.creditSen ? line.creditSen / 100 : null}
+                        onChange={(v) => updateLine(idx, "creditSen", v ?? 0)}
                         placeholder="0.00"
-                        value={line.creditStr ?? (line.creditSen ? (line.creditSen / 100).toFixed(2) : "")}
-                        onChange={(e) => updateLine(idx, "creditSen", e.target.value)}
-                        className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                        className="h-auto rounded px-2 py-1.5"
                       />
                     </td>
                     <td className="py-1.5 px-2">
@@ -6478,16 +6569,84 @@ function OtherPartyBillsManager({ parties, accounts, side }: { parties: OtherPar
                     </td>
                   </tr>
                   {openBill === b.id && (
+                    /* Full bill detail (owner 2026-08-31: 「我要看bill 的全部
+                       detail」+「做好看一点」) — a voucher-style card: header
+                       strip with status pill, airy lines table with account
+                       NAMES, and a summary column for the money. */
                     <tr className="border-b border-[#F0ECE9] bg-[#FAF8F5]">
-                      <td colSpan={10} className="px-8 py-2">
-                        <div className="text-xs text-[#6B7280] space-y-0.5">
-                          {b.items.map((it, i) => (
-                            <div key={i} className="flex justify-between max-w-md">
-                              <span>{it.counterAccount}{it.description ? ` · ${it.description}` : ""}</span>
-                              <span className="tabular-nums">{formatCurrency(it.amountSen)}</span>
+                      <td colSpan={10} className="px-6 py-4">
+                        <div className="max-w-4xl rounded-lg border border-[#E2DDD8] bg-white shadow-sm overflow-hidden">
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 bg-[#F7F4EF] border-b border-[#E2DDD8]">
+                            <span className="font-mono text-sm font-semibold text-[#1F1D1B]">{b.billNo}</span>
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${
+                              (b.lifecycleState ?? "ACTIVE") !== "ACTIVE"
+                                ? "bg-[#F0ECE9] text-[#6B7280]"
+                                : b.outstandingSen <= 0
+                                  ? "bg-[#EAF3DE] text-[#27500A]"
+                                  : "bg-[#FBEED9] text-[#9C6F1E]"
+                            }`}>
+                              {(b.lifecycleState ?? "ACTIVE") !== "ACTIVE" ? b.lifecycleState : b.status}
+                            </span>
+                            {b.isOpening ? (
+                              <span className="rounded-full bg-[#F0ECE9] px-2 py-0.5 text-[10px] font-semibold tracking-wide text-[#6B7280]">OPENING</span>
+                            ) : null}
+                            <span className="text-sm font-medium text-[#1F1D1B]">{b.partyName}</span>
+                            <span className="ml-auto text-xs text-[#6B7280] tabular-nums">{b.billDate}</span>
+                          </div>
+                          {(b.referenceNo || b.description) && (
+                            <div className="flex flex-wrap gap-x-6 gap-y-0.5 px-4 py-2 text-xs text-[#5A5550] border-b border-[#F0ECE9]">
+                              {b.referenceNo ? <span><span className="text-[#9CA3AF] mr-1.5">Reference</span>{b.referenceNo}</span> : null}
+                              {b.description ? <span><span className="text-[#9CA3AF] mr-1.5">Description</span>{b.description}</span> : null}
                             </div>
-                          ))}
-                          {b.taxSen ? <div className="flex justify-between max-w-md border-t border-[#E2DDD8] mt-0.5 pt-0.5"><span>Tax / SST</span><span className="tabular-nums">{formatCurrency(b.taxSen)}</span></div> : null}
+                          )}
+                          <div className="flex flex-col md:flex-row">
+                            <table className="flex-1 text-xs">
+                              <thead>
+                                <tr className="text-[10px] uppercase tracking-wider text-[#6B5C32]">
+                                  <th className="px-4 py-2 text-left w-8 font-semibold">#</th>
+                                  <th className="px-3 py-2 text-left font-semibold">Account</th>
+                                  <th className="px-3 py-2 text-left font-semibold">Line description</th>
+                                  <th className="px-4 py-2 text-right w-32 font-semibold">Amount</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {b.items.map((it, i) => {
+                                  const acct = accounts.find((a) => a.code === it.counterAccount);
+                                  return (
+                                    <tr key={i} className={`border-t border-[#F0ECE9] ${i % 2 === 1 ? "bg-[#FBFAF8]" : ""}`}>
+                                      <td className="px-4 py-1.5 text-[#C7C1BA] tabular-nums">{i + 1}</td>
+                                      <td className="px-3 py-1.5 whitespace-nowrap">
+                                        <span className="font-mono text-[11px] text-[#9CA3AF] mr-1.5">{it.counterAccount}</span>
+                                        <span className="text-[#1F1D1B]">{acct?.name ?? ""}</span>
+                                      </td>
+                                      <td className="px-3 py-1.5 text-[#5A5550]">{it.description || <span className="text-[#C7C1BA]">—</span>}</td>
+                                      <td className="px-4 py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(it.amountSen)}</td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                            <div className="md:w-60 shrink-0 border-t md:border-t-0 md:border-l border-[#E2DDD8] bg-[#FBFAF8] px-4 py-3 space-y-1.5 text-xs">
+                              {b.taxSen ? (
+                                <div className="flex justify-between text-[#6B7280]">
+                                  <span>Tax / SST</span>
+                                  <span className="tabular-nums">{formatCurrency(b.taxSen)}</span>
+                                </div>
+                              ) : null}
+                              <div className="flex justify-between font-semibold text-[#1F1D1B] border-b border-[#E2DDD8] pb-1.5">
+                                <span>Total</span>
+                                <span className="tabular-nums">{formatCurrency(b.totalSen)}</span>
+                              </div>
+                              <div className="flex justify-between text-[#6B7280]">
+                                <span>Paid</span>
+                                <span className="tabular-nums">{formatCurrency(b.paidAmountSen)}</span>
+                              </div>
+                              <div className={`flex justify-between font-semibold ${b.outstandingSen > 0 ? "text-[#9A3A2D]" : "text-[#27500A]"}`}>
+                                <span>Outstanding</span>
+                                <span className="tabular-nums">{formatCurrency(b.outstandingSen)}</span>
+                              </div>
+                            </div>
+                          </div>
                         </div>
                       </td>
                     </tr>
@@ -8713,6 +8872,16 @@ function FundTransferTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.amountSen)}</td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.description ?? ""}</td>
                     <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                      {/* Owner 2026-08-28 「fund transfer 没有办法 print out
+                          voucher」— the batch bar could always print selected
+                          rows, but nothing on the row said so; give every row
+                          its own print link like the JV grid has. */}
+                      <button
+                        className="text-xs underline decoration-dotted cursor-pointer text-[#6B5C32] hover:text-[#4A3F22] mr-3"
+                        onClick={() => printVoucher(buildFundTransferVoucher(r, accounts))}
+                      >
+                        print
+                      </button>
                       <span className="mr-2"><LifecycleBadge state={r.lifecycleState} /></span>
                       <LifecycleActions
                         state={r.lifecycleState}
@@ -9561,8 +9730,605 @@ function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 // matching (manual pick or unambiguous auto-match); whatever stays
 // unmatched on either side IS the 未达账项 list.
 
+// =============== TAB: DAILY CASH POSITION ===============
+// The owner's external "BANK BALANCE AVAILABLE" board rebuilt inside the ERP
+// (2026-09-03, his source choice (b)): estimated bank balance per account =
+// book ± reconciliation state, pending list = recorded vouchers the bank
+// hasn't processed. Accounts with no imported statements show book-only.
+type CashPosAccount = {
+  code: string; name: string; reconciled: boolean;
+  bookSen: number; pendingSen: number; unbookedSen: number; unbookedCount: number;
+  bankEstSen: number; availableSen: number;
+  oldPendingSen: number; oldPendingCount: number;
+  pending: { legId: string; day: string; sourceId: string; description: string; amountSen: number; ticked: boolean }[];
+};
+type CashPosPartyRow = { month: string; name: string; outstandingSen?: number; totalSen?: number; dueSen?: number };
+type CashPosData = {
+  date: string; accounts: CashPosAccount[]; totalBankEstSen: number; totalAvailableSen: number;
+  repay: CashPosPartyRow[]; receive: CashPosPartyRow[];
+  planned: { id: string; partyName: string; ref: string; expectedDate: string; amountSen: number }[];
+  tickWarnings: { account: string; day: string; sourceId: string; description: string; amountSen: number }[];
+  openingMonth?: string | null;
+};
+
+// Month-grouped breakdown the owner sketched: per month → one row per party
+// → month total → grand total.
+function CashPosPartyPanel({ title, rows, amountOf, scopeLabel, scopeAlt, scope, onScope, tone, collapseUpTo, collapseLabel }: {
+  title: string;
+  rows: CashPosPartyRow[];
+  amountOf: (r: CashPosPartyRow) => number;
+  scopeLabel: string; scopeAlt: string;
+  scope: boolean; onScope: (v: boolean) => void;
+  tone: "pay" | "receive";
+  // Months ≤ this collapse into one summary line (owner 2026-09-03: opening-
+  // era customer months live in the 期初工程, not the daily queue) — the
+  // grand total still counts them, same as the pending-list treatment.
+  collapseUpTo?: string | null;
+  collapseLabel?: string;
+}) {
+  const byMonth = new Map<string, CashPosPartyRow[]>();
+  let collapsedSen = 0;
+  let collapsedCount = 0;
+  for (const r of rows) {
+    if (amountOf(r) === 0) continue;
+    if (collapseUpTo && r.month <= collapseUpTo) {
+      collapsedSen += amountOf(r);
+      collapsedCount++;
+      continue;
+    }
+    const list = byMonth.get(r.month) ?? [];
+    list.push(r);
+    byMonth.set(r.month, list);
+  }
+  const months = [...byMonth.keys()].sort();
+  const grand = rows.reduce((s, r) => s + amountOf(r), 0);
+  const monthLabel = (m: string) => {
+    const names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const mm = Number(m.slice(5, 7));
+    return mm >= 1 && mm <= 12 ? `${names[mm - 1]}'${m.slice(2, 4)}` : m;
+  };
+  return (
+    <Card>
+      <CardContent className="p-0">
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#E2DDD8]">
+          <span className="text-sm font-semibold text-[#1F1D1B]">{title}</span>
+          <button
+            onClick={() => onScope(!scope)}
+            className="rounded-full border border-[#E2DDD8] px-2 py-0.5 text-[11px] text-[#6B7280] hover:border-[#6B5C32] cursor-pointer"
+            title="Switch scope"
+          >
+            {scope ? scopeLabel : scopeAlt} ⇄
+          </button>
+        </div>
+        {months.length === 0 && collapsedCount === 0 ? (
+          <div className="px-4 py-5 text-sm text-[#9CA3AF]">Nothing in this scope ✓</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {months.map((m) => {
+                const list = byMonth.get(m)!;
+                const sub = list.reduce((s, r) => s + amountOf(r), 0);
+                return (
+                  <Fragment key={m}>
+                    <tr className="bg-[#F7F4EF]">
+                      <td className="px-4 py-1 text-xs font-semibold text-[#6B7280]" colSpan={2}>{monthLabel(m)}</td>
+                    </tr>
+                    {list.map((r) => (
+                      <tr key={`${m}-${r.name}`} className="border-b border-[#F0ECE9]">
+                        <td className="px-4 py-1 text-xs w-full max-w-0"><div className="truncate" title={amountOf(r) < 0 ? `${r.name} — received, not yet knocked to invoices` : r.name}>{r.name}{amountOf(r) < 0 && <span className="ml-1 text-[10px] text-[#27500A]">· money in hand</span>}</div></td>
+                        <td className={`px-4 py-1 text-right tabular-nums text-xs whitespace-nowrap ${amountOf(r) < 0 ? "text-[#27500A]" : ""}`}>{formatCurrency(amountOf(r))}</td>
+                      </tr>
+                    ))}
+                    <tr className="border-b border-[#E2DDD8]">
+                      <td className="px-4 py-1 text-xs font-medium">Total {monthLabel(m)}</td>
+                      <td className={`px-4 py-1 text-right tabular-nums text-xs font-medium whitespace-nowrap ${sub < 0 ? "text-[#27500A]" : ""}`}>{formatCurrency(sub)}</td>
+                    </tr>
+                  </Fragment>
+                );
+              })}
+              {collapsedCount > 0 && (
+                <tr className="border-b border-[#E2DDD8]">
+                  <td className="px-4 py-1 text-[11px] text-[#9CA3AF]">{collapseLabel ?? "Opening era"} — {collapsedCount} part{collapsedCount === 1 ? "y" : "ies"}, handled in Aging / 期初</td>
+                  <td className="px-4 py-1 text-right tabular-nums text-[11px] text-[#9CA3AF] whitespace-nowrap">{formatCurrency(collapsedSen)}</td>
+                </tr>
+              )}
+              <tr className={tone === "pay" ? "bg-[#F7E5E1]/60" : "bg-[#EAF3DE]/60"}>
+                <td className="px-4 py-1.5 text-sm font-semibold">{tone === "pay" ? "TOTAL TO REPAY" : "TOTAL TO RECEIVE"}</td>
+                <td className="px-4 py-1.5 text-right tabular-nums font-bold whitespace-nowrap">{formatCurrency(grand)}</td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DailyCashTab() {
+  const { toast } = useToast();
+  const today = new Date().toISOString().slice(0, 10);
+  const [date, setDate] = useState(today);
+  const [data, setData] = useState<CashPosData | null>(null);
+  const [reload, setReload] = useState(0);
+  // Panel scopes (owner defaults: suppliers = everything before this month;
+  // customers = already due per each invoice's terms).
+  const [repayAll, setRepayAll] = useState(false);
+  const [recvAll, setRecvAll] = useState(false);
+  // Planned payments: default OFF (「可以做，但我不一定会用到」).
+  const [showPlanned, setShowPlanned] = useState(() => {
+    try { return localStorage.getItem("cashpos-planned") === "1"; } catch { return false; }
+  });
+  const [planForm, setPlanForm] = useState({ party: "", ref: "", date: "", amount: "" });
+  // "Get image" pops the PNG in a modal for right-click → Copy image at full
+  // resolution — a downloaded file re-copied out of a viewer pastes blurry.
+  const [imgPopup, setImgPopup] = useState<string | null>(null);
+  const closeImgPopup = () => {
+    if (imgPopup) URL.revokeObjectURL(imgPopup);
+    setImgPopup(null);
+  };
+  const boardRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let dead = false;
+    fetch(`/api/accounting/cash-position?date=${date}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: CashPosData }>)
+      .then((j) => { if (!dead && j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [date, reload]);
+  const cur = data && data.date === date ? data : null;
+  const shiftDay = (delta: number) => {
+    const d = new Date(`${date}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + delta);
+    setDate(d.toISOString().slice(0, 10));
+  };
+  const tdInC = (n: number) => (n > 0 ? formatCurrency(n) : "");
+  const tdOutC = (n: number) => (n < 0 ? formatCurrency(-n) : "");
+  const curMonth = date.slice(0, 7);
+
+  const handleTick = async (a: CashPosAccount, legId: string, cleared: boolean) => {
+    const res = await fetch("/api/accounting/cash-position/tick", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ legId, accountCode: a.code, cleared, date }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) setReload((n) => n + 1);
+    else toast.error(j?.error || "Failed");
+  };
+
+  const addPlanned = async () => {
+    const amountSen = moneyFieldToSen(planForm.amount);
+    if (!planForm.party.trim() || !planForm.date || !amountSen || amountSen <= 0) {
+      toast.error("Party, date and a positive amount are required");
+      return;
+    }
+    const res = await fetch("/api/accounting/cash-position/planned", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ partyName: planForm.party.trim(), ref: planForm.ref.trim(), expectedDate: planForm.date, amountSen }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) { setPlanForm({ party: "", ref: "", date: "", amount: "" }); setReload((n) => n + 1); }
+    else toast.error(j?.error || "Failed");
+  };
+
+  const deletePlanned = async (id: string) => {
+    const res = await fetch(`/api/accounting/cash-position/planned/${id}`, { method: "DELETE" });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) setReload((n) => n + 1);
+    else toast.error(j?.error || "Failed");
+  };
+
+  // Future view: planned payments up to the viewed date reduce the projection.
+  const plannedDue = (cur?.planned ?? []).filter((p) => p.expectedDate <= date);
+  const plannedDueSen = plannedDue.reduce((s, p) => s + p.amountSen, 0);
+  const isFuture = date > today;
+
+  // The bottom line the owner asked for: what's left after paying everything
+  // in the repay scope and collecting everything in the receive scope.
+  const repayRows = (cur?.repay ?? []).filter((r) => repayAll || r.month < curMonth);
+  const repayAmt = (r: CashPosPartyRow) => r.outstandingSen ?? 0;
+  const recvRows = cur?.receive ?? [];
+  const recvAmt = (r: CashPosPartyRow) => (recvAll ? r.totalSen ?? 0 : r.dueSen ?? 0);
+  const repayShownSen = repayRows.reduce((s, r) => s + repayAmt(r), 0);
+  const recvShownSen = recvRows.reduce((s, r) => s + recvAmt(r), 0);
+  const netAfterSen = (cur?.totalAvailableSen ?? 0) - repayShownSen + recvShownSen;
+
+  // The share image is DRAWN FROM DATA, not screenshotted from the DOM.
+  // Both DOM-capture libraries were tried and rejected on prod: html2canvas
+  // dies silently on modern CSS color functions, and html-to-image spent
+  // 56 SECONDS serialising this board's thousands of nodes (measured
+  // 2026-09-03). A plain canvas render of the same numbers takes <100ms and
+  // can never rot with the stylesheet.
+  const getImage = () => {
+    if (!cur) return;
+    try {
+      const W = 1000;
+      const line = 26;
+      const acctRows = cur.accounts.map((a) => ({ a, rows: a.pending.filter((p) => !p.ticked) }));
+      let H = 96; // title block
+      for (const { a, rows } of acctRows) {
+        H += 44; // dark band
+        if (a.unbookedCount > 0) H += line;
+        if (rows.length > 0) H += line + rows.length * line; // header + rows
+        if (a.oldPendingCount > 0) H += line;
+        H += 36; // available band
+        H += 14; // gap
+      }
+      H += 52 + 46 + 40; // current cash + net + footer
+      const canvas = document.createElement("canvas");
+      canvas.width = W * 2;
+      canvas.height = H * 2;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { toast.error("Canvas unavailable"); return; }
+      ctx.scale(2, 2);
+      const rm = (n: number) => formatCurrency(n);
+      const trunc = (s: string, max: number) => {
+        let t = s;
+        while (t.length > 3 && ctx.measureText(t).width > max) t = t.slice(0, -2);
+        return t === s ? s : `${t}…`;
+      };
+      ctx.fillStyle = "#FAF8F5";
+      ctx.fillRect(0, 0, W, H);
+      let y = 40;
+      ctx.fillStyle = "#1F1D1B";
+      ctx.font = "bold 22px Arial";
+      ctx.fillText(`Cash Position — ${cur.date}`, 24, y);
+      ctx.font = "12px Arial";
+      ctx.fillStyle = "#6B7280";
+      ctx.fillText("Hookka ERP · estimated from the books ± bank reconciliation", 24, y + 20);
+      y += 56;
+      for (const { a, rows } of acctRows) {
+        ctx.fillStyle = "#1F2937";
+        ctx.fillRect(16, y, W - 32, 34);
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "bold 14px Arial";
+        ctx.fillText(trunc(`${a.code} ${a.name}${a.reconciled ? "" : " (book only)"}`, 560), 28, y + 22);
+        const bankTxt = `Bank balance (est.) ${rm(a.bankEstSen)}`;
+        ctx.fillText(bankTxt, W - 28 - ctx.measureText(bankTxt).width, y + 22);
+        y += 44;
+        ctx.font = "12px Arial";
+        if (a.unbookedCount > 0) {
+          ctx.fillStyle = "#7A5B12";
+          ctx.fillText(trunc(`Includes ${a.unbookedCount} bank items not booked yet (${rm(a.unbookedSen)})`, W - 60), 28, y + 12);
+          y += line;
+        }
+        if (rows.length > 0) {
+          ctx.fillStyle = "#6B7280";
+          ctx.fillText("Date", 28, y + 12);
+          ctx.fillText("PV No.", 110, y + 12);
+          ctx.fillText("Description", 230, y + 12);
+          const h1 = "Received", h2 = "Pending payment";
+          ctx.fillText(h1, W - 200 - ctx.measureText(h1).width, y + 12);
+          ctx.fillText(h2, W - 28 - ctx.measureText(h2).width, y + 12);
+          y += line;
+          for (const p of rows) {
+            ctx.fillStyle = "#6B7280";
+            ctx.fillText(p.day, 28, y + 12);
+            ctx.fillStyle = "#1F1D1B";
+            ctx.fillText(trunc(p.sourceId, 110), 110, y + 12);
+            ctx.fillText(trunc(p.description, W - 230 - 260), 230, y + 12);
+            if (p.amountSen > 0) {
+              ctx.fillStyle = "#27500A";
+              const t = rm(p.amountSen);
+              ctx.fillText(t, W - 200 - ctx.measureText(t).width, y + 12);
+            } else {
+              ctx.fillStyle = "#1F1D1B";
+              const t = rm(-p.amountSen);
+              ctx.fillText(t, W - 28 - ctx.measureText(t).width, y + 12);
+            }
+            y += line;
+          }
+        }
+        if (a.oldPendingCount > 0) {
+          ctx.fillStyle = "#9CA3AF";
+          ctx.fillText(`Older reconciliation items: ${a.oldPendingCount} · ${rm(a.oldPendingSen)} (counted above)`, 28, y + 12);
+          y += line;
+        }
+        ctx.fillStyle = "#EAF3DE";
+        ctx.fillRect(16, y, W - 32, 28);
+        ctx.fillStyle = "#1F1D1B";
+        ctx.font = "bold 13px Arial";
+        ctx.fillText("Available (after pending)", 28, y + 19);
+        const avTxt = rm(a.availableSen);
+        ctx.fillText(avTxt, W - 28 - ctx.measureText(avTxt).width, y + 19);
+        y += 36 + 14;
+        ctx.font = "12px Arial";
+      }
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(16, y, W - 32, 40);
+      ctx.strokeStyle = "#E2DDD8";
+      ctx.strokeRect(16, y, W - 32, 40);
+      ctx.fillStyle = "#1F1D1B";
+      ctx.font = "bold 15px Arial";
+      ctx.fillText("CURRENT CASH AVAILABLE", 28, y + 26);
+      ctx.fillStyle = "#27500A";
+      const totTxt = rm(cur.totalAvailableSen);
+      ctx.fillText(totTxt, W - 28 - ctx.measureText(totTxt).width, y + 26);
+      y += 52;
+      ctx.fillStyle = "#1F1D1B";
+      ctx.font = "bold 14px Arial";
+      ctx.fillText("CASH AFTER REPAY & RECEIVE", 28, y + 18);
+      ctx.fillStyle = netAfterSen >= 0 ? "#27500A" : "#9A3A2D";
+      const netTxt = rm(netAfterSen);
+      ctx.fillText(netTxt, W - 28 - ctx.measureText(netTxt).width, y + 18);
+      ctx.fillStyle = "#9CA3AF";
+      ctx.font = "11px Arial";
+      const sub = `= available ${rm(cur.totalAvailableSen)} − to repay ${rm(repayShownSen)} + to receive ${rm(recvShownSen)}`;
+      ctx.fillText(sub, W - 28 - ctx.measureText(sub).width, y + 36);
+      y += 46;
+      canvas.toBlob((blob) => {
+        if (!blob) { toast.error("Could not render the image"); return; }
+        const url = URL.createObjectURL(blob);
+        setImgPopup((old) => {
+          if (old) URL.revokeObjectURL(old);
+          return url;
+        });
+      }, "image/png");
+    } catch (e) {
+      console.error("[cash-position] image export failed:", e);
+      toast.error("Image export failed");
+    }
+  };
+
+  const printBoard = () => {
+    if (!cur) return;
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const acctBlock = (a: CashPosAccount) => `
+      <h2>${a.code} ${esc(a.name)} — Bank balance (est.) <b>${formatCurrency(a.bankEstSen)}</b>${a.reconciled ? "" : " (book only)"}</h2>
+      ${a.pending.filter((p) => !p.ticked).length ? `<table><thead><tr><th>Date</th><th>PV No.</th><th>Description</th><th class="r">Received</th><th class="r">Pending payment</th></tr></thead><tbody>${a.pending.filter((p) => !p.ticked)
+        .map((p) => `<tr><td>${p.day}</td><td>${esc(p.sourceId)}</td><td>${esc(p.description)}</td><td class="r">${p.amountSen > 0 ? formatCurrency(p.amountSen) : ""}</td><td class="r">${p.amountSen < 0 ? formatCurrency(-p.amountSen) : ""}</td></tr>`)
+        .join("")}</tbody></table>` : ""}
+      ${a.oldPendingCount > 0 ? `<p>Older reconciliation items: ${a.oldPendingCount} · ${formatCurrency(a.oldPendingSen)}</p>` : ""}
+      <p class="avail">Available (after pending): <b>${formatCurrency(a.availableSen)}</b></p>`;
+    const w = window.open("", "_blank", "width=900,height=700");
+    if (!w) { toast.error("Pop-up blocked — allow pop-ups to print"); return; }
+    w.document.write(`<!doctype html><html><head><title>Cash Position ${cur.date}</title><style>
+      body{font-family:Arial,sans-serif;font-size:12px;color:#111;margin:32px}
+      h1{font-size:18px;margin:0 0 12px} h2{font-size:13px;margin:18px 0 6px}
+      table{border-collapse:collapse;width:100%} td,th{border:1px solid #ccc;padding:4px 8px;text-align:left}
+      .r{text-align:right;font-variant-numeric:tabular-nums}
+      .avail{margin:6px 0 0;text-align:right}
+      .total{margin-top:20px;font-size:15px;text-align:right}
+      footer{margin-top:24px;color:#777;font-size:10px}
+    </style></head><body>
+      <h1>Cash Position — ${cur.date}</h1>
+      ${cur.accounts.map(acctBlock).join("")}
+      <p class="total">CURRENT CASH AVAILABLE: <b>${formatCurrency(cur.totalAvailableSen)}</b></p>
+      <footer>Estimated from the books ± bank reconciliation · Hookka ERP</footer>
+    </body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  };
+
+  return (
+    <div className="space-y-4">
+      {imgPopup && (
+        <div className="fixed inset-0 z-50 bg-black/60 p-4 flex items-center justify-center" onClick={closeImgPopup}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-2 px-5 py-3 border-b border-[#E2DDD8]">
+              <div className="text-base font-semibold text-[#1F1D1B]">Report image</div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={imgPopup}
+                  download={`cash-position-${date}.png`}
+                  className="inline-flex items-center rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm text-[#1F1D1B] hover:bg-[#F7F4EF]"
+                >
+                  Download
+                </a>
+                <Button variant="outline" size="sm" onClick={closeImgPopup}>Close</Button>
+              </div>
+            </div>
+            <div className="px-5 pt-2 text-xs text-[#6B7280] space-y-0.5">
+              <p>🖥 Right-click the image → <b>Copy image</b> (then paste into WhatsApp Web with Ctrl/Cmd+V), or <b>Save image as…</b></p>
+              <p>📱 Long-press the image → <b>Save</b> or <b>Share</b>.</p>
+            </div>
+            <div className="overflow-auto px-5 py-3">
+              <img src={imgPopup} alt={`Cash position ${date}`} className="w-full rounded border border-[#E2DDD8]" />
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="flex justify-between items-center flex-wrap gap-2">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Daily Cash Position</h2>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => { const v = !showPlanned; setShowPlanned(v); try { localStorage.setItem("cashpos-planned", v ? "1" : "0"); } catch { /* ignore */ } }}>
+            {showPlanned ? "Hide planned" : "Show planned"}
+          </Button>
+          <Button variant="outline" size="sm" disabled={!cur} onClick={getImage}>Get image</Button>
+          <Button variant="outline" size="sm" disabled={!cur} onClick={printBoard}>Print</Button>
+        </div>
+      </div>
+      <Card>
+        <CardContent className="p-4 flex flex-wrap items-center gap-3 bg-[#F7F4EF] rounded-lg">
+          <Button variant="outline" size="sm" onClick={() => shiftDay(-1)}>‹</Button>
+          <input type="date" value={date} onChange={(e) => { if (e.target.value) setDate(e.target.value); }} className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm" />
+          <Button variant="outline" size="sm" onClick={() => shiftDay(1)}>›</Button>
+          <Button variant="outline" size="sm" onClick={() => setDate(today)}>Today</Button>
+          <span className="text-[11px] text-[#9CA3AF]">
+            Tick a row when your banking app shows it went through — the estimate turns daily-accurate. Statements still referee at month end.
+          </span>
+        </CardContent>
+      </Card>
+      {isFuture && (
+        <div className="rounded-md bg-[#EEF2FB] border border-[#B7C3E0] px-3 py-2 text-xs text-[#2C4170]">
+          Viewing a FUTURE date — this is a projection{plannedDue.length > 0 ? ` including ${plannedDue.length} planned payment${plannedDue.length === 1 ? "" : "s"} (${formatCurrency(plannedDueSen)})` : ""}.
+        </div>
+      )}
+      {(cur?.tickWarnings.length ?? 0) > 0 && (
+        <div className="rounded-md bg-[#F7E5E1] border border-[#D9A79C] px-3 py-2 text-xs text-[#9A3A2D]">
+          ⚠ Ticked as cleared, but the bank statement for that month has NO such transaction — check these:
+          {cur!.tickWarnings.map((wr) => ` ${wr.sourceId || wr.day} (${formatCurrency(Math.abs(wr.amountSen))})`).join(" ·")}
+        </div>
+      )}
+      {!cur ? (
+        <Card><CardContent className="p-8 text-center text-sm text-[#9CA3AF]">Loading…</CardContent></Card>
+      ) : (
+        <div ref={boardRef} className="space-y-4">
+          {cur.accounts.map((a) => (
+            <Card key={a.code}>
+              <CardContent className="p-0">
+                <div className="flex items-center justify-between flex-wrap gap-2 px-4 py-3 bg-[#1F2937] rounded-t-lg">
+                  <div className="text-sm font-semibold text-white">{a.code} {a.name}{!a.reconciled && <span className="ml-2 text-[10px] font-normal text-[#D1D5DB]">book only — no statements imported</span>}</div>
+                  <div className="text-sm text-white">Bank balance (est.) <span className="font-bold tabular-nums">{formatCurrency(a.bankEstSen)}</span></div>
+                </div>
+                {a.unbookedCount > 0 && (
+                  <div className="px-4 py-1.5 text-[11px] text-[#7A5B12] bg-[#FBF3E4]">
+                    Includes {a.unbookedCount} bank item{a.unbookedCount === 1 ? "" : "s"} not booked yet ({formatCurrency(a.unbookedSen)}) — record them via the Cash Book.
+                  </div>
+                )}
+                {a.pending.length > 0 && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                          <th className="px-3 py-2 text-left">✓</th>
+                          <th className="px-3 py-2 text-left">Date</th>
+                          <th className="px-3 py-2 text-left">PV No.</th>
+                          <th className="px-3 py-2 text-left">Description</th>
+                          <th className="px-3 py-2 text-right">Received</th>
+                          <th className="px-3 py-2 text-right">Pending payment</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {a.pending.map((p) => (
+                          <tr key={p.legId} className={`border-b border-[#F0ECE9] ${p.ticked ? "opacity-45" : ""}`}>
+                            <td className="px-3 py-1">
+                              <input
+                                type="checkbox"
+                                checked={p.ticked}
+                                onChange={(e) => void handleTick(a, p.legId, e.target.checked)}
+                                className="h-4 w-4 accent-[#27500A] cursor-pointer"
+                                title={p.ticked ? "Untick — it has NOT gone through after all" : "Tick — my banking app shows this went through"}
+                              />
+                            </td>
+                            <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{p.day}</td>
+                            <td className="px-3 py-1 text-xs whitespace-nowrap">{p.sourceId}</td>
+                            <td className="px-3 py-1 text-xs w-full max-w-0"><div className="truncate" title={p.description}>{p.description}</div></td>
+                            <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap text-[#27500A]">{tdInC(p.amountSen)}</td>
+                            <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdOutC(p.amountSen)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {a.oldPendingCount > 0 && (
+                  <div className="px-4 py-1.5 text-[11px] text-[#9CA3AF] border-t border-[#F0ECE9]">
+                    Older reconciliation items (before the last finalised month): {a.oldPendingCount} · {formatCurrency(a.oldPendingSen)} — handle them in the Cash Book. Still counted in the maths above.
+                  </div>
+                )}
+                <div className="flex justify-between px-4 py-2.5 bg-[#EAF3DE]/60 rounded-b-lg text-sm font-medium">
+                  <span>Available (after pending)</span>
+                  <span className="tabular-nums font-bold">{formatCurrency(a.availableSen)}</span>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+          <Card>
+            <CardContent className="p-4 flex justify-between items-center">
+              <span className="text-sm font-semibold text-[#1F1D1B]">CURRENT CASH AVAILABLE</span>
+              <span className="text-xl font-bold tabular-nums text-[#27500A]">{formatCurrency(cur.totalAvailableSen + (isFuture ? -plannedDueSen : 0))}</span>
+            </CardContent>
+          </Card>
+          {showPlanned && (
+            <Card>
+              <CardContent className="p-0">
+                <div className="px-4 py-2.5 border-b border-[#E2DDD8] text-sm font-semibold text-[#1F1D1B]">Planned payments <span className="text-[11px] font-normal text-[#9CA3AF]">— no voucher yet, just intentions; used by future-date projections</span></div>
+                {(cur.planned.length > 0) && (
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {cur.planned.map((p) => (
+                        <tr key={p.id} className="border-b border-[#F0ECE9]">
+                          <td className="px-4 py-1 text-xs text-[#6B7280] whitespace-nowrap">{p.expectedDate}</td>
+                          <td className="px-4 py-1 text-xs w-full max-w-0"><div className="truncate">{p.partyName}{p.ref ? ` · ${p.ref}` : ""}</div></td>
+                          <td className="px-4 py-1 text-right tabular-nums text-xs whitespace-nowrap">{formatCurrency(p.amountSen)}</td>
+                          <td className="px-4 py-1 text-right"><button onClick={() => void deletePlanned(p.id)} className="text-[#9CA3AF] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">del</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                <div className="flex flex-wrap items-end gap-2 px-4 py-3">
+                  <input value={planForm.party} onChange={(e) => setPlanForm({ ...planForm, party: e.target.value })} placeholder="Pay to…" className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm w-48" />
+                  <input value={planForm.ref} onChange={(e) => setPlanForm({ ...planForm, ref: e.target.value })} placeholder="Ref (optional)" className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm w-36" />
+                  <input type="date" value={planForm.date} onChange={(e) => setPlanForm({ ...planForm, date: e.target.value })} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+                  <input value={planForm.amount} onChange={(e) => setPlanForm({ ...planForm, amount: e.target.value })} placeholder="Amount (RM)" inputMode="decimal" className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm w-32 text-right" />
+                  <Button variant="outline" size="sm" onClick={() => void addPlanned()}>+ Add</Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+            <CashPosPartyPanel
+              title="TO REPAY — Suppliers & creditors"
+              rows={repayRows}
+              amountOf={repayAmt}
+              scope={!repayAll} scopeLabel="Before this month" scopeAlt="All outstanding"
+              onScope={() => setRepayAll(!repayAll)}
+              tone="pay"
+            />
+            <CashPosPartyPanel
+              title="TO RECEIVE — Customers"
+              rows={recvRows}
+              amountOf={recvAmt}
+              scope={!recvAll} scopeLabel="Due now (per terms)" scopeAlt="All outstanding"
+              onScope={() => setRecvAll(!recvAll)}
+              tone="receive"
+              collapseUpTo={cur.openingMonth ?? null}
+              collapseLabel={cur.openingMonth ? `Opening era (≤ ${cur.openingMonth})` : "Opening era"}
+            />
+          </div>
+          <Card>
+            <CardContent className="p-4">
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-semibold text-[#1F1D1B]">CASH AFTER REPAY &amp; RECEIVE</span>
+                <span className={`text-xl font-bold tabular-nums ${netAfterSen >= 0 ? "text-[#27500A]" : "text-[#9A3A2D]"}`}>{formatCurrency(netAfterSen)}</span>
+              </div>
+              <div className="text-[11px] text-[#9CA3AF] text-right mt-0.5">
+                = available {formatCurrency(cur.totalAvailableSen)} − to repay {formatCurrency(repayShownSen)} + to receive {formatCurrency(recvShownSen)} (current scopes)
+              </div>
+            </CardContent>
+          </Card>
+          <p className="text-[11px] text-[#9CA3AF]">
+            Repay / Receive use the SAME rules as Creditor & Debtor Aging, grouped by invoice month; a green negative
+            row is money already received but not yet knocked to invoices. TF / loans are not included here — they live
+            on the AP tab's Trade Finance block.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 type RecoLeg = { id: string; day: string; description: string; sourceType: string; sourceId: string; amountSen: number; matched: boolean };
-type RecoLine = { id: string; txnDate: string; description: string | null; amountSen: number; matchedLegId: string | null; matchedAt: string | null };
+type RecoLine = {
+  id: string; txnDate: string; description: string | null; amountSen: number;
+  matchedLegId: string | null; matchedAt: string | null;
+  ignoredAt?: string | null; ignored_at?: string | null;
+  stmtMonth?: string | null; balanceSen?: number | null;
+};
+type RecoOutstanding = { day: string; description: string; amountSen: number };
+// The frozen record a Finalise press stores — shown instead of the live
+// figures once a month is closed, with a drift warning if the ledger moved.
+type RecoFinal = {
+  finalizedAt: string;
+  statementClosingSen: number | null; statementOpeningSen: number | null;
+  glSen: number; computedGlSen: number | null; balanced: boolean;
+  unclearedBookSen: number; unclearedBookCount: number;
+  unbookedStmtSen: number; unbookedStmtCount: number;
+  unclearedBook?: RecoOutstanding[];
+  unbookedStmt?: RecoOutstanding[];
+};
+type RecoReport = {
+  statementClosingSen: number | null; statementOpeningSen: number | null; importedAt: string | null;
+  unclearedBookSen: number; unclearedBookCount: number;
+  unbookedStmtSen: number; unbookedStmtCount: number;
+  glSen: number; computedGlSen: number | null; balanced: boolean;
+  final?: RecoFinal | null;
+};
 
 function parseCsvLine(line: string): string[] {
   const out: string[] = [];
@@ -9588,13 +10354,31 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     (a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH",
   );
   const [account, setAccount] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [data, setData] = useState<{ migrationMissing: boolean; legs: RecoLeg[]; statementLines: RecoLine[] } | null>(null);
+  // Monthly session view (owner 2026-09-01 「每个月我upload文件自动对账」+
+  // 「现在太乱了」): one month at a time, with earlier unmatched leftovers
+  // pulled in so last month's in-transit cheques can still be ticked off.
+  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [includeEarlier, setIncludeEarlier] = useState(true);
+  const [data, setData] = useState<{ migrationMissing: boolean; openingDate?: string | null; finalizedMonths?: string[]; legs: RecoLeg[]; statementLines: RecoLine[] } | null>(null);
+  const [report, setReport] = useState<RecoReport | null>(null);
   const [showImport, setShowImport] = useState(false);
   const [csv, setCsv] = useState("");
   const [map, setMap] = useState({ date: "1", desc: "2", out: "3", in: "4", header: true, fmt: "DD/MM/YYYY" });
   const [busy, setBusy] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [preview, setPreview] = useState<{
+    fileName: string; month: string;
+    rows: { date: string; description: string; amountSen: number; balanceSen: number | null }[];
+    meta: { openingSen: number; closingSen: number; totalInSen: number; totalOutSen: number; countIn: number; countOut: number };
+    warnings: string[];
+  } | null>(null);
+  const pdfInputRef = useRef<HTMLInputElement | null>(null);
+  // Day-by-day book vs bank (owner 2026-09-03 「2 要优化」) — fetched lazily
+  // when its fold is opened. Keyed by account:month so a stale month's rows
+  // never render for the current view (no reset-in-effect needed).
+  const [daily, setDaily] = useState<{ key: string; days: { day: string; bookSen: number; bankSen: number | null; diffSen: number | null }[] } | null>(null);
+  const from = includeEarlier ? "" : `${month}-01`;
+  const to = `${month}-31`;
 
   const load = useCallback(() => {
     if (!account) return;
@@ -9602,11 +10386,89 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     if (from) p.set("from", from);
     if (to) p.set("to", to);
     fetch(`/api/accounting/bank-reco?${p.toString()}`)
-      .then((r) => r.json() as Promise<{ success?: boolean; data?: { migrationMissing: boolean; legs: RecoLeg[]; statementLines: RecoLine[] } }>)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { migrationMissing: boolean; openingDate?: string | null; finalizedMonths?: string[]; legs: RecoLeg[]; statementLines: RecoLine[] } }>)
       .then((j) => { if (j?.success && j.data) setData(j.data); })
       .catch(() => {});
-  }, [account, from, to]);
+    fetch(`/api/accounting/bank-reco/report?account=${encodeURIComponent(account)}&month=${month}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: RecoReport }>)
+      .then((j) => { if (j?.success && j.data) setReport(j.data); else setReport(null); })
+      .catch(() => setReport(null));
+  }, [account, from, to, month]);
   useEffect(() => { load(); }, [load]);
+
+  // Upload the bank's own PDF (HLBB) → parse client-side with the
+  // triple-locked parser → preview → import as this month's session.
+  const handlePdfFile = async (file: File) => {
+    if (!account) { toast.error("Pick an account first"); return; }
+    setPdfBusy(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const pdfjsLib = await import("pdfjs-dist");
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      const items: { str: string; x: number; y: number; w: number; page: number }[] = [];
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+        const vp = page.getViewport({ scale: 1 });
+        const tc = await page.getTextContent();
+        for (const it of tc.items) {
+          const t = it as { str?: string; transform?: number[]; width?: number };
+          if (!t.str || !t.str.trim() || !t.transform) continue;
+          items.push({ str: t.str, x: t.transform[4], y: vp.height - t.transform[5], w: t.width ?? 0, page: p });
+        }
+      }
+      const { parseHlbbStatement } = await import("@/lib/hlbb-statement");
+      const parsed = parseHlbbStatement(items);
+      if (parsed.errors.length) {
+        toast.error(`Statement refused: ${parsed.errors[0]}`);
+        setPreview(null);
+        return;
+      }
+      const stmtMonth = parsed.rows[0]?.date.slice(0, 7) ?? month;
+      setPreview({
+        fileName: file.name,
+        month: stmtMonth,
+        rows: parsed.rows,
+        meta: {
+          openingSen: parsed.openingSen, closingSen: parsed.closingSen,
+          totalInSen: parsed.totalInSen, totalOutSen: parsed.totalOutSen,
+          countIn: parsed.countIn, countOut: parsed.countOut,
+        },
+        warnings: parsed.warnings,
+      });
+    } catch {
+      toast.error("Could not read that PDF");
+    } finally {
+      setPdfBusy(false);
+      if (pdfInputRef.current) pdfInputRef.current.value = "";
+    }
+  };
+
+  const confirmPdfImport = async () => {
+    if (!preview) return;
+    setPdfBusy(true);
+    try {
+      const res = await fetch("/api/accounting/bank-reco/import-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountCode: account, month: preview.month, lines: preview.rows, meta: preview.meta }),
+      });
+      const j = await res.json() as { success?: boolean; data?: { imported: number; skippedDupes: number }; error?: string };
+      if (!j?.success) { toast.error(j?.error || "Import failed"); return; }
+      const am = await fetch("/api/accounting/bank-reco/automatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountCode: account, from: "", to: `${preview.month}-31` }),
+      });
+      const aj = await am.json() as { success?: boolean; data?: { matched: number } };
+      toast.success(`${j.data?.imported ?? 0} lines imported · ${aj?.data?.matched ?? 0} auto-matched`);
+      setMonth(preview.month);
+      setPreview(null);
+      load();
+    } finally {
+      setPdfBusy(false);
+    }
+  };
 
   const parseDate = (s: string): string | null => {
     const v = s.trim();
@@ -9733,19 +10595,148 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     else toast.error(j?.error || "Delete failed");
   };
 
+  const handleIgnore = async (lineId: string, ignored: boolean) => {
+    const res = await fetch("/api/accounting/bank-reco/ignore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ statementLineId: lineId, ignored }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load();
+    else toast.error(j?.error || "Update failed");
+  };
+
+  // Freeze / unfreeze the month (owner 2026-09-02: 「match 完了就要 save 起来」).
+  const handleFinalize = async (reopen: boolean) => {
+    if (!account) return;
+    if (!reopen && report && !report.balanced) {
+      const gap = formatCurrency(Math.abs((report.computedGlSen ?? 0) - report.glSen));
+      if (!window.confirm(`Still out by ${gap}. Finalise anyway? The saved record will carry the difference.`)) return;
+    }
+    if (reopen && !window.confirm("Re-open this month? The saved reconciliation record is removed and its lines can be changed again.")) return;
+    setBusy(true);
+    try {
+      const res = await fetch("/api/accounting/bank-reco/finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountCode: account, month, reopen }),
+      });
+      const j = asMutationResponse(await res.json());
+      if (j?.success) {
+        toast.success(reopen ? "Month re-opened" : "Reconciliation finalised — saved for good");
+        load();
+      } else toast.error(j?.error || "Failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Print the SAVED record (never the live view — the point of finalising is
+  // that the paper matches the snapshot).
+  const printFinal = () => {
+    const f = report?.final;
+    if (!f) return;
+    const acct = bankCash.find((a) => a.code === account);
+    const rm = (n: number | null | undefined) => (n == null ? "—" : formatCurrency(n));
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const rows = (items: RecoOutstanding[] | undefined, title: string) =>
+      !items || items.length === 0
+        ? `<h3>${title} — none</h3>`
+        : `<h3>${title} (${items.length})</h3><table><thead><tr><th>Date</th><th>Description</th><th class="r">Amount (RM)</th></tr></thead><tbody>${items
+            .map((i) => `<tr><td>${i.day}</td><td>${esc(i.description || "")}</td><td class="r">${formatCurrency(i.amountSen)}</td></tr>`)
+            .join("")}</tbody></table>`;
+    const w = window.open("", "_blank", "width=900,height=700");
+    if (!w) { toast.error("Pop-up blocked — allow pop-ups to print"); return; }
+    w.document.write(`<!doctype html><html><head><title>Bank Reconciliation ${month}</title><style>
+      body{font-family:Arial,sans-serif;font-size:12px;color:#111;margin:32px}
+      h1{font-size:18px;margin:0 0 2px} h2{font-size:13px;font-weight:normal;color:#555;margin:0 0 16px}
+      h3{font-size:13px;margin:18px 0 6px}
+      table{border-collapse:collapse;width:100%} td,th{border:1px solid #ccc;padding:4px 8px;text-align:left}
+      .r{text-align:right;font-variant-numeric:tabular-nums}
+      .formula td{border:none;padding:3px 8px} .formula .line td{border-top:1px solid #111}
+      .badge{display:inline-block;padding:2px 10px;border:1px solid #111;border-radius:10px;font-weight:bold}
+      footer{margin-top:24px;color:#777;font-size:10px}
+    </style></head><body>
+      <h1>Bank Reconciliation Statement — ${month}</h1>
+      <h2>${account} ${acct ? esc(acct.name) : ""} · finalised ${String(f.finalizedAt).slice(0, 10)}</h2>
+      <p class="badge">${f.balanced ? "BALANCED" : "OUT BY " + formatCurrency(Math.abs((f.computedGlSen ?? 0) - f.glSen))}</p>
+      <table class="formula">
+        <tr><td>Balance per bank statement</td><td class="r">${rm(f.statementClosingSen)}</td></tr>
+        <tr><td>+ In the book, not yet in the bank (${f.unclearedBookCount})</td><td class="r">${rm(f.unclearedBookSen)}</td></tr>
+        <tr><td>− In the bank, not yet in the book (${f.unbookedStmtCount})</td><td class="r">${rm(f.unbookedStmtSen)}</td></tr>
+        <tr class="line"><td><b>= Book balance should be</b></td><td class="r"><b>${rm(f.computedGlSen)}</b></td></tr>
+        <tr><td><b>Book balance per general ledger</b></td><td class="r"><b>${rm(f.glSen)}</b></td></tr>
+      </table>
+      ${rows(f.unclearedBook, "Outstanding — in the book, not yet through the bank")}
+      ${rows(f.unbookedStmt, "Outstanding — in the bank, not yet in the book")}
+      <footer>Generated by Hookka ERP · finalised ${esc(String(f.finalizedAt))}</footer>
+    </body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  };
+
+  const dailyKey = `${account}:${month}`;
+  const dailyRows = daily?.key === dailyKey ? daily.days : null;
+  const loadDaily = async () => {
+    if (!account) return;
+    try {
+      const r = await fetch(`/api/accounting/bank-reco/daily?account=${encodeURIComponent(account)}&month=${month}`);
+      const j = await r.json() as { success?: boolean; data?: { days: { day: string; bookSen: number; bankSen: number | null; diffSen: number | null }[] } };
+      if (j?.success && j.data) setDaily({ key: dailyKey, days: j.data.days });
+    } catch { /* fold shows loading text; retry by reopening */ }
+  };
+
   const legs = data?.legs ?? [];
   const stmt = data?.statementLines ?? [];
-  const unmatchedLegs = legs.filter((l) => !l.matched);
-  const unmatchedStmt = stmt.filter((s) => !s.matchedLegId);
+  const recoFinal = report?.final ?? null;
+  const finalDrift = !!(recoFinal && report &&
+    (recoFinal.glSen !== report.glSen || (recoFinal.computedGlSen ?? null) !== (report.computedGlSen ?? null)));
+  const isFinalMonth = (d: string) => (data?.finalizedMonths ?? []).includes(d.slice(0, 7));
+  // Dual-key read of the ignore stamp (BUG class C1 — adapter camelCases).
+  const ignAt = (s: RecoLine) => s.ignoredAt ?? s.ignored_at ?? null;
+  // Bank lines dated before the opening date are already inside the keyed
+  // opening balance — they live in their own section, out of the matching
+  // and the report (BUG-2026-09-02-174).
+  const obDate = data?.openingDate ?? null;
+  const isPre = (s: RecoLine) => !!obDate && s.txnDate < obDate;
+  const legsSorted = [...legs].sort((a, b) => a.day.localeCompare(b.day));
+  const stmtSorted = [...stmt].sort((a, b) => a.txnDate.localeCompare(b.txnDate));
+  const unmatchedLegs = legsSorted.filter((l) => !l.matched);
+  // Owner 2026-09-03: earlier months' SETTLED lines (matched/ignored/
+  // before-opening) must not follow into the current month's view —
+  // "include earlier" exists ONLY to carry forward earlier月 UNMATCHED
+  // leftovers. Settled buckets are month-scoped; the open bucket keeps
+  // earlier leftovers (tagged "earlier").
+  const inMonth = (s: RecoLine) => (s.stmtMonth ?? s.txnDate.slice(0, 7)) === month;
+  const preStmt = stmtSorted.filter((s) => isPre(s) && inMonth(s));
+  const unmatchedStmt = stmtSorted.filter((s) => !isPre(s) && !s.matchedLegId && !ignAt(s));
+  const matchedStmt = stmtSorted.filter((s) => !isPre(s) && !!s.matchedLegId && inMonth(s));
+  const ignoredStmt = stmtSorted.filter((s) => !isPre(s) && !s.matchedLegId && !!ignAt(s) && inMonth(s));
+  const earlierOpenCount = unmatchedStmt.filter((s) => !inMonth(s)).length;
+  const monthLineCount = stmtSorted.filter(inMonth).length;
   const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
-  const amtCls = (n: number) => `tabular-nums ${n < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`;
+  // Owner 2026-09-01 「现在太乱了」: signed red numbers everywhere read as a
+  // wall of errors. Split into positive In / Out columns instead.
+  const tdIn = (n: number) => (n > 0 ? formatCurrency(n) : "");
+  const tdOut = (n: number) => (n < 0 ? formatCurrency(-n) : "");
 
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Cash Book · Bank Reconciliation</h2>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" disabled={!account} onClick={() => setShowImport(!showImport)}>Import statement</Button>
+          <input
+            ref={pdfInputRef}
+            type="file"
+            accept="application/pdf"
+            className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void handlePdfFile(f); }}
+          />
+          <Button variant="primary" size="sm" disabled={!account || pdfBusy} onClick={() => pdfInputRef.current?.click()}>
+            {pdfBusy ? "Reading…" : "Upload bank PDF"}
+          </Button>
+          <Button variant="outline" size="sm" disabled={!account} onClick={() => setShowImport(!showImport)}>Import CSV</Button>
           <Button variant="outline" size="sm" disabled={!account || busy || unmatchedStmt.length === 0} onClick={handleAutoMatch}>Auto-match</Button>
         </div>
       </div>
@@ -9754,22 +10745,37 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
         <CardContent className="p-4 flex flex-wrap items-end gap-4 bg-[#F7F4EF] rounded-lg">
           <div>
             <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Bank / Cash account</label>
-            <select value={account} onChange={(e) => { setAccount(e.target.value); setData(null); }} className={`${selCls} w-72`}>
+            <select value={account} onChange={(e) => { setAccount(e.target.value); setData(null); setReport(null); }} className={`${selCls} w-72`}>
               <option value="">— pick account —</option>
               {bankCash.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
             </select>
           </div>
           <div>
-            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">From</label>
-            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className={selCls} />
+            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Month</label>
+            <input type="month" value={month} onChange={(e) => { if (e.target.value) setMonth(e.target.value); }} className={selCls} />
           </div>
-          <div>
-            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">To</label>
-            <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className={selCls} />
-          </div>
+          <label className="flex items-center gap-2 text-sm pb-2 cursor-pointer">
+            <input type="checkbox" checked={includeEarlier} onChange={(e) => setIncludeEarlier(e.target.checked)} className="h-4 w-4 accent-[#6B5C32]" />
+            Include earlier unmatched items
+          </label>
           {data && !data.migrationMissing && (
             <div className="text-sm text-[#6B7280] pb-1">
-              Book {legs.length} legs ({unmatchedLegs.length} unmatched) · Statement {stmt.length} lines ({unmatchedStmt.length} unmatched)
+              Statement {monthLineCount} lines this month ({unmatchedStmt.length - earlierOpenCount} open{ignoredStmt.length > 0 ? ` · ${ignoredStmt.length} ignored` : ""}{preStmt.length > 0 ? ` · ${preStmt.length} before opening` : ""}){earlierOpenCount > 0 ? ` + ${earlierOpenCount} earlier open` : ""} · Book {legs.length} legs ({unmatchedLegs.length} open)
+            </div>
+          )}
+          {(data?.finalizedMonths?.length ?? 0) > 0 && (
+            <div className="flex items-center gap-1.5 pb-1.5 flex-wrap w-full">
+              <span className="text-[11px] text-[#6B7280]">Finalised months:</span>
+              {(data?.finalizedMonths ?? []).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setMonth(m)}
+                  className={`rounded-full px-2 py-0.5 text-[11px] border cursor-pointer ${m === month ? "bg-[#EAF3DE] border-[#27500A] text-[#27500A] font-semibold" : "bg-white border-[#E2DDD8] text-[#6B7280] hover:border-[#27500A] hover:text-[#27500A]"}`}
+                  title="Open this month's saved reconciliation"
+                >
+                  ✓ {m}
+                </button>
+              ))}
             </div>
           )}
         </CardContent>
@@ -9777,6 +10783,133 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
       {data?.migrationMissing && (
         <Card><CardContent className="p-4 text-sm text-[#9A3A2D]">Migration 0160 not applied yet — run the paste-version SQL first.</CardContent></Card>
+      )}
+
+      {preview && (
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <div className="text-sm font-semibold text-[#1F1D1B]">{preview.fileName}</div>
+                <div className="text-xs text-[#27500A]">Statement month {preview.month} · {preview.rows.length} transactions · every balance check passed ✓</div>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" disabled={pdfBusy} onClick={() => setPreview(null)}>Cancel</Button>
+                <Button variant="primary" size="sm" disabled={pdfBusy} onClick={confirmPdfImport}>
+                  {pdfBusy ? "Importing…" : `Import ${preview.rows.length} lines & auto-match`}
+                </Button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+              <div className="rounded-md bg-[#F7F4EF] p-2"><div className="text-[11px] text-[#6B7280]">Opening</div><div className="tabular-nums">{formatCurrency(preview.meta.openingSen)}</div></div>
+              <div className="rounded-md bg-[#F7F4EF] p-2"><div className="text-[11px] text-[#6B7280]">Money in ({preview.meta.countIn})</div><div className="tabular-nums">{formatCurrency(preview.meta.totalInSen)}</div></div>
+              <div className="rounded-md bg-[#F7F4EF] p-2"><div className="text-[11px] text-[#6B7280]">Money out ({preview.meta.countOut})</div><div className="tabular-nums">{formatCurrency(preview.meta.totalOutSen)}</div></div>
+              <div className="rounded-md bg-[#F7F4EF] p-2"><div className="text-[11px] text-[#6B7280]">Closing</div><div className="tabular-nums font-semibold">{formatCurrency(preview.meta.closingSen)}</div></div>
+            </div>
+            {preview.warnings.length > 0 && (
+              <ul className="text-[11px] text-[#9A3A2D] list-disc pl-4">
+                {preview.warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            )}
+            <p className="text-[11px] text-[#9CA3AF]">
+              Importing replaces this month's unmatched statement lines; lines you already matched are kept.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {account && data && !data.migrationMissing && report?.importedAt && !preview && (
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+              <div className="text-sm font-semibold text-[#1F1D1B]">
+                Reconciliation — {month}
+                {recoFinal && <span className="ml-2 text-[11px] font-normal text-[#6B7280]">finalised {String(recoFinal.finalizedAt).slice(0, 10)}</span>}
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {recoFinal ? (
+                  <span className={`rounded-full text-xs font-semibold px-2.5 py-0.5 ${recoFinal.balanced ? "bg-[#EAF3DE] text-[#27500A]" : "bg-[#F7E5E1] text-[#9A3A2D]"}`}>
+                    🔒 Finalised{recoFinal.balanced ? " · Balanced ✓" : ` · out by ${formatCurrency(Math.abs((recoFinal.computedGlSen ?? 0) - recoFinal.glSen))}`}
+                  </span>
+                ) : report.balanced ? (
+                  <span className="rounded-full bg-[#EAF3DE] text-[#27500A] text-xs font-semibold px-2.5 py-0.5">Balanced ✓</span>
+                ) : (
+                  <span className="rounded-full bg-[#F7E5E1] text-[#9A3A2D] text-xs font-semibold px-2.5 py-0.5">
+                    Out by {formatCurrency(Math.abs((report.computedGlSen ?? 0) - report.glSen))} · book {(report.computedGlSen ?? 0) - report.glSen < 0 ? "above" : "below"} bank
+                  </span>
+                )}
+                {recoFinal ? (
+                  <>
+                    <Button variant="outline" size="sm" onClick={printFinal}>Print</Button>
+                    <Button variant="outline" size="sm" disabled={busy} onClick={() => handleFinalize(true)}>Re-open</Button>
+                  </>
+                ) : (
+                  <Button variant={report.balanced ? "primary" : "outline"} size="sm" disabled={busy} onClick={() => handleFinalize(false)}>
+                    Finalise this month
+                  </Button>
+                )}
+              </div>
+            </div>
+            {finalDrift && report && recoFinal && (
+              <div className="mb-2 rounded-md bg-[#FBF3E4] border border-[#E0C989] px-3 py-2 text-xs text-[#7A5B12]">
+                ⚠ The books have MOVED since this month was finalised — book balance now {formatCurrency(report.glSen)} vs saved {formatCurrency(recoFinal.glSen)}.
+                Something dated in or before {month} was added or changed. Check what, then Re-open and finalise again.
+              </div>
+            )}
+            {(() => { const shown = recoFinal ?? report; return (
+              <table className="text-sm w-full max-w-md">
+                <tbody>
+                  <tr><td className="py-0.5 text-[#6B7280]">Bank statement closing balance</td><td className="py-0.5 text-right tabular-nums">{shown.statementClosingSen != null ? formatCurrency(shown.statementClosingSen) : "—"}</td></tr>
+                  <tr><td className="py-0.5 text-[#6B7280]">+ In the book, not yet in the bank ({shown.unclearedBookCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(shown.unclearedBookSen)}</td></tr>
+                  <tr><td className="py-0.5 text-[#6B7280]">− In the bank, not yet in the book ({shown.unbookedStmtCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(shown.unbookedStmtSen)}</td></tr>
+                  <tr className="border-t border-[#E2DDD8]"><td className="py-0.5 font-medium">= Book balance should be</td><td className="py-0.5 text-right tabular-nums font-medium">{shown.computedGlSen != null ? formatCurrency(shown.computedGlSen) : "—"}</td></tr>
+                  <tr><td className="py-0.5 font-medium">Book balance {recoFinal ? "at finalising" : "today"} (GL {account})</td><td className="py-0.5 text-right tabular-nums font-medium">{formatCurrency(shown.glSen)}</td></tr>
+                </tbody>
+              </table>
+            ); })()}
+          </CardContent>
+        </Card>
+      )}
+
+      {account && data && !data.migrationMissing && report?.importedAt && !preview && (
+        <details
+          className="rounded-lg border border-[#E2DDD8] bg-white"
+          onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && !dailyRows) void loadDaily(); }}
+        >
+          <summary className="cursor-pointer px-4 py-2 text-sm font-medium text-[#1F1D1B]">
+            Daily book vs bank <span className="font-normal text-[11px] text-[#6B7280]">— the day the difference changes is the day something went missing</span>
+          </summary>
+          <div className="overflow-x-auto">
+            {!dailyRows ? (
+              <div className="px-4 py-4 text-sm text-[#9CA3AF]">Loading…</div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left">Day</th>
+                    <th className="px-3 py-2 text-right">Bank balance</th>
+                    <th className="px-3 py-2 text-right">Book balance</th>
+                    <th className="px-3 py-2 text-right">Difference (book − bank)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dailyRows.map((d, i) => {
+                    const prev = i > 0 ? dailyRows[i - 1].diffSen : null;
+                    const changed = d.diffSen !== null && prev !== null && d.diffSen !== prev;
+                    return (
+                      <tr key={d.day} className={`border-b border-[#F0ECE9] ${changed ? "bg-[#FBF3E4]" : ""}`}>
+                        <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{d.day}{changed && <span className="ml-1 text-[10px] text-[#7A5B12]">▲ changed</span>}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{d.bankSen != null ? formatCurrency(d.bankSen) : "—"}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{formatCurrency(d.bookSen)}</td>
+                        <td className={`px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap ${changed ? "font-semibold text-[#7A5B12]" : d.diffSen === 0 ? "text-[#27500A]" : ""}`}>{d.diffSen != null ? formatCurrency(d.diffSen) : "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </details>
       )}
 
       {showImport && (
@@ -9827,73 +10960,88 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
       )}
 
       {account && data && !data.migrationMissing && (
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          {/* Statement side */}
+        <div className="grid grid-cols-1 gap-4 items-start">
+          {/* Bank side — open lines */}
           <Card>
             <CardContent className="p-0 overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                    <th className="px-3 py-2 text-left" colSpan={4}>Bank statement ({stmt.length})</th>
+                    <th className="px-3 py-2 text-left" colSpan={2}>Bank statement — to match ({unmatchedStmt.length})</th>
+                    <th className="px-3 py-2 text-right">In</th>
+                    <th className="px-3 py-2 text-right">Out</th>
+                    <th className="px-3 py-2 text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {stmt.map((s) => {
+                  {unmatchedStmt.map((s) => {
                     const candidates = unmatchedLegs.filter((l) => l.amountSen === s.amountSen);
+                    const earlier = s.txnDate.slice(0, 7) < month;
                     return (
-                      <tr key={s.id} className={`border-b border-[#F0ECE9] ${s.matchedLegId ? "bg-[#EAF3DE]/40" : ""}`}>
-                        <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
-                        <td className="px-3 py-1.5 text-xs">{s.description}</td>
-                        <td className={`px-3 py-1.5 text-right ${amtCls(s.amountSen)}`}>{formatCurrency(s.amountSen)}</td>
+                      <tr key={s.id} className="border-b border-[#F0ECE9]">
+                        <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">
+                          {s.txnDate}
+                          {earlier && <span className="ml-1 rounded bg-[#F0ECE9] px-1 text-[10px]">earlier</span>}
+                        </td>
+                        <td className="px-3 py-1.5 text-xs w-full max-w-0"><div className="truncate" title={s.description ?? ""}>{s.description}</div></td>
+                        <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdOut(s.amountSen)}</td>
                         <td className="px-3 py-1.5 text-right whitespace-nowrap">
-                          {s.matchedLegId ? (
-                            <button onClick={() => handleUnmatch(s.id)} className="text-[#6B7280] hover:text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer" title="Matched — click to unmatch">✓ unmatch</button>
-                          ) : candidates.length > 0 ? (
-                            <select defaultValue="" onChange={(e) => handleMatch(s.id, e.target.value)} className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] max-w-44">
-                              <option value="">match to…</option>
-                              {candidates.map((l) => (
-                                <option key={l.id} value={l.id}>{l.day} {l.description.slice(0, 30)}</option>
-                              ))}
-                            </select>
+                          {isFinalMonth(s.txnDate) ? (
+                            <span className="text-[11px] text-[#9CA3AF]" title="Month finalised — re-open it on the report card to change anything">🔒 finalised</span>
                           ) : (
                             <>
-                              <span className="text-[11px] text-[#9A3A2D] mr-2">no book entry</span>
-                              <button onClick={() => handleDeleteLine(s.id)} className="text-[#9CA3AF] hover:text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer">del</button>
+                              {candidates.length > 0 ? (
+                                <select defaultValue="" onChange={(e) => handleMatch(s.id, e.target.value)} className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] max-w-40">
+                                  <option value="">match to…</option>
+                                  {candidates.map((l) => (
+                                    <option key={l.id} value={l.id}>{l.day} {l.description.slice(0, 30)}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <span className="text-[11px] text-[#9A3A2D]">not in book</span>
+                              )}
+                              <button onClick={() => handleIgnore(s.id, true)} className="ml-2 text-[#9CA3AF] hover:text-[#1F1D1B] text-[11px] underline decoration-dotted cursor-pointer" title="Leave this line out of the reconciliation">ignore</button>
+                              <button onClick={() => handleDeleteLine(s.id)} className="ml-1.5 text-[#9CA3AF] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">del</button>
                             </>
                           )}
                         </td>
                       </tr>
                     );
                   })}
-                  {stmt.length === 0 && (
-                    <tr><td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={4}>No statement lines in this window — import one</td></tr>
+                  {unmatchedStmt.length === 0 && (
+                    <tr>
+                      <td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={5}>
+                        {stmt.length === 0 ? "No statement lines yet — Upload bank PDF above" : "Every statement line is matched ✓"}
+                      </td>
+                    </tr>
                   )}
                 </tbody>
               </table>
             </CardContent>
           </Card>
-          {/* Book side */}
+          {/* Book side — open legs */}
           <Card>
             <CardContent className="p-0 overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                    <th className="px-3 py-2 text-left" colSpan={4}>Book (ledger {account}) — {legs.length} legs</th>
+                    <th className="px-3 py-2 text-left" colSpan={2}>Book — not yet in the bank ({unmatchedLegs.length})</th>
+                    <th className="px-3 py-2 text-right">In</th>
+                    <th className="px-3 py-2 text-right">Out</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {legs.map((l) => (
-                    <tr key={l.id} className={`border-b border-[#F0ECE9] ${l.matched ? "bg-[#EAF3DE]/40" : ""}`}>
+                  {unmatchedLegs.map((l) => (
+                    <tr key={l.id} className="border-b border-[#F0ECE9]">
                       <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{l.day}</td>
-                      <td className="px-3 py-1.5 text-xs">{l.description}</td>
-                      <td className={`px-3 py-1.5 text-right ${amtCls(l.amountSen)}`}>{formatCurrency(l.amountSen)}</td>
-                      <td className="px-3 py-1.5 text-right text-xs">
-                        {l.matched ? <span className="text-[#27500A]">✓</span> : <span className="text-[#9A3A2D]">not in bank</span>}
-                      </td>
+                      <td className="px-3 py-1.5 text-xs w-full max-w-0"><div className="truncate" title={l.description}>{l.description}</div></td>
+                      <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdIn(l.amountSen)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdOut(l.amountSen)}</td>
                     </tr>
                   ))}
-                  {legs.length === 0 && (
-                    <tr><td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={4}>No book entries in this window</td></tr>
+                  {unmatchedLegs.length === 0 && (
+                    <tr><td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={4}>Every book entry is matched ✓</td></tr>
                   )}
                 </tbody>
               </table>
@@ -9901,10 +11049,97 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
           </Card>
         </div>
       )}
+
+      {account && data && !data.migrationMissing && (matchedStmt.length > 0 || ignoredStmt.length > 0 || preStmt.length > 0) && (
+        <div className="grid grid-cols-1 gap-4 items-start">
+          {matchedStmt.length > 0 && (
+            <details className="rounded-lg border border-[#E2DDD8] bg-white">
+              <summary className="cursor-pointer px-4 py-2 text-sm font-medium text-[#1F1D1B]">Matched ({matchedStmt.length})</summary>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {matchedStmt.map((s) => (
+                      <tr key={s.id} className="border-b border-[#F0ECE9] bg-[#EAF3DE]/30">
+                        <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
+                        <td className="px-3 py-1 text-xs w-full max-w-0"><div className="truncate" title={s.description ?? ""}>{s.description}</div></td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdOut(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right whitespace-nowrap">
+                          {isFinalMonth(s.txnDate) ? (
+                            <span className="text-[11px] text-[#9CA3AF]">🔒</span>
+                          ) : (
+                            <button onClick={() => handleUnmatch(s.id)} className="text-[#6B7280] hover:text-[#9A3A2D] text-[11px] underline decoration-dotted cursor-pointer">✓ unmatch</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+          {preStmt.length > 0 && (
+            <details className="rounded-lg border border-[#E2DDD8] bg-white">
+              <summary className="cursor-pointer px-4 py-2 text-sm font-medium text-[#1F1D1B]">
+                Before opening ({preStmt.length}) <span className="font-normal text-[#6B7280]">— already inside the opening balance</span>
+              </summary>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {preStmt.map((s) => (
+                      <tr key={s.id} className="border-b border-[#F0ECE9] opacity-60">
+                        <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
+                        <td className="px-3 py-1 text-xs w-full max-w-0"><div className="truncate" title={s.description ?? ""}>{s.description}</div></td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdOut(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right whitespace-nowrap">
+                          {s.matchedLegId ? (
+                            <button onClick={() => handleUnmatch(s.id)} className="text-[#9A3A2D] hover:text-[#1F1D1B] text-[11px] underline decoration-dotted cursor-pointer" title="This match double-counts money that is already in the opening balance — unmatch it">wrong match — undo</button>
+                          ) : (
+                            <span className="text-[11px] text-[#9CA3AF]">in opening</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+          {ignoredStmt.length > 0 && (
+            <details className="rounded-lg border border-[#E2DDD8] bg-white">
+              <summary className="cursor-pointer px-4 py-2 text-sm font-medium text-[#1F1D1B]">Ignored ({ignoredStmt.length})</summary>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {ignoredStmt.map((s) => (
+                      <tr key={s.id} className="border-b border-[#F0ECE9] opacity-60">
+                        <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
+                        <td className="px-3 py-1 text-xs w-full max-w-0"><div className="truncate" title={s.description ?? ""}>{s.description}</div></td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdIn(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right tabular-nums text-xs whitespace-nowrap">{tdOut(s.amountSen)}</td>
+                        <td className="px-3 py-1 text-right whitespace-nowrap">
+                          {isFinalMonth(s.txnDate) ? (
+                            <span className="text-[11px] text-[#9CA3AF]">🔒</span>
+                          ) : (
+                            <button onClick={() => handleIgnore(s.id, false)} className="text-[#6B7280] hover:text-[#27500A] text-[11px] underline decoration-dotted cursor-pointer">restore</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+
       {account && data && !data.migrationMissing && (
         <p className="text-[11px] text-[#9CA3AF]">
-          Unreconciled items = the red rows: "not in bank" (book has it, statement doesn't — uncleared cheques etc.) and
-          "no book entry" (bank has it, book doesn't — record it via Payments / Receipts, then match).
+          Top = what the bank says, below it = what the book says; a clean month leaves both empty.
+          "Not in book" → record it via Payments / Receipts, then match. "Not yet in the bank" → usually an
+          uncleared cheque or in-transit transfer — it explains the report difference. Ignored lines stay out of the report.
         </p>
       )}
     </div>
@@ -11065,7 +12300,459 @@ function CashFlowTab() {
   );
   const data = resp?.success ? resp.data : undefined;
   const cols = data?.columns ?? [];
-  const rows = data?.rows ?? [];
+
+  // DEV-ONLY preview of the raw-material split (owner 2026-08-27: 「本地那边给
+  // 我看不行吗」). The local vite server proxies /api to PRODUCTION, so the
+  // backend rmSplit fix isn't live here until deployed — this shim re-splits
+  // the lone "Unallocated raw material" row client-side from the same payment
+  // → PI → stock-group chain, per column, preserving every column total to
+  // the sen. `import.meta.env.DEV` means the whole block is dead-code in the
+  // production build; on prod the API serves the split and the shim never
+  // engages (the guard below sees more than one RM child).
+  const [devRp, setDevRp] = useState<{
+    rmRows: CfApiRow[];
+    movedOut: number[];
+    merges: { section: string; label: string; values: number[] }[];
+    below: { section: string; label: string; values: number[] }[];
+    surplusShift: number[];
+  } | null>(null);
+  useEffect(() => {
+    // Synchronous reset is deliberate: stale split rows must not render
+    // against a freshly-changed statement while the async rebuild runs.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDevRp(null);
+    if (!import.meta.env.DEV || !data) return;
+    const rm = data.rows.filter((r) => r.section === "RAW_MATERIALS");
+    const lone = rm.find((r) => r.kind === "line" && r.label === "Unallocated raw material");
+    if (!lone || rm.filter((r) => r.kind === "line").length !== 1) return;
+    let stale = false;
+    (async () => {
+      const g = async (p: string): Promise<{ data?: unknown }> =>
+        (await fetch(p, { cache: "no-store" })).json() as Promise<{ data?: unknown }>;
+      // Owner 2026-08-27, three stacked asks: 「拆散」(one row per stock group),
+      // 「必须要知道还什么」(name every ringgit), 「根据purpose 放去相对应的
+      // account · 当做receipts and payment report」— an other-creditor payment
+      // is re-routed to the counterAccounts of the bills it settled, so
+      // transporter money lands on TRANSPORT EXPENSE, SMD's on Capex, and the
+      // Houzs Century repayment (bills that debit 400-0000 = suppliers paid on
+      // our behalf) stays in Raw Materials, labelled as such. The deployed
+      // backend does the same split from the same tables; this preview may
+      // put a TAXATION/REVENUE-routed part under Unallocated instead (none
+      // exist in the data), the backend routes those exactly.
+      const OPENING = "Opening creditors settlement";
+      const ADVANCE = "Supplier advance / deposit";
+      const UNALLOC = "Unallocated raw material";
+      const lineFor = (grp: string) => (grp ? grp : UNALLOC);
+      type AnyRec = Record<string, unknown>;
+      const rmL = await g("/api/raw-materials");
+      const grpBy = new Map<string, string>();
+      for (const r of ((rmL?.data ?? []) as AnyRec[])) {
+        const code = String(r.itemCode ?? r.item_code ?? "");
+        if (code) grpBy.set(code, String(r.itemGroup ?? r.item_group ?? ""));
+      }
+      // Supplier payments funded by the Houzs trade-finance facility credit the
+      // TF liability account instead of a bank, never reach the statement, and
+      // must not shape the proportions either.
+      const tfGl = await g("/api/accounting/gl?account=310-0020&from=2000-01-01&to=9999-12-31");
+      const houzsFunded = new Set<string>();
+      for (const r of ((((tfGl?.data as AnyRec | undefined)?.rows as AnyRec[] | undefined) ?? []))) {
+        if (String(r.sourceType ?? "").startsWith("supplier_payment") && Number(r.creditSen ?? 0) > 0)
+          houzsFunded.add(String(r.sourceId ?? ""));
+      }
+      // Chart of accounts + the owner's section overrides → where a purpose
+      // account belongs (client replica of defaultSectionFor).
+      const [coaR, mapR, oppR, billsR] = await Promise.all([
+        g("/api/accounting/coa"),
+        g("/api/accounting/cashflow/map"),
+        g("/api/accounting/other-party-payments"),
+        g("/api/accounting/other-party-bills"),
+      ]);
+      const coaBy = new Map<string, { name: string; type: string; sat: string }>();
+      for (const a of ((coaR?.data ?? []) as AnyRec[])) {
+        coaBy.set(String(a.code ?? ""), {
+          name: String(a.name ?? a.code ?? ""),
+          type: String(a.type ?? ""),
+          sat: String(a.specialAccountType ?? ""),
+        });
+      }
+      const ownMap = (((mapR?.data as AnyRec | undefined)?.map as Record<string, { section?: string }> | undefined) ?? {});
+      const secFor = (code: string): string => {
+        const o = ownMap[code]?.section;
+        if (o) return o;
+        const a = coaBy.get(code);
+        const b = parseInt(code.split("-")[0] ?? "0", 10) || 0;
+        if (a?.sat === "SDC" || b === 300 || b === 305 || b === 350) return "REVENUE_COLLECTION";
+        if (a?.sat === "SCC" || b === 400 || b === 405) return "RAW_MATERIALS";
+        if (b === 750) return "DIRECT_LABOUR";
+        if (b >= 700 && b <= 705 && /^PURCHASE\b/i.test(a?.name ?? "")) return "RAW_MATERIALS";
+        if (b === 780 || (b >= 700 && b <= 705)) return "FACTORY_OVERHEAD";
+        if (b >= 200 && b <= 299) return "CAPEX";
+        if ((b >= 440 && b <= 459) || b === 480) return "LOAN";
+        if (a?.type === "EXPENSE" || b === 900) return "GENERAL_EXPENSE";
+        return "UNALLOCATED";
+      };
+      // Purpose mix per bill, then per payment (allocation-weighted).
+      const billMix = new Map<string, Map<string, number>>();
+      for (const b of ((billsR?.data ?? []) as AnyRec[])) {
+        const m = new Map<string, number>();
+        for (const it of ((b.items ?? []) as AnyRec[])) {
+          const acct = String(it.counterAccount ?? "").trim();
+          const sen = Math.max(0, Number(it.amountSen ?? 0));
+          if (acct && sen) m.set(acct, (m.get(acct) ?? 0) + sen);
+        }
+        if (m.size) billMix.set(String(b.id ?? ""), m);
+      }
+      const colYms = data.columns.map((cc) => cc.key);
+      const accumCi = colYms.indexOf("__accum__");
+      const zeroCols = () => colYms.map(() => 0);
+      // Destination buckets, all exact sen.
+      const rmExact = new Map<string, number[]>();   // rows staying inside Raw Materials
+      const mergeAgg = new Map<string, number[]>();  // "SECTION|label" → operating group merges
+      const belowAgg = new Map<string, number[]>();  // "SECTION|label" → below-result groups
+      const movedOut = zeroCols();
+      const surplusShift = zeroCols();
+      const opTotalByCol = zeroCols();
+      const bucket = (m: Map<string, number[]>, k: string) => {
+        let a = m.get(k);
+        if (!a) { a = zeroCols(); m.set(k, a); }
+        return a;
+      };
+      const OUTFLOW = new Set(["RAW_MATERIALS", "DIRECT_LABOUR", "FACTORY_OVERHEAD", "GENERAL_EXPENSE", "TAXATION", "FINANCE_COST", "CAPEX", "DEPOSIT"]);
+      const OPERATING = new Set(["REVENUE_COLLECTION", "RAW_MATERIALS", "DIRECT_LABOUR", "FACTORY_OVERHEAD", "GENERAL_EXPENSE", "TAXATION"]);
+      const sp = await g("/api/supplier-payments");
+      const piCache = new Map<string, Map<string, number>>();
+      const piW = async (id: string) => {
+        const hit = piCache.get(id);
+        if (hit) return hit;
+        const d = await g("/api/purchase-invoices/" + id);
+        const w = new Map<string, number>();
+        for (const it of ((((d?.data as AnyRec | undefined)?.items as AnyRec[] | undefined) ?? []))) {
+          const lt = String(it.lineType ?? it.line_type ?? "STOCKED");
+          const amt = Number(it.lineTotalSen ?? it.line_total_sen ?? 0);
+          const mc = String(it.materialCode ?? it.material_code ?? "");
+          const line = lt === "TAX" ? "SST / TAX" : lineFor(mc ? grpBy.get(mc) ?? "" : "");
+          w.set(line, (w.get(line) ?? 0) + Math.max(0, amt));
+        }
+        piCache.set(id, w);
+        return w;
+      };
+      // Per-month proportions from bank-funded supplier payments. Houzs-funded
+      // draws never touch a bank, so they stay out entirely.
+      const byYm = new Map<string, Map<string, number>>();
+      for (const p of ((sp?.data ?? []) as AnyRec[])) {
+        if ((String(p.lifecycleState ?? "ACTIVE") || "ACTIVE") !== "ACTIVE") continue;
+        if (houzsFunded.has(String(p.paymentNo ?? ""))) continue;
+        const ym = String(p.date ?? "").slice(0, 7);
+        if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+        const monthBucket = byYm.get(ym) ?? new Map<string, number>();
+        const put = (line: string, sen: number) => monthBucket.set(line, (monthBucket.get(line) ?? 0) + sen);
+        for (const l of ((p.lines ?? []) as AnyRec[])) {
+          const booked = Number(l.bookedSen ?? 0);
+          if (booked <= 0) continue;
+          const piId = String(l.purchaseInvoiceId ?? "");
+          if (!piId) { put(ADVANCE, booked); continue; }
+          const w = await piW(piId);
+          let tw = 0;
+          for (const v of w.values()) tw += v;
+          // pi-ob-* opening-balance invoices carry no item lines by design —
+          // the money is real, the material detail predates the system.
+          if (!tw) { put(piId.startsWith("pi-ob-") ? OPENING : UNALLOC, booked); continue; }
+          for (const [line, lw] of w) put(line, (booked * lw) / tw);
+        }
+        byYm.set(ym, monthBucket);
+      }
+      for (const p of ((oppR?.data ?? []) as AnyRec[])) {
+        if ((String(p.lifecycleState ?? "ACTIVE") || "ACTIVE") !== "ACTIVE") continue;
+        if (String(p.bankAccount ?? "") === "310-0020") continue;
+        const ym = String(p.date ?? "").slice(0, 7);
+        const ci = colYms.indexOf(ym);
+        if (ci < 0) continue;
+        const payee = String(p.partyName ?? "Other creditor").trim();
+        const total = Number(p.totalSen ?? 0);
+        if (!total) continue;
+        opTotalByCol[ci] += total;
+        // payment mix = Σ allocations × their bill's item mix
+        const mix = new Map<string, number>();
+        for (const l of ((p.lines ?? []) as AnyRec[])) {
+          const bm = billMix.get(String(l.billId ?? ""));
+          const alloc = Math.max(0, Number(l.amountSen ?? 0));
+          if (!bm || !alloc) continue;
+          let tot = 0;
+          for (const v of bm.values()) tot += v;
+          if (!tot) continue;
+          for (const [acct, w] of bm) mix.set(acct, (mix.get(acct) ?? 0) + (alloc * w) / tot);
+        }
+        if (!mix.size) { bucket(rmExact, `${payee} (other creditor)`)[ci] += total; continue; }
+        let wTot = 0;
+        for (const v of mix.values()) wTot += v;
+        const entries = [...mix.entries()];
+        let assigned = 0;
+        entries.forEach(([acct, w], i) => {
+          const part = i === entries.length - 1 ? total - assigned : Math.round((total * w) / wTot);
+          assigned += part;
+          if (!part) return;
+          const sec = secFor(acct);
+          if (sec === "RAW_MATERIALS") {
+            // Creditor-control money keeps the payee label; a real purchase
+            // account (701-x PURCHASE - FABRIC …) shows as its own named row.
+            const aa = coaBy.get(acct);
+            const bb = parseInt(acct.split("-")[0] ?? "0", 10) || 0;
+            const isCtl = aa?.sat === "SCC" || bb === 400 || bb === 405;
+            bucket(rmExact, isCtl ? `Suppliers settled via ${payee}` : (aa?.name || acct))[ci] += part;
+            return;
+          }
+          movedOut[ci] += part;
+          const label = coaBy.get(acct)?.name || acct;
+          if (sec === "FACTORY_OVERHEAD" || sec === "GENERAL_EXPENSE" || sec === "DIRECT_LABOUR") {
+            bucket(mergeAgg, `${sec}|${label}`)[ci] += part; // stays operating → surplus unchanged
+            return;
+          }
+          const below = OUTFLOW.has(sec) && !OPERATING.has(sec) ? sec : OPERATING.has(sec) ? "UNALLOCATED" : sec;
+          bucket(belowAgg, `${below}|${label}`)[ci] += OUTFLOW.has(below) ? part : -part;
+          surplusShift[ci] += part; // outflow left the operating block
+        });
+      }
+      if (stale) return;
+      const out = new Map<string, number[]>();
+      const rowFor = (line: string): number[] => bucket(out, line);
+      // Exact rows staying inside Raw Materials (other-creditor money whose
+      // purpose is trade creditors, plus whole payments with no bill detail).
+      for (const [line, vals] of rmExact) {
+        const a = rowFor(line);
+        vals.forEach((v, i) => { a[i] += v; });
+      }
+      colYms.forEach((ym, ci) => {
+        if (ym === "__accum__") return; // filled from the month cells below
+        const total = lone.values[ci];
+        if (total === null || total === 0) return;
+        // Remainder after the exact other-creditor money = bank-funded
+        // supplier payments, split by that month's booked proportions.
+        const rem = total - opTotalByCol[ci];
+        if (rem <= 0) return;
+        const props = byYm.get(ym);
+        const ptot = props ? [...props.values()].reduce((s, v) => s + v, 0) : 0;
+        if (!props || !ptot) { rowFor(UNALLOC)[ci] += rem; return; }
+        let assigned = 0;
+        const entries = [...props.entries()];
+        entries.forEach(([line, w], i) => {
+          const share = i === entries.length - 1 ? rem - assigned : Math.round((rem * w) / ptot);
+          assigned += share;
+          rowFor(line)[ci] += share;
+        });
+      });
+      // Accumulated = sum of the month cells so every row is self-consistent.
+      const fillAccum = (vals: number[]) => {
+        if (accumCi >= 0) vals[accumCi] = vals.reduce((s, v, i) => (i === accumCi ? s : s + v), 0);
+      };
+      for (const vals of out.values()) fillAccum(vals);
+      for (const vals of mergeAgg.values()) fillAccum(vals);
+      for (const vals of belowAgg.values()) fillAccum(vals);
+      fillAccum(movedOut);
+      fillAccum(surplusShift);
+      const rank = (n: string) =>
+        n === UNALLOC ? 6 : n === ADVANCE ? 5 : n === OPENING ? 4 : n.endsWith("(other creditor)") ? 3 : n.startsWith("Suppliers settled via ") ? 2 : n === "SST / TAX" ? 1 : 0;
+      const labels = [...out.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+      const rmRows: CfApiRow[] = labels
+        .filter((n) => (out.get(n) ?? []).some((v) => v !== 0))
+        .map((n) => ({ kind: "line" as const, label: n, section: "RAW_MATERIALS", depth: 2, groupId: "RAW_MATERIALS", values: out.get(n)! }));
+      const unpack = (m: Map<string, number[]>) => [...m.entries()]
+        .filter(([, v]) => v.some((x) => x !== 0))
+        .map(([k, values]) => ({ section: k.slice(0, k.indexOf("|")), label: k.slice(k.indexOf("|") + 1), values }));
+      if (!stale && rmRows.length)
+        setDevRp({ rmRows, movedOut, merges: unpack(mergeAgg), below: unpack(belowAgg), surplusShift });
+    })().catch(() => {});
+    return () => { stale = true; };
+  }, [data]);
+
+  // DEV-ONLY salary-by-department preview (owner 2026-08-27 「salary 那边也是
+  // 要拆散成department」). Prod still shows one "ACCRUAL - SALARY" line under
+  // Unallocated; the deployed backend will emit a Direct Labour group with one
+  // row per department instead. Until then this shim rebuilds that view
+  // client-side: GL legs on 410-0010 name the payroll month they pay
+  // ("… Salaries - May'26"), that month's payslip mix (labor/preview) splits
+  // the cash. Dead code in production builds.
+  const [devSalRows, setDevSalRows] = useState<CfApiRow[] | null>(null);
+  useEffect(() => {
+    // Same deliberate reset as devRp above.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDevSalRows(null);
+    if (!import.meta.env.DEV || !data) return;
+    const sal = data.rows.find((r) => r.kind === "line" && r.label === "ACCRUAL - SALARY");
+    if (!sal) return; // backend already splits → nothing to preview
+    let stale = false;
+    (async () => {
+      const g = async (p: string): Promise<{ data?: unknown }> =>
+        (await fetch(p, { cache: "no-store" })).json() as Promise<{ data?: unknown }>;
+      type AnyRec = Record<string, unknown>;
+      const M3: Record<string, string> = { Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06", Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12" };
+      const gl = await g("/api/accounting/gl?account=410-0010&from=2000-01-01&to=9999-12-31");
+      const legs = ((((gl?.data as AnyRec | undefined)?.rows as AnyRec[] | undefined) ?? []))
+        .filter((l) => Number(l.debitSen ?? 0) > 0);
+      // column month → payroll month → sen paid
+      const perCol = new Map<string, Map<string, number>>();
+      for (const l of legs) {
+        const colYm = String(l.postedAt ?? "").slice(0, 7);
+        const m = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'(\d{2})\b/.exec(String(l.description ?? ""));
+        const payYm = m ? `20${m[2]}-${M3[m[1]]}` : colYm;
+        const mm = perCol.get(colYm) ?? new Map<string, number>();
+        mm.set(payYm, (mm.get(payYm) ?? 0) + Number(l.debitSen ?? 0));
+        perCol.set(colYm, mm);
+      }
+      const mixCache = new Map<string, { dept: string; w: number }[]>();
+      const mixFor = async (ym: string) => {
+        const hit = mixCache.get(ym);
+        if (hit) return hit;
+        let mix: { dept: string; w: number }[] = [];
+        try {
+          const d = await g(`/api/accounting/labor/preview?month=${ym}`);
+          const by = (((d?.data as AnyRec | undefined)?.byDept as AnyRec[] | undefined) ?? []);
+          mix = by.map((b) => ({ dept: String(b.departmentCode ?? ""), w: Number(b.costSen ?? 0) }))
+            .filter((x) => x.dept && x.w > 0);
+        } catch { /* no payslips for that month → line stays unsplit */ }
+        mixCache.set(ym, mix);
+        return mix;
+      };
+      const colYms = data.columns.map((cc) => cc.key);
+      const out = new Map<string, number[]>();
+      const rowFor = (line: string): number[] => {
+        let a = out.get(line);
+        if (!a) { a = colYms.map(() => 0); out.set(line, a); }
+        return a;
+      };
+      const accumCi = colYms.indexOf("__accum__");
+      for (let ci = 0; ci < colYms.length; ci++) {
+        const ym = colYms[ci];
+        if (ym === "__accum__") continue;
+        const v = sal.values[ci];
+        if (!v) continue;
+        const outflow = -v; // display sign: outflow was a negative Unallocated line
+        const mm = perCol.get(ym);
+        const parts = mm ? [...mm.entries()] : [];
+        const legTot = parts.reduce((s, [, sen]) => s + sen, 0);
+        if (!parts.length || legTot <= 0 || outflow <= 0) { rowFor("ACCRUAL - SALARY")[ci] += outflow; continue; }
+        let assigned = 0;
+        for (let pi = 0; pi < parts.length; pi++) {
+          const [payYm, sen] = parts[pi];
+          const share = pi === parts.length - 1 ? outflow - assigned : Math.round((outflow * sen) / legTot);
+          assigned += share;
+          const mix = await mixFor(payYm);
+          const wTot = mix.reduce((s, x) => s + x.w, 0);
+          if (!mix.length || !wTot) { rowFor("ACCRUAL - SALARY")[ci] += share; continue; }
+          let dAssigned = 0;
+          mix.forEach((x, di) => {
+            const part = di === mix.length - 1 ? share - dAssigned : Math.round((share * x.w) / wTot);
+            dAssigned += part;
+            rowFor(x.dept)[ci] += part;
+          });
+        }
+      }
+      if (stale) return;
+      if (accumCi >= 0) for (const vals of out.values()) {
+        vals[accumCi] = vals.reduce((s, x, i) => (i === accumCi ? s : s + x), 0);
+      }
+      const labels = [...out.keys()].sort((a, b) => a.localeCompare(b));
+      const lines: CfApiRow[] = labels
+        .filter((n) => (out.get(n) ?? []).some((x) => x !== 0))
+        .map((n) => ({ kind: "line" as const, label: n, section: "DIRECT_LABOUR", depth: 2, groupId: "DIRECT_LABOUR", values: out.get(n)! }));
+      if (!lines.length) return;
+      const header: CfApiRow = {
+        kind: "group", label: "Direct Labour", section: "DIRECT_LABOUR", depth: 1, groupId: "DIRECT_LABOUR",
+        values: colYms.map((_, ci) => lines.reduce((s, r) => s + (r.values[ci] ?? 0), 0)),
+      };
+      if (!stale) setDevSalRows([header, ...lines]);
+    })().catch(() => {});
+    return () => { stale = true; };
+  }, [data]);
+
+  const rows = useMemo(() => {
+    let base = data?.rows ?? [];
+    if (devRp) {
+      const idx = base.findIndex((r) => r.kind === "line" && r.label === "Unallocated raw material" && r.section === "RAW_MATERIALS");
+      if (idx >= 0) {
+        base = [...base.slice(0, idx), ...devRp.rmRows, ...base.slice(idx + 1)];
+        // Money routed to other sections left this one: shrink the group head.
+        const gi = base.findIndex((r) => r.kind === "group" && r.groupId === "RAW_MATERIALS");
+        if (gi >= 0) base = base.map((r, i) => (i === gi ? { ...r, values: r.values.map((x, k) => (x ?? 0) - devRp.movedOut[k]) } : r));
+      }
+    }
+    if (devSalRows) {
+      const si = base.findIndex((r) => r.kind === "line" && r.label === "ACCRUAL - SALARY");
+      if (si >= 0) {
+        const sal = base[si];
+        base = base.filter((_, i) => i !== si);
+        // Shrink (or drop) the group the line came out of, so its subtotal
+        // stays honest.
+        const gi = base.findIndex((r) => r.kind === "group" && r.groupId === sal.groupId);
+        if (gi >= 0) {
+          const hasSiblings = base.some((r) => r.kind === "line" && r.groupId === sal.groupId);
+          base = hasSiblings
+            ? base.map((r, i) => (i === gi ? { ...r, values: r.values.map((x, k) => (x ?? 0) - (sal.values[k] ?? 0)) } : r))
+            : base.filter((_, i) => i !== gi);
+        }
+        // Salary moves above the operating result line, so the result shrinks
+        // by the outflow (sal.values are already display-negative).
+        base = base.map((r) => r.kind === "result" && /operation surplus/i.test(r.label)
+          ? { ...r, values: r.values.map((x, k) => (x ?? 0) + (sal.values[k] ?? 0)) } : r);
+        let ins = base.findIndex((r) =>
+          (r.kind === "group" && (r.section === "FACTORY_OVERHEAD" || r.section === "GENERAL_EXPENSE")) || r.kind === "result");
+        if (ins < 0) ins = base.length;
+        base = [...base.slice(0, ins), ...devSalRows, ...base.slice(ins)];
+      }
+    }
+    if (devRp && (devRp.merges.length || devRp.below.length)) {
+      // Receipts-and-payments routing: money that settled a bill booked to an
+      // expense/asset account joins that account's own line, creating the
+      // group when the statement had none.
+      const SEC_LABELS: Record<string, string> = {
+        DIRECT_LABOUR: "Direct Labour", FACTORY_OVERHEAD: "Factory Overhead", GENERAL_EXPENSE: "General Expense",
+        TAXATION: "Taxation", FINANCE_COST: "Finance Cost", CAPEX: "Capital Expenditure (CAPEX)",
+        DEPOSIT: "Deposit Incurred / (Repay)", LOAN: "Loan / (Repayment)", UNALLOCATED: "Unallocated",
+      };
+      const SEC_ORDER = ["FINANCE_COST", "CAPEX", "DEPOSIT", "LOAN", "UNALLOCATED"];
+      const addInto = (section: string, label: string, values: number[], belowResult: boolean) => {
+        let gi = base.findIndex((r) => r.kind === "group" && r.section === section);
+        if (gi < 0) {
+          let ins: number;
+          if (belowResult) {
+            const ti = base.findIndex((r) => r.kind === "total");
+            const ri = base.findIndex((r) => r.kind === "result");
+            ins = ti >= 0 ? ti : base.length;
+            if (ri >= 0 && ins <= ri) ins = ri + 1;
+          } else {
+            const ri = base.findIndex((r) => r.kind === "result");
+            ins = ri >= 0 ? ri : base.length;
+          }
+          const header: CfApiRow = {
+            kind: "group", label: SEC_LABELS[section] ?? section, section, depth: 1,
+            groupId: section, values: values.map(() => 0),
+          };
+          base = [...base.slice(0, ins), header, ...base.slice(ins)];
+          gi = ins;
+        }
+        base = base.map((r, i) => (i === gi ? { ...r, values: r.values.map((x, k) => (x ?? 0) + values[k]) } : r));
+        let li = -1, end = base.length;
+        for (let i = gi + 1; i < base.length; i++) {
+          const r = base[i];
+          if (r.kind !== "line" || r.groupId !== section) { if (end === base.length) end = i; break; }
+          if (r.label === label) { li = i; break; }
+          if (end === base.length && r.label.localeCompare(label) > 0) end = i;
+        }
+        if (li >= 0) {
+          base = base.map((r, i) => (i === li ? { ...r, values: r.values.map((x, k) => (x ?? 0) + values[k]) } : r));
+        } else {
+          const line: CfApiRow = { kind: "line", label, section, depth: 2, groupId: section, values: [...values] };
+          base = [...base.slice(0, end), line, ...base.slice(end)];
+        }
+      };
+      for (const m of devRp.merges) addInto(m.section, m.label, m.values, false);
+      for (const b of [...devRp.below].sort((a, z) => SEC_ORDER.indexOf(a.section) - SEC_ORDER.indexOf(z.section)))
+        addInto(b.section, b.label, b.values, true);
+      // Outflow that moved below the operating block lifts the surplus.
+      base = base.map((r) => r.kind === "result" && /operation surplus/i.test(r.label)
+        ? { ...r, values: r.values.map((x, k) => (x ?? 0) + devRp.surplusShift[k]) } : r);
+    }
+    return base;
+  }, [data, devRp, devSalRows]);
 
   useEffect(() => {
     if (!edit) return;
@@ -11174,11 +12861,29 @@ function CashFlowTab() {
           {!data ? (
             <div className="py-8 text-center text-[#6B7280] text-sm">No cash-flow data for {period}.</div>
           ) : (
+            <>
+            {/* Statement letterhead (owner 2026-08-27 排版 pass) — the report
+                reads as a REPORT, not a grid: company on the left, statement
+                title on the right, ruled off before the figures start. */}
+            <div className="flex flex-wrap justify-between items-start border-b-2 border-[#1F1D1B] pb-2 mb-3 gap-2">
+              <div>
+                <div className="text-[15px] font-extrabold tracking-wide text-[#1F1D1B]">HOOKKA INDUSTRIES SDN. BHD.</div>
+                <div className="text-[11px] text-[#6B7280]">Prepared on cash basis · all figures in RM</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[14px] font-extrabold tracking-[0.15em] text-[#6B5C32]">STATEMENT OF CASH FLOW</div>
+                <div className="text-[11px] text-[#6B7280]">Accumulated + trailing 12 months · view {period}</div>
+              </div>
+            </div>
             <table className="text-[13px]" style={{ minWidth: 760 }}>
               <thead>
-                <tr className="text-[12px] text-[#6B7280]">
-                  <td />
-                  {cols.map((c) => <td key={c.key} className="text-right px-2 pb-1 whitespace-nowrap">{c.label}</td>)}
+                {/* PERIOD row bold on top (house rule), Accumulated tinted so
+                    the cumulative column never reads as a 13th month. */}
+                <tr className="text-[12px] font-bold text-[#1F1D1B] border-b-2 border-[#1F1D1B] bg-[#F7F4EF]">
+                  <td className="px-2 py-1.5 text-left text-[11px] font-extrabold tracking-wide text-[#6B5C32]">PERIOD</td>
+                  {cols.map((c) => (
+                    <td key={c.key} className={`text-right px-2 py-1.5 whitespace-nowrap ${c.accum ? "bg-[#F6F1E7] text-[#6B5C32]" : ""}`}>{c.label}</td>
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -11191,10 +12896,12 @@ function CashFlowTab() {
                   const draggable = edit && r.kind === "line" && !!r.accountCode;
                   const dropHere = isDropTarget(r);
                   const rowCls =
-                    r.kind === "result" ? "bg-[#F0ECE9]/60 font-semibold" :
-                    r.kind === "total" ? "border-t-2 border-[#6B5C32] font-semibold" :
-                    r.kind === "cf" ? "border-b-2 border-[#6B5C32] bg-[#F0ECE9]/40 font-semibold" :
-                    r.kind === "section" ? "font-semibold text-[#1F1D1B]" : "";
+                    r.kind === "result" ? "bg-[#F0ECE9] font-bold border-t border-[#1F1D1B]" :
+                    r.kind === "total" ? "bg-[#EAF3DE] font-bold border-t-2 border-[#1F1D1B]" :
+                    r.kind === "cf" ? "font-bold border-t border-[#1F1D1B] [border-bottom:3px_double_#1F1D1B]" :
+                    r.kind === "bf" ? "text-[#6B7280] italic" :
+                    r.kind === "subtotal" ? "font-semibold border-t border-[#E2DDD8]" :
+                    r.kind === "section" ? "font-extrabold tracking-wide text-[#6B5C32] text-[12px]" : "";
                   return (
                     <tr key={i}
                       className={`${rowCls} ${isGroup ? "cursor-pointer hover:bg-[#F7F4EF] bg-[#F0ECE9]/30 font-semibold" : ""} ${draggable ? "cursor-move" : ""} ${dragCode === r.accountCode ? "opacity-40" : ""} ${dropHere && dragOverSec === r.section ? "ring-2 ring-inset ring-[#6B5C32]" : ""}`}
@@ -11214,13 +12921,14 @@ function CashFlowTab() {
                       onClick={isGroup && !edit ? () => { const n = new Set(collapsed); if (n.has(r.groupId!)) n.delete(r.groupId!); else n.add(r.groupId!); setCollapsed(n); } : undefined}>
                       <td className="py-1 whitespace-nowrap" style={pad}>{isGroup ? (isOpen ? "▾ " : "▸ ") : ""}{draggable ? "⠿ " : ""}{r.label}</td>
                       {r.values.map((v, j) => (
-                        <td key={j} className={`text-right px-2 tabular-nums whitespace-nowrap ${typeof v === "number" && v < 0 ? "text-[#9A3A2D]" : ""} ${strong ? "font-semibold" : ""}`}>{fmt(v)}</td>
+                        <td key={j} className={`text-right px-2 tabular-nums whitespace-nowrap ${typeof v === "number" && v < 0 ? "text-[#9A3A2D]" : ""} ${v === 0 ? "text-[#C7C1BA]" : ""} ${strong ? "font-semibold" : ""} ${cols[j]?.accum ? "bg-[#F6F1E7]" : ""}`}>{fmt(v)}</td>
                       ))}
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+            </>
           )}
           <p className="text-[11px] text-[#9CA3AF] mt-3">Cash basis · classified from bank/cash ledger movements · Raw Materials traced to PI stock groups · Bank c/f = b/f + Cash Surplus.</p>
         </CardContent>

@@ -19,6 +19,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { permissionsForRole } from "../lib/role-policy";
+import { requirePermission } from "../lib/rbac";
 import { hiddenNavPrefixes, hiddenNavForRole, homeForPermissions } from "../lib/nav-permissions";
 import type { Context } from "hono";
 import type { Env } from "../worker";
@@ -1093,6 +1094,49 @@ type InviteRow = {
 };
 
 // GET /api/auth/invite/:token
+// ---------------------------------------------------------------------------
+// GET /api/auth/role-permissions/:role — what a role can do, on the build
+// that is actually running.
+//
+// Exists because of how long BUG-2026-08-21-159 stayed alive. `files` was
+// missing from `ALL_RESOURCES`, so every department role was denied
+// `files:create`, `POST /api/files` answered 403 to the only people who scan
+// customer POs, and 212 sales orders were created with no original document.
+// Four fixes were shipped against the CLIENT before anyone checked the server,
+// because there was no way to check it: `/me/permissions` answers for the
+// caller, and the caller was an admin every time — an admin short-circuits on
+// the legacy `*:*` wildcard and therefore can never reproduce the failure.
+//
+// Reading `role-policy.ts` is not a substitute. It tells you what the source
+// says; it cannot tell you which build is deployed. This endpoint answers from
+// the running worker, which is the only answer worth having after a deploy.
+//
+// Read-only, no side effects, and it takes a ROLE NAME rather than a user —
+// nothing here is per-person, so it exposes no one's account.
+// ---------------------------------------------------------------------------
+app.get("/role-permissions/:role", async (c) => {
+  const denied = await requirePermission(c, "users", "read");
+  if (denied) return denied;
+
+  const role = (c.req.param("role") || "").trim().toUpperCase();
+  const coded = permissionsForRole(role);
+  if (!coded) {
+    return c.json({
+      success: true,
+      role,
+      codedPolicy: false,
+      permissions: [],
+      note: "No policy in code for this role — its permissions come from the role_permissions table.",
+    });
+  }
+  return c.json({
+    success: true,
+    role,
+    codedPolicy: true,
+    permissions: [...coded].sort(),
+  });
+});
+
 app.get("/invite/:token", async (c) => {
   const token = c.req.param("token");
   const nowIso = new Date().toISOString();

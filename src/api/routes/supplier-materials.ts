@@ -11,6 +11,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { ensureUnitPricePrecision } from "../lib/unit-price-precision";
 import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
@@ -131,6 +132,9 @@ async function ensureBindingColumns(db: D1Database): Promise<void> {
 // supplier NAMES, not opaque sup-XXX ids. Desktop reads supplierId direct so
 // the addition is purely additive.
 app.get("/", async (c) => {
+  // The supplier price list is where a sub-cent price is TYPED, so opening it
+  // is one of the paths that must guarantee the column can hold one.
+  await ensureUnitPricePrecision(c.var.DB);
   const supplierId = c.req.query("supplierId");
   const materialCode = c.req.query("materialCode");
   const orgId = getOrgId(c);

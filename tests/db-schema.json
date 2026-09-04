@@ -193,15 +193,24 @@
     "id",
     "org_id"
   ],
+  "bank_board_cleared": [
+    "account_code",
+    "cleared_on",
+    "created_at",
+    "leg_id"
+  ],
   "bank_statement_lines": [
     "account_code",
     "amount_sen",
+    "balance_sen",
     "created_at",
     "description",
     "id",
+    "ignored_at",
     "imported_at",
     "matched_at",
     "matched_leg_id",
+    "stmt_month",
     "txn_date"
   ],
   "bank_transactions": [
@@ -2181,6 +2190,15 @@
     "id",
     "payload",
     "taken_at"
+  ],
+  "planned_payments": [
+    "amount_sen",
+    "created_at",
+    "done_at",
+    "expected_date",
+    "id",
+    "party_name",
+    "ref"
   ],
   "pnl_historical": [
     "id",

@@ -56,6 +56,11 @@ export default function DeliveryReturnsPage() {
   const [showCreate, setShowCreate] = useState(false);
   // Opened via "Convert to Delivery Return" on a DO → pre-open the create modal.
   useEffect(() => {
+    // Opens the create modal when arriving from a DO's "Convert to Delivery
+    // Return". It reacts to a URL param CHANGING, so it cannot be a useState
+    // initializer — navigating from one DO to another keeps this component
+    // mounted and the initializer would never run again.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (createFrom) setShowCreate(true);
   }, [createFrom]);
 
@@ -272,6 +277,10 @@ function CreateReturnModal({
   };
 
   useEffect(() => {
+    // pickDo is async: every setState inside it runs in a promise
+    // continuation, not in this effect body. The rule cannot see through the
+    // call, so it reports a synchronous set that does not happen.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (initialDoId) void pickDo(initialDoId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialDoId]);

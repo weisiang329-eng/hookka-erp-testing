@@ -4,9 +4,42 @@ import { requirePermission } from "../../lib/rbac";
 import { recomputePoStatusAndProgress } from "../production-orders";
 import { createProductionOrdersForSO, type SalesOrderRow, type SalesOrderItemRow } from "../sales-orders";
 import { getOrgId } from "../../lib/tenant";
+import {
+  readUnitPricePrecision,
+  UNIT_PRICE_DECIMALS,
+} from "../../lib/unit-price-precision";
 import { type SuppliersFromHistoryBody, type BindingsFromHistoryBody, type BackfillBody, type BackfillBindingsBody, type BackfillBindingsMultiBody, type BackfillPhantomGrnsBody, type BackfillExpectedUnit, type LinenoFixRow } from "./_shared";
 
 const app = new Hono<Env>();
+
+
+// ---------------------------------------------------------------------------
+// GET /api/import/unit-price-precision
+//
+// Read the LIVE column types for the three unit-price columns and say, in one
+// answer, whether production can hold RM 0.055.
+//
+// This exists because of a specific hole. Migrations are inert on deploy here;
+// the widening reached production only through a self-apply awaited on WRITES,
+// so between the deploy and somebody's first save the honest answer to "is it
+// fixed?" was "unknown" — and CLAUDE.md's rule is that a claim about current
+// production state is MEASURED or carries the word UNMEASURED. Reading the
+// route file is not a measurement. This endpoint is.
+//
+// Read-only, and it never applies anything: a diagnostic that repairs what it
+// is measuring cannot tell you what the state WAS.
+// ---------------------------------------------------------------------------
+app.get("/unit-price-precision", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "read");
+  if (denied) return denied;
+  const columns = await readUnitPricePrecision(c.var.DB);
+  return c.json({
+    success: true,
+    ok: columns.every((r) => r.ok),
+    requiredScale: UNIT_PRICE_DECIMALS,
+    columns,
+  });
+});
 
 
 // ---------------------------------------------------------------------------

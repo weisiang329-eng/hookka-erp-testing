@@ -38,6 +38,11 @@ import type { RawMaterial } from "@/types";
 // One money parser. NOTE: `l.qty` on this page is a QUANTITY and deliberately
 // keeps `parseFloat` - it is not money and is not in this fix's scope.
 import { moneyFieldToRinggit } from "@/lib/money-field";
+import {
+  roundUnitPriceSen,
+  lineTotalSen,
+  formatUnitPriceInput,
+} from "@/lib/unit-price";
 
 const VALID_LINE_TYPES: LineType[] = ["STOCKED", "FEE", "TAX", "REBATE", "DISCOUNT", "OTHER"];
 
@@ -406,7 +411,9 @@ export default function PurchaseInvoiceDetailPage() {
         materialName: it.materialName || "",
         supplierSku: it.supplierSku || "",
         qty: String(it.qty ?? 0),
-        unitPriceRm: (Number(it.unitPriceSen || 0) / 100).toFixed(2),
+        // NOT toFixed(2): that rounded a saved RM 0.055 line to "0.06" as
+        // soon as the operator pressed Edit, and saving wrote 0.06 back.
+        unitPriceRm: formatUnitPriceInput(Number(it.unitPriceSen || 0)),
         taxRm: (Number(it.taxSen || 0) / 100).toFixed(2),
         lineType: it.lineType,
         grnItemId: it.grnItemId == null ? null : String(it.grnItemId),
@@ -442,7 +449,11 @@ export default function PurchaseInvoiceDetailPage() {
     (s, l) =>
       l.lineType === "TAX"
         ? s
-        : s + Math.round((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100) * (parseFloat(l.qty) || 0),
+        : s +
+          lineTotalSen(
+            parseFloat(l.qty) || 0,
+            roundUnitPriceSen((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100),
+          ),
     0,
   );
   const draftTaxSen = dLines.reduce(
@@ -450,7 +461,10 @@ export default function PurchaseInvoiceDetailPage() {
       s +
       Math.round((moneyFieldToRinggit(l.taxRm) ?? 0) * 100) +
       (l.lineType === "TAX"
-        ? Math.round((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100) * (parseFloat(l.qty) || 0)
+        ? lineTotalSen(
+            parseFloat(l.qty) || 0,
+            roundUnitPriceSen((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100),
+          )
         : 0),
     0,
   );
@@ -461,7 +475,11 @@ export default function PurchaseInvoiceDetailPage() {
     (s, l) =>
       l.lineType === "DISCOUNT"
         ? s
-        : s + Math.round((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100) * (parseFloat(l.qty) || 0),
+        : s +
+          lineTotalSen(
+            parseFloat(l.qty) || 0,
+            roundUnitPriceSen((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100),
+          ),
     0,
   );
 
@@ -497,7 +515,8 @@ export default function PurchaseInvoiceDetailPage() {
         materialName: l.materialName.trim(),
         supplierSku: l.supplierSku.trim() || null,
         qty: parseFloat(l.qty) || 0,
-        unitPriceSen: Math.round((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100),
+        // A RATE, not an amount — the sub-cent digits must survive the save.
+        unitPriceSen: roundUnitPriceSen((moneyFieldToRinggit(l.unitPriceRm) ?? 0) * 100),
         // Per-line SST (owner 2026-06-30). 0 for non-taxable lines; backend
         // rolls them into header tax_sen on save.
         taxSen: Math.max(0, Math.round((moneyFieldToRinggit(l.taxRm) ?? 0) * 100)),

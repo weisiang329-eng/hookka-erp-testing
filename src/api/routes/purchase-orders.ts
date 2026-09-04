@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
+import { ensureUnitPricePrecision } from "../lib/unit-price-precision";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
@@ -325,6 +326,9 @@ app.get("/", async (c) => {
   if (denied) return denied;
   const orgId = getOrgId(c);
   await ensurePoItemLineNo(c.var.DB);
+  // Opening the list is enough to widen the unit-price column — the schema fix
+  // must not wait for somebody to save a document. Cheap after the first time.
+  await ensureUnitPricePrecision(c.var.DB);
 
   // Opt-in pagination (mirrors sales-orders.ts). `?page=N&limit=M` applies SQL
   // LIMIT/OFFSET and scopes items to the page's POs; the response then carries
@@ -1063,6 +1067,9 @@ let pendingMigrations: Promise<void> | null = null;
 function ensurePendingMigrations(db: D1Database): Promise<void> {
   if (pendingMigrations) return pendingMigrations;
   pendingMigrations = (async () => {
+    // A unit price is a RATE with four decimals of sen. Shared with the PI and
+    // GRN routes so the three cannot drift apart again.
+    await ensureUnitPricePrecision(db);
     const stmts = [
       "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS lastEmailedAt TEXT",
       // 5.3 — concurrency guard for generatePoNo. The retry wrapper in
@@ -1070,6 +1077,9 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_orders_po_no ON purchase_orders(poNo)",
       // 0181 — real material_code column so new POs don't mash code into name.
       "ALTER TABLE purchase_order_items ADD COLUMN IF NOT EXISTS material_code TEXT",
+      // Sub-cent unit prices moved to api/lib/unit-price-precision.ts — one
+      // definition for all three procurement tables, applied from the read
+      // paths as well as the write ones. See the call above.
       // 0200 — per-document purchase company override. Defaulted from the
       // supplier on create; never null in writes (HOOKKA fallback).
       "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS purchase_org_code TEXT",

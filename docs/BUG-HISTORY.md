@@ -30,9 +30,552 @@ Entries themselves stay newest-first.
 - `data-integrity` (4) — [BUG-2026-04-25-008](#bug-2026-04-25-008-stability-add-timeout-abort-propagation-to-fetchjson)
 - `auth-rbac` (3) — [BUG-2026-06-12-010](#bug-2026-06-12-010--any-admin-could-disable-or-delete-other-peoples-accounts-no-admin-tier-below-super-admin)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
-- `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+- `audit-logging` (2) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
 
 ---
+
+## BUG-2026-09-02-175 — a void pre-opening match still occupied the leg in the write path `accounting` `bank-reco` 🟢
+
+Minutes after the 174 fix shipped, the owner picked HPV-2605-018 in the
+"match to…" dropdown for the restored GVP 950.00 line and got "This ledger
+leg is already matched to another statement line". The 174 fix voided
+matches stored on pre-opening lines for every READ (list, automatch
+candidates, report) — but the manual-match endpoint's taken check queries
+the raw table, where the stale claim still sat. The leg was simultaneously
+"open" on screen and "taken" on write.
+
+Fix ([accounting.ts](../src/api/routes/accounting.ts)): both write paths
+self-heal — POST /bank-reco/match and /bank-reco/automatch first clear the
+account's matches held by pre-opening lines (they are void by definition),
+then proceed. Side benefit: the four "wrong match — undo" rows clean
+themselves on the next match/automatch, no clicks needed. Same PR: the two
+reconciliation tables stack vertically at full width (owner: 「就不能上下
+吗？」— the side-by-side grid still forced horizontal scrolling on his
+screen). Guard: `tests/bank-reco-opening-legs.test.mjs` (+2 assertions).
+
+## BUG-2026-09-02-174b — an outsourced worker logged 4 hours against a 9-hour day and was paid the full day `payroll` `outsourced` 🟢
+
+> id note: originally logged as -174 in the same hour as the bank-reco -174
+> below; renamed with the `b` suffix (zero inbound references) per the
+> duplicate-id convention. Real discovery date unchanged: 2026-09-02.
+
+- **Symptom (owner, 2026-08-31)**: CHAU (OSC-001, RM 85 for a 9-hour day)
+  logged **four hours on 17 Aug 2026** and August paid the full RM 85 — 24 days
+  × RM 85 = RM 2,040.00, nothing docked. 「你应该先看他的工作时长，再看他的日
+  薪。如果他没来，是要扣掉薪水的」.
+- **Nothing had to be DETECTED.** The dock row was already in the database —
+  `payroll_hour_deductions`: `2026-08-17 · 5h · "Auto: short 5h (from punch)"`,
+  written by the same punch rules that dock everyone else. `computeMonthlyLabor`
+  read it and then **threw it away**: `shortHourDeductionSen = isDailyPaid ? 0
+  : …`. The old rule (owner 2026-08-02) was 「打卡了几天，就会算几天的薪水」, and
+  it was safe only because the hourly rate divided from `basicSalarySen`, which
+  is 0 for an outsourced person.
+- **The shape of the fix comes from the owner's own framing**: 「跟我们目前的
+  flow 普通员工一样，只是他不是放 monthly 薪水而是放 daily 薪水，其他一模一样
+  的。你也是用 monthly 薪水来计算 daily rate 的，这个是没有 monthly rate 直接
+  daily rate。」 So there is **no second formula**: `payrollDailyRateSen` is
+  simply TAKEN for a per-day person instead of derived as salary ÷ 26, and every
+  rate below it — the hour rate, the short-hour dock, the day-typed overtime —
+  falls out of the identical monthly maths. The first attempt at this was a
+  bespoke pro-rate branch; it was thrown away when the owner said "identical".
+- **Overtime too** (「也要放 OT rate」), reversing the 2026-08-02 「outsource 暂时
+  没有」 — 暂时. Priced off the day rate: RM 85 ÷ (9h + 1h lunch) = RM 8.50/h,
+  × 1.5 = RM 12.75.
+- **`Hours / day` was hidden for outsourced people** and is 0 on every existing
+  record. It was hidden with Basic salary and Days/month as "the monthly model",
+  but it is not part of that model — it is the standard day a short day falls
+  short OF and overtime goes above. Now shown. Weekday OT stays 0 until it is
+  filled in, so the change is **opt-in per worker** rather than a silent
+  repricing of history.
+- **Measured**: CHAU August RM 2,040.00 → **RM 1,997.50** (5h × RM 8.50).
+- **Regression**: `tests/outsource-daily-pay.test.mjs` — the two tests that
+  pinned the OLD policy were rewritten rather than deleted, each carrying the
+  date and the quote that changed it, plus CHAU's August as an end-to-end case.
+
+## BUG-2026-09-02-174 — pre-opening statement lines treated as reconcilable `accounting` `bank-reco` 🟢
+
+Owner uploaded the May'26 statement (the opening month: statement covers
+01–31/05, the books start 22/05) and could not tally: "Out by −RM 6,948.84".
+Measured composition, exact to the sen: he had to hand-ignore 23 pre-opening
+bank lines (their money is inside the keyed opening balance 4,742.72), FOUR
+pre-opening lines got matched to 22/05-keyed book legs (−2,235.00 — each
+match pairs a bank movement that is inside the opening with a post-opening
+book leg, a double count), and in the confusion four REAL post-opening
+outflows were ignored (−9,183.84: JomPAY 152.25, petty cash 6,521.59, Big
+Green 1,560.00, GVP 950.00). −9,183.84 − (−2,235.00) = −6,948.84.
+
+Fix ([accounting.ts](../src/api/routes/accounting.ts)): statement lines dated
+before kv `opening_date` are floored everywhere — POST /bank-reco/match
+refuses them, automatch skips them, the report voids stored matches on them
+and excludes them from unbookedStmt, and GET /bank-reco flags a leg matched
+only when its line is post-opening (response now carries `openingDate`). UI:
+pre-opening lines live in their own collapsed "Before opening — already
+inside the opening balance" section (no ignore/match actions; a stored wrong
+match shows "wrong match — undo"); descriptions truncate to one line; the
+Out-by badge states the direction (book above/below bank). Guard:
+`tests/bank-reco-opening-legs.test.mjs` (4 new assertions).
+
+**Follow-up the same hour — the money was right and the REASON was invisible.**
+The regenerated August paid CHAU RM 1,997.50 and showed a **RM 0.00 deduction**
+beside it. The payslip LIST and DETAIL endpoints each re-derived the day rate
+straight from `basicSalarySen`, which is 0 for an outsourced person, so the
+hourly rate was 0 and the dock rendered as nothing. A payslip that quietly pays
+less than days × rate and cannot say why is worse than one that pays wrong —
+nobody can check it. Fixed by exporting `workerPayrollDayRateSen` as the ONE
+definition and routing all three callers through it; a test forbids either
+screen from deriving that rate from a salary again.
+
+
+## BUG-2026-09-02-173 — opening legs counted as 未达账项 made the reco report blind to the opening figure `accounting` `bank-reco` 🟢
+
+Found while answering the owner's「直接给你5月22号 opening bank balance 可以吗?」
+the day after bank-reco v1 shipped. Measured on prod: the posted opening batch
+carries 310-0010 DR 1,600.00, yet the July report's algebra only reproduced its
+"Out by 4,936.17" if the opening contributed ZERO — because every unmatched
+opening_balance / opening_balance_reversal leg was summed into BOTH glSen and
+unclearedBookSen, cancelling out of (computedGl − gl). Consequences: (a) keying
+the correct opening would not move the report by one sen; (b) the opening rows
+polluted the "Book — not yet in the bank" list (the bank has no "opening
+balance" transaction that could ever clear them); (c) automatch could
+amount-grab an opening leg for a real statement line within ±7 days of 开账日.
+
+Fix ([accounting.ts](../src/api/routes/accounting.ts): GET /bank-reco leg
+filter, automatch freeLegs filter, report uncleared walk): opening-family legs
+(existing `isOpeningSource` helper) stay in glSen — they ARE the account's
+floor — and are excluded everywhere they were treated as open items. Verified
+on prod: Out by moved 4,936.17 → 3,336.17, exactly the predicted
+4,286.17 (July stmt opening) − 1,600.00 (keyed GL opening) + 650.00 (stray
+June test statement line). Guard: `tests/bank-reco-opening-legs.test.mjs`.
+
+## BUG-2026-08-31-172 — one office-salary JV silenced a whole month's labour auto-extract `accounting` `pnl` 🟢
+
+Owner (Monthly P&L screenshot, hours after the auto-extract shipped):
+「monthly p&L direct labour 没有salary」— Aug'26 DIRECT LABOUR read 0.00 while
+May (injected) and Jun/Jul (recorded) were fine. Measured: he had just posted
+a manual JV (je-1643c94b, 31/08, CR 410-0010 RM 55,000 — office salaries to
+900-S00x). The injection's guard was MONTH-level ("any 410-0010 credit → the
+GL owns the month"), so his office JV switched off the production 750-x
+injection along with it — a mixed month (office recorded, production not)
+was flagged as a known simplification at design time and the owner hit it the
+same day.
+
+Fix: the guard is per (month, ACCOUNT). Entries crediting 410-0010 mark the
+accounts their DEBIT legs touched; injection then skips exactly those lines
+and still fills the rest. Jun/Jul stay owner-figures (their postings debit
+the labour accounts, which now individually match); Aug shows his 55k office
+JV AND the injected production payroll side by side. Applied in both
+glWindowSigned and /cost-expense-classes' mirrored loop.
+
+## BUG-2026-08-31-171 — JV amount cells reformatted to ".00" on every keystroke `accounting` `ui` `money-input` 🟢
+
+Owner (editing JE-2608-0002): 「这里输入amount这里很不友好，按了一次就跑去分和sen」.
+Typing in the journal form's Debit/Credit cells was fighting the user twice
+over: ① the controlled value re-rendered `(sen/100).toFixed(2)` after every
+keystroke — the `debitStr`/`creditStr` raw-text fields existed (added for the
+2026-06-12 reformat bug) but `updateLine` NEVER WROTE THEM, so the "raw text"
+path was dead code and one keypress became "5.00"; ② `type="number"
+step="0.01"` gave the field spinner arrows that stepped one SEN at a time.
+
+Fix: both cells are now `MoneyInput` (the house money field — free typing
+while focused, commit on blur/Enter, no mid-type reformatting), and the dead
+`debitStr`/`creditStr` fields are deleted. Same reformat family as
+BUG-2026-06-12 (payment dialog) and BUG-2026-08-13-095; note the accounting
+page still carries many raw money `<input>`s (see money-input.tsx header) —
+this closes the instance the owner hit, the class sweep remains open.
+
+## BUG-2026-08-31-170 — a DRAFT journal could be duplicated but never edited `accounting` `ui` 🟢
+
+Owner (JE-2608-0002 screenshot): 「我duplicate 了但是点不开edit」. He duplicated
+July's salary JV as an August template and could not change its date or
+description — the draft's ⋮ menu offered only Print/Post/Delete/Duplicate.
+
+Root cause: the old "Edit" menu item was a `() => {}` NO-OP and was correctly
+REMOVED in BUG-2026-08-13-090 — but a real editor was never built, leaving the
+Duplicate-as-template flow (Phase 3.1) advertising a workflow whose second
+step did not exist. The backend PUT `/journals/:id` has supported draft edits
+(date/description/lines, balance-checked) all along; only the UI was missing.
+
+Fix: `JournalEntryForm` gains an `editing` prop (prefills from the draft,
+saves via PUT instead of POST, title says "Edit JE-… (draft)"); the DRAFT
+branch of the Journal Entries context menu gains a real "Edit" item. No
+backend change. No automated UI harness covers this page — verified live on
+prod (menu shows Edit → form prefilled → Cancel leaves the draft untouched).
+
+Class link: same family as BUG-2026-08-13-090 (controls that advertise
+actions that do not exist) — this is the other half: removing the lying
+control without shipping the real one turns the lie into a dead end.
+
+## BUG-2026-08-28-169 — a price-list refresh would have written per-BOX prices into a per-PIECE list `procurement` `money` 🟢
+
+🟢 Caught on the FIRST production dry run, before anything was written.
+
+Owner: 「把我们的价目表也更新去最新价钱」. Every purchase order autofills its
+unit price from `supplier_material_bindings`, and the list had gone stale —
+OCEAN SKY's fasteners were stamped 2026-05-05 while August invoices paid
+something different on all three. Real scope measured: **86 changes across 11
+suppliers, 47 up and 39 down**, 161 already current.
+
+**11 of those 86 were not price changes at all.** They were unit mismatches —
+the invoice line priced per box or per roll against a list priced per piece or
+per metre:
+
+| Material | List | Invoice | |
+| --- | --- | --- | --- |
+| NON WOVEN WHITE | RM 0.77 | RM 231.00 | ×300 |
+| M4X30MM | RM 0.02 | RM 18.00 | ×900 |
+| CS 7MM | RM 0.82 | RM 21.00 | ×25.6 |
+| GALAXY-04- VIOLET | RM 127.20 | RM 5.00 | ×0.04 |
+| SD Y | RM 50.22 | RM 9.00 | ×0.18 |
+
+Writing any of those into the price list would have **silently mis-priced every
+future order of that material by up to 300×** — far worse than the stale price it
+replaced, and invisible until somebody read an invoice.
+
+Fix = the same order-of-magnitude guard the sofa repricer carries (`OUTLIER_MULTIPLE
+= 3`), measured against what the LIST holds today rather than against another
+derived number — a guard that trusts a computed figure cannot catch a wrong
+computed figure. The refused rows are surfaced as `unitMismatches`, a worklist
+naming the invoice to check, rather than as a count buried next to
+"already current: 161".
+
+**The lesson, and it is the repo's oldest one:** the guard already existed, in
+`import-completion/sofa-pricing.ts`, written for exactly this failure. Building a
+second repricer without carrying it over is fix-the-instance-miss-the-twins in a
+new file rather than a new line. Regression: `tests/supplier-price-refresh.test.mjs`
+executes the ratio rule against all five real cases plus the four genuine price
+moves that must survive it.
+
+## BUG-2026-08-28-168 — the sub-cent price fix shipped in four places and reached the operator in none of them `procurement` `money` 🟢
+
+- **Symptom (Siti → owner, 2026-08-28 13:23)**: 「i try to enter the price, it
+  was still rounding off the amount」 — the day after the sub-cent fix
+  ([#335]) merged. Owner: 「全部啊 我们的 FE BE DB 都要可以 不可以进位成 0.66
+  的 我们的 account 就不对到完了」 and 「你想看 我需要给 rm0.055 然后变成给
+  0.06 不是代表给多了吗 account 怎么能对账呢」.
+- **The money**: OCEAN SKY 2608-461 quotes NAIL LEG 5/8 at 600 PCS × RM 0.05500
+  = RM 33.00. Recorded at RM 0.06 that line is RM 36.00 — RM 3.00 invented, and
+  **invisible**, because the line total is recomputed from the rounded rate and
+  therefore agrees with itself. Only the supplier's paper disagrees.
+- **Root cause, and it is a shape not an oversight**: #335 was correct in
+  everything it touched — the three columns widened, `MoneyInput` given
+  `step="0.0001"`, `formatCurrency` taught a third and fourth digit,
+  `lineTotalSen` written to multiply first and round once. The procurement
+  forms do not go through those helpers. Each carried its own `step="0.01"`,
+  its own `(sen / 100).toFixed(2)` seed and its own `Math.round(rm * 100)` on
+  submit — **nine sites across six files**, including the OCR path
+  (`scan-supplier-modal.tsx`) that produced the OCEAN SKY invoice in the first
+  place, and the PI Edit seed, which truncated a correctly-stored RM 0.055 the
+  instant the operator pressed Edit and wrote 0.06 back on save.
+- **Second, separate fault — the DB fix was never proven applied.** Migrations
+  are inert on deploy here; the widening lived as one ALTER inside each of
+  three route self-apply blocks, and every one of those is awaited on **writes
+  only**. So between the deploy and somebody's first save, the honest answer to
+  "is production fixed?" was *nobody can say*. The old regression test asserted
+  those three ALTERs and passed the whole time: the assertion was true and the
+  property it stood for was false.
+- **Fix**: one definition in `src/api/lib/unit-price-precision.ts`, called from
+  the PI / PO / GRN **list handlers** as well as the write paths — opening a
+  page is now enough. It probes `information_schema` first and issues DDL only
+  for a column still too narrow, so the steady state is one catalogue read and
+  no table lock. All nine form sites moved onto `roundUnitPriceSen` /
+  `lineTotalSen` / `formatUnitPriceInput`. `GET /api/import/unit-price-precision`
+  reports the live column types and deliberately does **not** repair them — a
+  probe that fixes what it measures cannot answer the question being asked.
+- **Rate vs amount is preserved**: tax, discount, line totals and payments stay
+  whole sen. Only the three unit-price columns carry four decimals.
+- **Regression**: `tests/unit-price-four-decimals.test.mjs` (21 tests) —
+  executes the arithmetic on the real invoice, round-trips the form seed, and
+  COUNTS the form sites rather than checking the one that was reported.
+  `tests/unit-price-sub-cent.test.mjs` amended, with the reason it used to pass.
+- **Class**: fix-the-instance-miss-the-twins (`docs/BUG-CLASSES.md`), compounded
+  by a runtime-only schema path whose application nobody could observe.
+
+### Third pass — repairing the invoices already written, and two upstream sites
+
+Owner: 「你把之前的那个因为三位数、四位数不能填进去的问题，都帮我 backfill 回去」.
+
+**The damage is not recoverable by arithmetic.** The rounding happened on the
+way IN — RM 0.055 became 6 sen before anything was written, and the line total
+was recomputed FROM that 6. The invoice agrees with itself perfectly; nothing
+inside the ERP disagrees. That is exactly why it survived.
+
+The evidence lives in ONE place: `scan_queue.raw_json`, the scanner's structured
+reading of the supplier's own PDF, recording `unitPrice: 0.055` beside
+`amount: 33.00` as printed. The PDF bytes are NULLed on consume; that JSON is
+not. So `import-completion/rounded-price-repair.ts` **copies the supplier's own
+number** — the owner's standing rule for this shape — behind a confidence gate
+that requires the scanned document to agree with ITSELF, and refuses (with a
+named reason) on an ambiguous pairing, a missing line, a self-contradicting
+scan, or a gap larger than a rounding.
+
+Two more rounding sites found on the way, both UPSTREAM of everything the first
+two passes fixed:
+
+- **`scan-engine.ts`** derived a missing unit price as `amount / qty` rounded to
+  two decimals of RINGGIT. RM 33.00 / 600 → RM 0.06 — the derivation re-created
+  the exact error it exists to avoid.
+- **`supplier-binding-learn.ts`** rounded the price it writes into the supplier
+  price list, which is what the NEXT purchase order copies from. A fix that
+  stops at the documents but leaves the price list rounded regenerates the bug
+  on the next order.
+
+Hand-typed purchase orders are deliberately out of scope: no scan means no
+evidence, and the only record of the true price is the supplier's paper. The
+report counts them rather than guessing.
+
+### Fourth pass — the ledger the repair left behind
+
+**Measured on prod immediately after the repair ran:** five CONFIRMED invoices
+whose face had moved while the GL still carried the old amount, with individual
+gaps up to RM 40.00. They were the ONLY `pi_gl_mismatch` rows in the entire
+system, so the repair had created all five.
+
+The cause is a blind spot with a specific shape. `PUT /purchase-invoices/:id`
+already posts a correcting double-entry when an edit moves a CONFIRMED invoice's
+amount — but it fires on `recomputedAmount !== existing.amountSen`, so it is
+blind to a repair that writes the LINES directly: by the time that repair
+finishes, the header already agrees with the lines and no delta is left to
+detect.
+
+The repair endpoint's own response had SAID this would happen ("Ledger legs are
+NOT rewritten here"). **An accurate warning nobody acts on still leaves the books
+wrong**, which is the whole thing being chased — 「account 怎么能对账呢」.
+
+Fix = `POST /purchase-invoices/:id/resync-gl`, built on `loadPiLedgerNet` +
+`buildPiDeltaLegs` — the pair the VOID path already uses. They derive the move
+from WHAT IS ACTUALLY POSTED rather than from a count of button presses, which
+is what makes void → unvoid → void safe; targeting the invoice's current face
+instead of zero is the same primitive with one argument changed, so idempotence
+falls out of the arithmetic instead of a flag. Legs carry
+`purchase_invoice_restate_post`, deliberately reusing an existing suffix in
+`doc-date.ts` so the correction dates to the INVOICE — inventing a sourceType is
+a two-file change and forgetting the second file is silent (class C5, three
+instances). Refused on anything but CONFIRMED-and-unpaid, and refused outright
+on an invoice that was never posted (that is `/backfill-gl-postings`' job).
+
+Regression: `tests/pi-resync-gl.test.mjs`.
+
+**And the repair now finishes the job itself.** Leaving the re-sync as a
+sentence in the response is what produced the five mismatches in the first
+place, so `repair-rounded-unit-prices` SELF-CALLS
+`POST /purchase-invoices/:id/resync-gl` for every invoice it touched — the same
+"call the real path, never copy it" rule the July/August invoice backfill
+settled on, under the CALLER's own session. A DRAFT answers 409 (nothing was
+ever posted) and that counts as success; anything else lands in
+`ledgerFailures` with the response saying plainly that the books are out of
+step. The old test asserted the WARNING TEXT and passed the whole time the
+books were wrong; it now asserts that the ledger actually moves and that no leg
+builder has been copied into the file.
+
+**One row per invoice line — caught on production, in the dry run, before any
+write.** The first live report showed **9 lines, −RM 24.50**. Two supplier
+documents had been scanned TWICE (a retry, a re-upload, the cache path) and each
+reading matched the SAME invoice line, so 9 rows were really 7 and the true
+figure was **−RM 14.50**. The write itself would have been harmless — the same
+value written twice — but **the money is the thing being approved**, and a
+report that inflates it by 69% is a report that gets approved for the wrong
+reason. Readings that agree now collapse to one row; readings that DISAGREE
+about the same line are a genuine ambiguity and both are refused. This is the
+same "count the claimants" rule the July/August invoice backfill settled on.
+
+### Second pass, same day — the price has to survive the whole chain
+
+Owner, after the first fix landed: 「只要任何有需要的地方都需要支持」.
+
+He is right that stopping at the purchase invoice is its own reconciliation
+error. RM 0.055 × 600 **received** at RM 0.06 values the batch at RM 36.00
+against a supplier invoice of RM 33.00, and the RM 3.00 then sits in stock and
+afterwards in cost of sales. So the rate list grew from 3 columns to **14**,
+following the money: supplier price list → price history → PO → GRN → PI →
+`rm_batches` → `cost_ledger` / opening stock / adjustments / returns / R&D
+issuances / FG batches.
+
+Three more code sites, all of them rounding a RATE:
+
+- `accounting.ts` derived a receipt's unit cost as `Math.round(lineSen / qty)`
+  — 3300 / 600 = 5.5 became 6, which is the RM 36-vs-33 case exactly.
+- `purchase-return-create.ts` rounded the residual unit cost in **two** places.
+- **`sku-form-dialog.tsx` — the supplier price list, where the number is
+  TYPED.** It rounded twice: `step="0.01"` refused the keystroke, and
+  `moneyFieldToSen` (correct for an amount) rounded whatever survived. This is
+  the SOURCE every PO, GRN and PI copies from, so it was the highest-leverage
+  site of all and was not in the first pass.
+
+`unitPriceFieldToSen` now sits beside `moneyFieldToSen` in `money-field.ts` so
+the rate/amount distinction is visible at the call site rather than remembered.
+
+**The sales side is deliberately untouched**, and the tests say so: the owner's
+own ruling is that a computed sales unit price lands on a whole ringgit
+(「我全套系统都要整除的」, 2026-08-07). Furniture is priced in hundreds; no
+sub-cent case exists there, and widening those columns would contradict a live
+ruling to buy nothing.
+
+## BUG-2026-08-27-001 — every JV action in the row menu was dead: the context menu called `action({})`, so Post hit `PUT /journals/undefined` `ui-frontend` `accounting` 🟢
+
+- **Symptom (owner, 2026-08-27)**: 「每次 JV 都会 merge 不上」— posting the July
+  salary JV (JE-2608-0001, RM 35,370.50) from the Journal Entries row menu
+  toasted "Journal entry not found" every time; the entry stayed DRAFT.
+  Reproduced live: the click sends `PUT /api/accounting/journals/undefined`
+  (captured in the network log) — the backend honestly 404s an id that
+  literally is the string carrier of `undefined`.
+- **Root cause** (`src/components/ui/data-grid.tsx` `resolvedCtxItems`): the
+  context menu invokes `item.action({})` on both the click and keyboard paths,
+  relying on actions arriving PRE-BOUND to their row. The ARRAY form of
+  `contextMenuItems` was wrapped (`action: () => item.action(ctxMenu.row)`);
+  the **FUNCTION form's items passed through raw**, so any action that read
+  its argument — JournalsTab's `(r) => handlePost(r.id)`, plus its Delete /
+  Void / Unvoid / Duplicate / Print-voucher — received `{}`. Every page using
+  the function form had arg-reading menu actions silently dead; closure-style
+  actions (`() => doX(row.id)`) kept working, which is why the breakage looked
+  page-specific.
+- **Fix**: one binder for BOTH forms — pure `bindContextMenuRow` in
+  `src/lib/context-menu-bind.ts`, used by `resolvedCtxItems` for the function
+  and array branches alike. Grid-level, so all ~24 grids heal at once.
+- **Verify**: `tests/data-grid-context-menu-row.test.mjs` (3) pins the arg
+  reaches the action, fields survive, closures unchanged; typecheck clean;
+  live re-test after deploy = owner posts the July JV.
+
+## BUG-2026-08-26-168 — several POs on one scanned PDF fought each other for the download, and some lost `sales-orders` `ui-frontend` `data-integrity` 🟢
+
+> Owner: 「今天又有问题，昨天又有问题，前天又有问题…先把现在的问题修掉，就是后面的单不要再出现这样的问题了」
+
+The RBAC fix (BUG-2026-08-21-159) removed the wall, and originals started saving again — 42 of the 60 orders created after it kept theirs, against 0 before. But 18 did not, and it was still happening daily.
+
+**Seven of the eighteen were not misses at all.** A SERVICE ORDER is copied from an existing order, never scanned from a customer's PO, so it has no original to lose. The report listed them anyway, so every day carried a few false alarms — and a report that cries wolf daily is one nobody reads on the day it is right. Those are now excluded.
+
+**The other eleven were real, and eight were one customer.** `persistSoOriginal` fetches `/api/scan-queue/:id/bytes` per SALES ORDER. A scanned PDF can hold several customer POs, so eight POs off one scan meant **eight parallel downloads of the same multi-megabyte file**, fired together by `Promise.all`. Some lost. The failure is caught and reported per-PO, and because it lands on the BYTES fetch rather than the upload, **nothing reaches the server's error log** — which is why a check for `/api/files` errors came back empty and made the client look innocent. The prod signature was a batch of eight Carress orders (2026-08-24 08:31) where the first three kept their original and the last five did not.
+
+**Fix:** the bytes for a scan are fetched ONCE per create pass and shared. The cache holds the in-flight promise, so a call arriving mid-download waits rather than starting its own; a failed download is evicted so the next PO may retry.
+
+**The cache is passed IN rather than held in the module** — and that distinction was not a preference. The first attempt used a module-level Map, and the existing "empty source bytes" test went red: a Map that outlives the scan it belongs to hands a later fetch of the same row the earlier answer. Scoped to one create pass, the test passes on its own terms.
+
+Regression: `tests/so-original-every-path.test.mjs` — eight POs off one row cause exactly ONE download and eight attachments, two different rows still download separately, a failed download is not remembered, and the create branch is asserted to pass the shared cache.
+
+## BUG-2026-08-25-167 — `ORDER BY rowid` on Postgres, and a line pairing that depended on an order that does not exist `pricing` `invoices` `infrastructure` 🟢
+
+🟢 Fixed. The new invoice backfill 500'd the moment a single invoice entered its scope. Small scopes appeared to pass — they returned early on zero invoices, so every "OK" was the empty path.
+
+**`ORDER BY rowid` is a SQLite pseudo-column and does not exist on Postgres.** It was carried over from the prior art in `admin.ts` (`/backfill-invoice-prices`), which still contains it — that endpoint would fail the same way on the live database, and is worth knowing before anyone reaches for it.
+
+The deeper problem the crash exposed: the pairing of invoice lines to delivery lines was "the nth occurrence of this product code", which needs a reliable line order **on both sides**. There is none — `invoice_items` has no line number. Ordering by `id` would have RUN, and been a guess: two lines of the same product on one invoice can come from different sales orders at different prices, and nothing records which line is which.
+
+So the pairing no longer depends on order at all. When a product code appears more than once on an invoice, **every** delivery counterpart must resolve to the same build-up — then the pairing cannot matter. If they disagree, those lines are refused and named ("same product on this invoice resolves to different prices — cannot tell which line is which"), the same discipline as a contested sales-order line.
+
+Worth recording: the crash was the lucky part. `ORDER BY id` would have produced plausible numbers on the ambiguous invoices, and nothing would have flagged them.
+
+Regression: `tests/invoice-backfill-from-so.test.mjs` (14 tests).
+
+## BUG-2026-08-24-166 — the surcharge backfill would have wiped RM 9,670 of special-order charges to zero `pricing` `sales-orders` `data-integrity` 🟢
+
+🟢 Fixed before it wrote anything. Caught by reading the FIRST dry run of an endpoint written that same hour — and the defect was in that new endpoint, not in older code.
+
+`/refresh-so-surcharges` re-derives a line's divan / leg / total-height / special-order charges from the owner's current lists. Its first live dry run reported **37 lines, net −RM 9,555** where an independent check had found only 8 lines needing correction. The breakdown said why: **27 lines going special-order → RM 0**, RM 9,670 of charges about to be deleted.
+
+Two causes, one shape:
+
+1. `priceOfSen` returns **0** for a token it cannot find in the config. A special the current list does not name is UNKNOWN, not free — but the derivation treated the two identically.
+2. The endpoint never passed the line's own **`customSpecials`** (per-line owner-defined surcharges, stored as JSON on the row), so anything priced there derived to nothing.
+
+This is the repo's oldest documented bug shape — **an absence read as a value** — reappearing inside code written to *fix* surcharges. Worth stating plainly: the author had just spent the session catching the same shape in five other places.
+
+Fix: derive only where the derivation is CONFIDENT. Every token on the line must be priced by the config (or covered by a custom special); every height must appear in its list. Where it is not, **the stored figure stands** and the line is reported under `unresolved` with what was kept and why — silence there would read as "nothing else needed changing", which is the opposite of the truth. Total-height rides on both height lookups, since it derives from gap + divan + leg.
+
+Regression: `tests/refresh-so-surcharges.test.mjs` (15 tests).
+
+**Follow-up, same endpoint, same shape (2026-08-25).** The confidence check itself was written as a SECOND COPY of the tokenizer — splitting on `/[,+]/` while the canonical `parseSpecialOrderTokens` splits on `/[;,]/` and drops `OTHER: …` free-text notes. The live data uses semicolons, so **28 lines whose specials were perfectly well known** were filed as "not priced by the list" and left untouched. It now calls the canonical parser, and "known" is decided by the STATIC catalog (`specialOrderOptions`) because `priceOfSen` returns 0 for any name absent from it regardless of the config. Writing the parser twice is the same mistake that put six copies of a dropped surcharge term in this repo — third time in two days.
+
+## BUG-2026-08-24-165 — the repricer would have billed customers for free repairs, and multiplied one line by nine `pricing` `sales-orders` `data-integrity` 🟢
+
+🟢 Fixed. Both found by READING the dry run before the July/August backfill ran, and neither would have raised an error if written.
+
+**Service orders.** Owner's rule, stated 2026-08-24 in as few words as it needs: 「service order是根据当初开的价格 **0就是0 有amount就是有amount**」 — a repair was quoted at a number (sometimes zero, for goodwill), the customer was told that number, and a price-list change months later does not reach back and alter what was agreed. It is a RULE, not a scope choice, so there is deliberately **no flag** to include them; a test forbids one. An `SV-` document is priced at exactly what the operator typed — 0 means 0, a free or goodwill repair. Every write path says so (the SO handler still carries a note about the SV-2606-001 RM 730 incident); this repricer had never heard of them. The 2026-08-24 dry run put **33 service-order lines** in the plan worth **+RM 15,674.50**, **19 of them currently at RM 0**. That was 76% of the run's headline total. The query now selects `isServiceOrder`, drops those orders, and reports how many it dropped — "205 lines will change" means something different if 33 were quietly dropped on the way.
+
+**Order-of-magnitude moves — and a typo in the price list.** SO-2608-234's `5536-CNR` was going to be rewritten **RM 900 → RM 8,258**. The first version of this guard compared the computed price against the PRICE LIST and did not fire, because **the list agreed with 8,258**: the master `product_prices` row effective **2026-07-18** holds `825800` sen where its neighbours (2026-08-20, 2026-08-21) hold `82500` and `90000`. One digit too many, typed into the price list itself — and the repricer resolves as of the ORDER's date, so any order dated between 2026-07-18 and 2026-08-19 picks it up.
+
+A guard that trusts the list cannot catch a bad list, so it now measures against **what the order carries today**: a line moving more than 3× in either direction is SKIPPED with a reason that names both prices and points at the SKU's price list rather than the order. **The 2026-07-18 master row for 5536-CNR is a real data error the owner still needs to correct** — the guard stops it spreading, it does not fix it.
+
+Both are the same lesson: a dry run is only worth reading if what it cannot justify appears as a SKIP with a reason rather than as a number. Regression: `tests/repricer-service-orders-and-outliers.test.mjs`, including the ratio rule executed against the real 900 → 8,258 case.
+
+## BUG-2026-08-24-164 — the repricer had no scope but status, so "July and August" meant the whole book `pricing` `sales-orders` 🟢
+
+🟢 Fixed. `/recompute-so-sofa-prices` filtered on status and nothing else. Asked to backfill July and August it would have rewritten **every order in the book** — 1,231 orders live on 2026-08-24, against the ~500 the owner had actually decided on, including other customers and other months.
+
+Added `?from=` / `?to=` (compared on the order's OWN date — `companySODate` falling back to `created_at`, the same value the pricing resolves as of), `?customerIds=`, and an exclusion for orders whose invoice is already `PAID` / `PARTIAL_PAID`. The paid exclusion is the owner's ruling (「把还没paid的都补」) and is the DEFAULT: an order whose invoice is settled is money paid against a document the customer holds, so repricing it makes the invoice disagree with the payment. It takes an explicit `?includePaid=true`.
+
+A malformed date is a 400, not a silent full-scope run — ignoring `?from=2026-7-1` would rewrite the whole book while the caller believed it was scoped to July.
+
+Every response now echoes `appliedScope` (statuses, from, to, customerIds, includePaid, paidOrdersExcluded), including the empty-scope early return: "0 orders" and "0 orders matching a filter you did not mean" are otherwise indistinguishable. Regression: `tests/repricer-scope-filters.test.mjs`.
+
+**Follow-up the same day:** the dry run also capped its change list at 10 rows with no indication that it had. Ten rows is a taste, not a decision, and this list is what a person approves before ~500 orders are rewritten — `?samples=N` now returns up to 500 and `samplesTruncated` says plainly when the list was cut.
+
+## BUG-2026-08-24-163 — the repricer's dry run counted unchanged lines as changes `pricing` `data-integrity` 🟢
+
+🟢 Fixed. The change test was `p.newLineRM !== p.oldLineRM` — a comparison of MONEY IN FLOATS, against the repo's standing rule that money is integer sen. Both fields are `sen / 100`, so a line whose price did not move could still read as moved: 103263 sen is RM 1032.63, and the recomputed path returns `1032.6299999999999`.
+
+The money itself was never wrong — the write rounds back with `Math.round(RM * 100)`, so the stored sen is exact. What was wrong is the **dry run**, and the dry run is the artefact a person approves before ~500 orders are rewritten. On the live scope it reported **351 changed lines**; an unknown share of those were lines that do not change at all, and each one still took an UPDATE.
+
+Fix: compare and sum in sen (`senOf` + `differs`), in both the SO and CO copies. Regression in `tests/repricer-total-height.test.mjs`, including the exact float that lied.
+
+Found in the same session as -161 and -162, all three in the path being prepared for the July/August price backfill.
+
+## BUG-2026-08-24-162 — the repricer dropped the total-height surcharge, in six places `pricing` `sales-orders` `data-integrity` 🟢
+
+> Owner, briefing the July/August price backfill: 「确保 BedFrame 包含 D1 price、leg price、**total height price**、special order price，再加上 Sofa 等等，全部都要有。你看一下，确保了解它的源代码是怎么计算 costing 的。」 He named the term that was missing.
+
+**Root cause.** `/api/import/recompute-so-sofa-prices` and its consignment twin built the unit price by hand — `priceSen + legPriceSen + divanPriceSen + specialOrderPriceSen` — while every WRITE path builds it through `calculateUnitPrice` (`src/lib/pricing.ts:38`), which also carries `totalHeightPriceSen`. Measured on prod the same day: of the live July/August lines carrying a height surcharge, **11 of 11** have `unitPriceSen = base + leg + divan + special + totalHeight`.
+
+So repricing a bedframe with a height surcharge **silently removed it** — a LOWER price on an order already sent to a customer, with nothing in the output naming the missing term. A 26" total height at RM 80 × 3 units is RM 240 off one line. Two of the surcharge sums also fed the combo residual, where the missing term would have been redistributed into the base and made each line's build-up stop adding up.
+
+**Six sites, not two.** SO repricer and CO repricer, each with a main pass and **two** combo-residual passes. The first sweep fixed four; the new guard went red on the remaining two, written on one line and so missed by the multi-line pattern. The site count is now asserted so a seventh cannot appear quietly.
+
+**Third instance of this exact term.** `src/api/lib/sofa-combo-pass.ts:228` still carries the comment from the last one ("Was a hardcoded 0. It feeds `surchargesPerUnitSen` … a zero here hands the surcharge's worth of the agreed combo total to the BASE price"), and the canonical engine `src/api/lib/sofa-combo.ts:318` has carried it correctly all along. The repricers were stale copies of a fixed bug — so they now CALL `calculateUnitPrice` / `calculateLineTotalWithDiscount` rather than restating them.
+
+`discountSen` was missing from the line total for the same reason: the line was `newUnit * quantity` with no discount term. Zero on every live line today (0 of 167 sampled), which is exactly how it would have stayed invisible until the first discounted line was repriced.
+
+**Verified.** `tests/repricer-total-height.test.mjs` — 8 tests, including the surcharge's effect priced in money, the six-site count, both queries actually selecting the new columns, and the row type declaring them so a missing column fails `tsc` rather than production. Full suite 4,356 pass / 0 fail. Found BEFORE the backfill ran; it would have repriced ~500 July/August orders with the surcharge stripped.
+
+## BUG-2026-08-24-161 — a same-day price correction could lose to the row it superseded `pricing` `data-integrity` 🟢
+
+🟢 Fixed. Clearing the sofa P3 prices for 2990 and Carress meant POSTing a corrected `customer_product_prices` row on the SAME `effectiveFrom` as the row it supersedes — the ordinary shape of a same-day correction. That left 60 products with two rows dated 2026-08-24, and the two readers of that table disagreed about which one wins:
+
+| reader | order | picks |
+|---|---|---|
+| `resolveCustomerPriceAsOf` (`customer-products.ts:1004`) | `effectiveFrom DESC, created_at DESC` | the correction — what the order screens show |
+| `pickActive` ×2 (`import-completion/sofa-pricing.ts`) | `effectiveFrom` only, over a query also ordered by `effectiveFrom` only | **whatever Postgres happened to return** |
+
+So the repricer could price an order off the **superseded** row while the SO screen showed the corrected one, and a re-run could disagree with itself. Nothing in the output would say so — both numbers are plausible prices, which is why it would have survived review. Fix: both copies share one comparator (`newestFirst`) and both queries select and order by `created_at`, mirroring the canonical resolver exactly.
+
+**Verified.** `tests/price-row-tiebreak.test.mjs` — the comparator is reproduced from source and executed (the same-day pair sorts to the correction regardless of input order) rather than merely asserted about, plus a guard that the canonical resolver still orders the way this one now copies. Found before the July/August backfill, which would have baked the arbitrary choice into ~500 orders.
+
+## BUG-2026-08-21-160 — a dropdown on the Inventory screen re-routes money between P&L accounts, and left no record that it had `accounting` `audit-logging` `data-integrity` 🟢
+
+> Found while answering what looked like a filing question — 「12 笔 B.FILLER 海绵要不要也并进 S.FILLER」 — and turned out to be an accounting one.
+
+**What `itemGroup` actually is.** It looks like a label on the raw-material form. It is the real AutoCount **stock-group code**, and four GL accounts hang off it:
+
+| | B.FILLER | S.FILLER |
+|---|---|---|
+| purchase | `703-0010` | `703-0020` |
+| stock | `330-2001` | `330-2002` |
+| opening / closing | `703-0001` / `703-9999` | `703-0002` / `703-9998` |
+
+Measured on prod the same day, both carrying real money: **703-0010 = RM 76,732.35 · 703-0020 = RM 92,768.43**.
+
+**The two halves of the routing disagree, and both surprise people.** The purchase account is decided when the invoice **posts** (`mapPurchaseLinesToAccounts`, `purchase-invoices.ts:170`, reads `raw_materials.item_group` as it stands at that moment), so already-posted journals keep the old account forever — moving a material **splits its own purchase history across two accounts**. The stock / opening / closing accounts are decided when the **report runs**, off the current group (`getStockMap`, `accounting.ts:5543`) — so those move **retroactively**, including for periods that already closed.
+
+**The defect.** `PUT /api/raw-materials/:id` wrote the new group and returned. No before-value, no actor, nothing. `updated_at` moved, and that was the entire trace. So "who moved this material, and when did its account change?" — a question nobody thinks to ask until a P&L comparison looks wrong — had no answer anywhere in the system. The bulk-import path was worse: it could re-group sixty materials in one request, and its pre-fetch selected only `id, itemCode`, so it could not have known a group changed even if it had wanted to record it.
+
+**How it surfaced.** I moved 11 sponges from `B.FILLER` to `S.FILLER` at 12:26 that morning on the owner's instruction (「全部都是sofa的海绵来的」). Six of them have purchase history — **RM 11,414.25 across 20 CONFIRMED (= posted) purchase invoices** — which now sits in `703-0010` while every future purchase of the same materials lands in `703-0020`. That is a defensible outcome and it may well be what he wants; what is not defensible is that nothing recorded it. I only knew which 11 they were because their `updated_at` happened to be one second apart.
+
+**Fix.** Both write paths now emit an audit event on a group change (`raw-materials.ts:533` single row, `:763` bulk), carrying old group, new group, **and the four accounts each resolves to** — snapshotted, because the owner's `coa_stock_map` override can be edited later and a bare group code is an archaeology problem six months on. The bulk pre-fetch now selects `itemGroup`, and emits **one** event for the whole sheet rather than one per row: a sheet that re-groups sixty materials is a single act by a single person, and sixty rows would bury it.
+
+New `src/api/lib/stock-group-accounts.ts` answers "which accounts does group G map to right now". It **owns no account codes** — the default maps stay with the code that posts and reports off them, and are imported — so there is no second copy to drift; a test asserts the file contains no `33x-xxxx` / `70x-xxxx` literal.
+
+**The precedence is pinned because the two readers disagree.** The purchase reader copies only `.purchase` across from the kv override, so a kv entry for another field does not shadow the built-in account. The stock reader **replaces the whole triple** — a kv row carrying only `stock` leaves opening and closing falling through to `rmDefault`, not to that group's built-in pair. `resolveGroupAccounts` mirrors both exactly; tidying either into the other would make the audit record disagree with the journal it describes.
+
+**Verified.** 12 tests (`tests/item-group-change-is-audited.test.mjs`), each guard proven red before green — removing the `itemGroup` column from the bulk pre-fetch fails, and deleting the single-row audit block fails. Full suite 4,336 pass / 0 fail. Prod figures above read live from `/api/accounting/trial-balance` and `/api/raw-materials`.
+
+**Class.** Same shape as BUG-2026-04-27-007 (audit-event write failures swallowed silently): a field that carries accounting meaning, edited through a screen that presents it as cosmetic. The generalisation worth keeping: **if a column feeds a GL account, changing it is a posting, and a posting leaves a record.**
 
 ## BUG-2026-08-21-159 — nobody but an admin could attach a document: `files` was never a registered RBAC resource `security` `ui-frontend` `data-integrity` 🟢
 

@@ -62,3 +62,30 @@ export function monthHasDeptForecast(pct: Record<string, unknown> | undefined | 
   for (const k of Object.keys(pct ?? {})) if (k.startsWith("dept:")) return true;
   return false;
 }
+
+// Every account the labour map can post wages to (dept accounts + fallback +
+// the three statutory accounts). A month that forecasts BY DEPARTMENT
+// supersedes exactly these accounts — keying both a dept row and one of these
+// would double-count, so both the Forecast page and the dashboard skip them
+// in dept mode (owner 2026-08-24: dept rows follow the labour map's section).
+export type LabourMapLike = {
+  fallback?: string | null;
+  byDept?: Record<string, string> | null;
+  epf?: string | null;
+  socso?: string | null;
+  eis?: string | null;
+};
+
+export function labourMappedAccounts(map: LabourMapLike): string[] {
+  const s = new Set<string>();
+  const add = (v?: string | null) => {
+    const t = String(v ?? "").trim();
+    if (t) s.add(t);
+  };
+  add(map.fallback);
+  add(map.epf);
+  add(map.socso);
+  add(map.eis);
+  for (const v of Object.values(map.byDept ?? {})) add(v);
+  return [...s].sort();
+}

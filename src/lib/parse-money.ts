@@ -28,7 +28,7 @@
 // ---------------------------------------------------------------------------
 
 /** Grouping separators we accept and strip: comma, space, narrow/no-break space, apostrophe. */
-const GROUPING = /[,\s  ']/g;
+const GROUPING = /[,\s\u00A0\u202F']/g;
 
 /**
  * Parse a typed money string into a RINGGIT number (not sen).

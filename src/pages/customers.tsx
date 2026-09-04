@@ -74,6 +74,7 @@ import {
   type SofaComboHistoryRule,
 } from "./maintenance/SofaComboHistoryDialog";
 import { moneyFieldToSen } from "@/lib/money-field";
+import { useSofaSeatHeights } from "@/lib/use-sofa-seat-heights";
 
 type CustomerMutationResponse =
   | { success: true; data: Customer }
@@ -2391,7 +2392,9 @@ function custGroupByCombo(rules: CustSofaComboRule[]): CustComboGroup[] {
   return groups;
 }
 
-const CUST_SOFA_SEAT_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
+// Was hardcoded, and was missing 26" and 20" — both live sizes, so a
+// customer-specific price for them could not be entered at all.
+// Owner 2026-08-21: 「这些不可以写死啊 应该要根据我的 product maintenance 那边啊」
 
 function renderCustComponentSizes(sizes: CustSofaComboSizes): string {
   if (!Array.isArray(sizes) || sizes.length === 0) return "—";
@@ -2401,6 +2404,7 @@ function renderCustComponentSizes(sizes: CustSofaComboSizes): string {
 }
 
 function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: string; customerName: string }) {
+  const seatHeights = useSofaSeatHeights();
   const { confirm } = useConfirm();
   const [rules, setRules] = useState<CustSofaComboRule[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2575,7 +2579,7 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
                     <th className="px-3 py-2 text-left font-semibold text-[#6B7280]">Base</th>
                     <th className="px-3 py-2 text-left font-semibold text-[#6B7280]">Components</th>
                     <th className="px-3 py-2 text-left font-semibold text-[#6B7280]">Tier</th>
-                    {CUST_SOFA_SEAT_HEIGHTS.map((h) => (
+                    {seatHeights.map((h) => (
                       <th key={h} className="px-3 py-2 text-right font-semibold text-[#6B7280]">
                         {h}″
                       </th>
@@ -2599,7 +2603,7 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
                             {r.fabricTier}
                           </span>
                         </td>
-                        {CUST_SOFA_SEAT_HEIGHTS.map((h) => (
+                        {seatHeights.map((h) => (
                           <td key={h} className="px-3 py-2 text-right text-[#374151]">
                             {r.pricesByHeight[h] != null ? formatRM(r.pricesByHeight[h]) : "—"}
                           </td>
@@ -2722,10 +2726,14 @@ function CustomerPriceHistoryDialog({
   // Sofa price matrix: 5 heights × 3 fabric tiers. Stored here as RM-string
   // inputs (so blank = "no price for this cell" instead of "RM 0"). Save
   // builds the sparse seatHeightPrices array from the non-blank cells.
-  const SOFA_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
+  // Follows Maintenance → Sofa → Sizes. It used to be a five-entry literal,
+  // which is why 26" had no row in this grid and could never be priced for a
+  // customer. The height type widens to `string` as a consequence — the set is
+  // not knowable at compile time any more, which is the point.
+  const SOFA_HEIGHTS = useSofaSeatHeights();
   const SOFA_TIERS = ["PRICE_1", "PRICE_2", "PRICE_3"] as const;
   type CustSofaTier = (typeof SOFA_TIERS)[number];
-  type CustSofaHeight = (typeof SOFA_HEIGHTS)[number];
+  type CustSofaHeight = string;
   const blankGrid = (): Record<CustSofaHeight, Record<CustSofaTier, string>> => {
     const out: Record<string, Record<string, string>> = {};
     for (const h of SOFA_HEIGHTS) {

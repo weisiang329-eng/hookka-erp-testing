@@ -22,6 +22,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { runSelfApply } from "../lib/self-apply";
+import { ensureUnitPricePrecision } from "../lib/unit-price-precision";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { makeLedgerEntry } from "../../lib/costing";
@@ -47,8 +48,14 @@ let grnMigrationPromise: Promise<void> | null = null;
 function ensureGrnMigrations(db: D1Database): Promise<void> {
   if (grnMigrationPromise) return grnMigrationPromise;
   grnMigrationPromise = (async () => {
+    // A unit price is a RATE with four decimals of sen. Shared with the PO and
+    // PI routes so the three cannot drift apart again.
+    await ensureUnitPricePrecision(db);
     const stmts = [
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS arrival_state TEXT",
+      // Sub-cent unit prices moved to api/lib/unit-price-precision.ts — one
+      // definition for all three procurement tables, applied from the read
+      // paths as well as the write ones. See the call above.
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS shipping_method TEXT",
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS carrier_name TEXT",
       "ALTER TABLE grns ADD COLUMN IF NOT EXISTS tracking_number TEXT",
@@ -1173,6 +1180,9 @@ app.get("/", async (c) => {
   // RBAC gate (P3.3-followup) — grn:read.
   const denied = await requirePermission(c, "grn", "read");
   if (denied) return denied;
+  // Opening the list is enough to widen the unit-price column — the schema fix
+  // must not wait for somebody to save a document. Cheap after the first time.
+  await ensureUnitPricePrecision(c.var.DB);
   const poId = c.req.query("poId");
   const supplierId = c.req.query("supplierId");
   const clauses: string[] = [];
@@ -1615,9 +1625,12 @@ app.post("/", async (c) => {
       }));
     }
 
-    const totalAmount = grnItems.reduce(
-      (sum, i) => sum + i.acceptedQty * i.unitPrice,
-      0,
+    // Rounded to whole sen: unit prices may now carry sub-sen precision (a
+    // rate), but this is the GRN's own money total (an amount), and an amount
+    // lands on whole sen. Summing first and rounding once keeps it equal to
+    // the supplier's arithmetic rather than to the sum of rounded lines.
+    const totalAmount = Math.round(
+      grnItems.reduce((sum, i) => sum + i.acceptedQty * i.unitPrice, 0),
     );
 
     // Final fall-through for purchase company: if body and source PO didn't

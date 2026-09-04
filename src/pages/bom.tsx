@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo, useDeferredValue } from "react";
+import React, { useState, useRef, useEffect, useMemo, useDeferredValue } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
@@ -810,6 +811,34 @@ function autoDetectMaterialPatch(kind: "FABRIC" | "LEG"): Partial<WIPMaterial> {
 }
 
 // ---------- Raw Material Select (searchable dropdown from inventory) ----------
+// Where the dropdown should be drawn, in VIEWPORT coordinates.
+//
+// It is rendered through a portal rather than inside the row because the BOM
+// modal body is `max-h-[85vh] overflow-y-auto`: an absolutely-positioned list
+// belonging to a row near the bottom is clipped by that container, and the
+// operator sees one option and a cut edge. Owner 2026-08-21: 「然后被cut掉了 看不到」.
+function dropdownPosition(trigger: HTMLElement | null): {
+  left: number;
+  top: number;
+  width: number;
+  flipped: boolean;
+} {
+  if (!trigger) return { left: 0, top: 0, width: 320, flipped: false };
+  const r = trigger.getBoundingClientRect();
+  const WIDTH = 320;
+  const HEIGHT = 300; // the from-SO block plus the 200px list
+  const GAP = 4;
+  // Flip above when the space below cannot hold it but the space above can.
+  const below = window.innerHeight - r.bottom;
+  const flipped = below < HEIGHT + GAP && r.top > below;
+  return {
+    left: Math.max(8, Math.min(r.left, window.innerWidth - WIDTH - 8)),
+    top: flipped ? Math.max(8, r.top - HEIGHT - GAP) : r.bottom + GAP,
+    width: WIDTH,
+    flipped,
+  };
+}
+
 function RawMaterialSelect({
   value,
   materials,
@@ -826,6 +855,36 @@ function RawMaterialSelect({
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const [pos, setPos] = useState(() => dropdownPosition(null));
+
+  // Close on an outside click or Escape, and follow the trigger when the page
+  // behind scrolls — a portalled list does not move with its row on its own,
+  // and a list left hanging beside the wrong row is worse than a clipped one.
+  useEffect(() => {
+    if (!open) return;
+    const reposition = () => setPos(dropdownPosition(triggerRef.current));
+    reposition();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (triggerRef.current?.contains(t)) return;
+      if ((t as HTMLElement).closest?.("[data-rm-dropdown]")) return;
+      setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", reposition, true);
+    };
+  }, [open]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return materials.slice(0, 50);
@@ -841,14 +900,19 @@ function RawMaterialSelect({
     <div className="relative flex-1">
       <button
         type="button"
+        ref={triggerRef}
         onClick={() => { setOpen(!open); setSearch(""); }}
         className="w-full text-left text-xs border border-gray-200 rounded px-1.5 py-1 bg-white hover:bg-gray-50 truncate font-mono"
       >
         {value || <span className="text-gray-400">Select material...</span>}
       </button>
 
-      {open && (
-        <div className="absolute top-full left-0 z-50 mt-0.5 w-[320px] bg-white border border-gray-200 rounded-lg shadow-lg">
+      {open && createPortal(
+        <div
+          data-rm-dropdown
+          className="fixed z-[100] bg-white border border-gray-200 rounded-lg shadow-lg"
+          style={{ left: pos.left, top: pos.top, width: pos.width }}
+        >
           <div className="p-1.5">
             <input
               autoFocus
@@ -898,7 +962,8 @@ function RawMaterialSelect({
               ))
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -945,6 +1010,7 @@ function normaliseScaling(
 function MaterialScalingEditor({
   scaling,
   unit,
+  isCut = false,
   onChange,
 }: {
   // Accept legacy single-object or undefined at runtime even though the
@@ -952,6 +1018,9 @@ function MaterialScalingEditor({
   // pre-array still flow through here; normaliseScaling handles them.
   scaling: MaterialScaling[] | MaterialScaling | undefined;
   unit: string;
+  /** A cut material (FILLER): offer the cut-growth inputs. Defaults false so a
+   *  caller that has no way to know simply does not show them. */
+  isCut?: boolean;
   onChange: (next: MaterialScaling[] | undefined) => void;
 }) {
   const rules = normaliseScaling(scaling);
@@ -1041,6 +1110,41 @@ function MaterialScalingEditor({
             title="Extra qty per 1 inch over base"
           />
           <span className="text-gray-400">{unit || "unit"}/inch over base</span>
+          {isCut && (
+            <>
+              {/* A cut material does not arrive in more pieces when the order
+                  grows — the same piece is cut bigger. Owner 2026-08-21:
+                  「通常是长度变而已」, so the two axes are separate and either may
+                  stay at 0. */}
+              <span className="text-[#B8601A]">· cut +</span>
+              <input
+                type="number" onFocus={(e) => e.currentTarget.select()}
+                value={Number.isFinite(rule.cutLengthPerUnit ?? 0) ? (rule.cutLengthPerUnit ?? 0) : 0}
+                step="0.1"
+                min="0"
+                placeholder="L"
+                onChange={(e) =>
+                  updateRule(idx, { cutLengthPerUnit: parseFloat(e.target.value) || 0 })
+                }
+                className="text-[10px] border border-[#E8B786] rounded px-1 py-0.5 w-12 bg-white"
+                title="Inches added to the cut LENGTH per 1 inch over base"
+              />
+              <span className="text-[#B8601A]">×</span>
+              <input
+                type="number" onFocus={(e) => e.currentTarget.select()}
+                value={Number.isFinite(rule.cutWidthPerUnit ?? 0) ? (rule.cutWidthPerUnit ?? 0) : 0}
+                step="0.1"
+                min="0"
+                placeholder="W"
+                onChange={(e) =>
+                  updateRule(idx, { cutWidthPerUnit: parseFloat(e.target.value) || 0 })
+                }
+                className="text-[10px] border border-[#E8B786] rounded px-1 py-0.5 w-12 bg-white"
+                title="Inches added to the cut WIDTH per 1 inch over base"
+              />
+              <span className="text-[#B8601A]">in/inch</span>
+            </>
+          )}
           <button
             type="button"
             onClick={() => removeRule(idx)}
@@ -2302,6 +2406,7 @@ function CreateBOMDialog({
                         <MaterialScalingEditor
                           scaling={m.scaling}
                           unit={m.unit || "PCS"}
+                          isCut={isFillerMaterial(m, rawMaterials)}
                           onChange={(s) => updateWIPMaterial(wi, mi, "scaling", s)}
                         />
                       </div>
@@ -2622,6 +2727,7 @@ function SubWIPTree({
                 <MaterialScalingEditor
                   scaling={m.scaling}
                   unit={m.unit || "PCS"}
+                  isCut={isFillerMaterial(m, rawMaterials)}
                   onChange={(s) => onUpdateMaterial(childPath, mi, "scaling", s)}
                 />
               </div>
@@ -2948,6 +3054,7 @@ function WipNodeDetail({
                 <MaterialScalingEditor
                   scaling={m.scaling}
                   unit={m.unit || "PCS"}
+                  isCut={isFillerMaterial(m, rawMaterials)}
                   onChange={(s) => onUpdateMaterial(wi, path, mi, "scaling", s)}
                 />
               </div>
@@ -3746,6 +3853,7 @@ function EditBOMDialog({
                       <MaterialScalingEditor
                         scaling={m.scaling}
                         unit={m.unit || "PCS"}
+                        isCut={isFillerMaterial(m, rawMaterials)}
                         onChange={(s) => updateL1Material(i, "scaling", s)}
                       />
                     </div>
@@ -4790,6 +4898,7 @@ function MasterTemplatesDialog({
                       <MaterialScalingEditor
                         scaling={m.scaling}
                         unit={m.unit || "PCS"}
+                        isCut={isFillerMaterial(m, rawMaterials)}
                         onChange={(s) => updateMaterialAtPath(wi, [], mi, "scaling", s)}
                       />
                     </div>

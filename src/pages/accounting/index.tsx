@@ -10827,24 +10827,37 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 {recoFinal && <span className="ml-2 text-[11px] font-normal text-[#6B7280]">finalised {String(recoFinal.finalizedAt).slice(0, 10)}</span>}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
-                {recoFinal ? (
-                  <span className={`rounded-full text-xs font-semibold px-2.5 py-0.5 ${recoFinal.balanced ? "bg-[#EAF3DE] text-[#27500A]" : "bg-[#F7E5E1] text-[#9A3A2D]"}`}>
-                    🔒 Finalised{recoFinal.balanced ? " · Balanced ✓" : ` · out by ${formatCurrency(Math.abs((recoFinal.computedGlSen ?? 0) - recoFinal.glSen))}`}
-                  </span>
-                ) : report.balanced ? (
-                  <span className="rounded-full bg-[#EAF3DE] text-[#27500A] text-xs font-semibold px-2.5 py-0.5">Balanced ✓</span>
-                ) : (
-                  <span className="rounded-full bg-[#F7E5E1] text-[#9A3A2D] text-xs font-semibold px-2.5 py-0.5">
-                    Out by {formatCurrency(Math.abs((report.computedGlSen ?? 0) - report.glSen))} · book {(report.computedGlSen ?? 0) - report.glSen < 0 ? "above" : "below"} bank
-                  </span>
-                )}
+                {(() => {
+                  // Three states at a glance (owner: 「我想要一眼就看得出tally 没有」):
+                  // red   = figures DON'T tally → something is wrong (mismatch, bad opening…)
+                  // amber = figures tally, but bank lines still need recording
+                  // green = figures tally AND every bank line is in the book
+                  const shown = recoFinal ?? report;
+                  const out = (shown.computedGlSen ?? 0) - shown.glSen;
+                  const lock = recoFinal ? "🔒 Finalised · " : "";
+                  if (!shown.balanced) return (
+                    <span className="rounded-full bg-[#F7E5E1] text-[#9A3A2D] text-xs font-semibold px-2.5 py-0.5">
+                      {lock}NOT TALLY — out by {formatCurrency(Math.abs(out))} · book {out < 0 ? "above" : "below"} bank
+                    </span>
+                  );
+                  if (shown.unbookedStmtCount > 0) return (
+                    <span className="rounded-full bg-[#FBF3E4] text-[#7A5B12] text-xs font-semibold px-2.5 py-0.5" title="Figures tally — but these bank lines have no book entry yet. Record them and this turns green.">
+                      {lock}Tally ✓ · {shown.unbookedStmtCount} bank line{shown.unbookedStmtCount === 1 ? "" : "s"} to record
+                    </span>
+                  );
+                  return (
+                    <span className="rounded-full bg-[#EAF3DE] text-[#27500A] text-xs font-semibold px-2.5 py-0.5">
+                      {lock}Tally ✓ · all recorded
+                    </span>
+                  );
+                })()}
                 {recoFinal ? (
                   <>
                     <Button variant="outline" size="sm" onClick={printFinal}>Print</Button>
                     <Button variant="outline" size="sm" disabled={busy} onClick={() => handleFinalize(true)}>Re-open</Button>
                   </>
                 ) : (
-                  <Button variant={report.balanced ? "primary" : "outline"} size="sm" disabled={busy} onClick={() => handleFinalize(false)}>
+                  <Button variant={report.balanced && report.unbookedStmtCount === 0 ? "primary" : "outline"} size="sm" disabled={busy} onClick={() => handleFinalize(false)}>
                     Finalise this month
                   </Button>
                 )}

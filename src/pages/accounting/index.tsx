@@ -9859,6 +9859,13 @@ function DailyCashTab() {
     try { return localStorage.getItem("cashpos-planned") === "1"; } catch { return false; }
   });
   const [planForm, setPlanForm] = useState({ party: "", ref: "", date: "", amount: "" });
+  // "Get image" pops the PNG in a modal for right-click → Copy image at full
+  // resolution — a downloaded file re-copied out of a viewer pastes blurry.
+  const [imgPopup, setImgPopup] = useState<string | null>(null);
+  const closeImgPopup = () => {
+    if (imgPopup) URL.revokeObjectURL(imgPopup);
+    setImgPopup(null);
+  };
   const boardRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -10053,12 +10060,11 @@ function DailyCashTab() {
       y += 46;
       canvas.toBlob((blob) => {
         if (!blob) { toast.error("Could not render the image"); return; }
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = `cash-position-${date}.png`;
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(link.href), 5000);
-        toast.success("Image saved to your downloads");
+        const url = URL.createObjectURL(blob);
+        setImgPopup((old) => {
+          if (old) URL.revokeObjectURL(old);
+          return url;
+        });
       }, "image/png");
     } catch (e) {
       console.error("[cash-position] image export failed:", e);
@@ -10099,6 +10105,32 @@ function DailyCashTab() {
 
   return (
     <div className="space-y-4">
+      {imgPopup && (
+        <div className="fixed inset-0 z-50 bg-black/60 p-4 flex items-center justify-center" onClick={closeImgPopup}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-2 px-5 py-3 border-b border-[#E2DDD8]">
+              <div className="text-base font-semibold text-[#1F1D1B]">Report image</div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={imgPopup}
+                  download={`cash-position-${date}.png`}
+                  className="inline-flex items-center rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm text-[#1F1D1B] hover:bg-[#F7F4EF]"
+                >
+                  Download
+                </a>
+                <Button variant="outline" size="sm" onClick={closeImgPopup}>Close</Button>
+              </div>
+            </div>
+            <div className="px-5 pt-2 text-xs text-[#6B7280] space-y-0.5">
+              <p>🖥 Right-click the image → <b>Copy image</b> (then paste into WhatsApp Web with Ctrl/Cmd+V), or <b>Save image as…</b></p>
+              <p>📱 Long-press the image → <b>Save</b> or <b>Share</b>.</p>
+            </div>
+            <div className="overflow-auto px-5 py-3">
+              <img src={imgPopup} alt={`Cash position ${date}`} className="w-full rounded border border-[#E2DDD8]" />
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex justify-between items-center flex-wrap gap-2">
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Daily Cash Position</h2>
         <div className="flex gap-2">

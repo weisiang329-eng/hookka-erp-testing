@@ -1,0 +1,1084 @@
+diff --git a/src/api/routes/auth-totp.ts b/src/api/routes/auth-totp.ts
+index f0a358ff..e9b2d51a 100644
+--- a/src/api/routes/auth-totp.ts
++++ b/src/api/routes/auth-totp.ts
+@@ -80,7 +80,8 @@ function ctxUserId(c: unknown): string | undefined {
+ }
+ 
+ // ----- POST /api/auth/totp/enroll ------------------------------------------
+-// Auth-required. Body: {}.  Returns {otpauthUrl, qrUrl, recoveryCodes}.
++// Auth-required. Body: {}.  Returns {otpauthUrl, secret, recoveryCodes}.
++// No QR IMAGE url — the client draws the QR from otpauthUrl itself.
+ app.post("/enroll", async (c) => {
+   const userId = ctxUserId(c);
+   if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
+@@ -106,7 +107,21 @@ app.post("/enroll", async (c) => {
+ 
+   const secret = generateSecret();
+   const otpauth = enrollUrl(user.email, secret, TOTP_ISSUER);
+-  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(otpauth)}`;
++  // 2026-09-01 — DO NOT build a qrserver.com URL here.
++  //
++  // This used to return
++  //   `https://api.qrserver.com/v1/create-qr-code/?...&data=${otpauth}`
++  // and the browser loaded it as an <img>. The otpauth URL carries
++  // `secret=<TOTP shared secret>` plus the user's email, so every enrolment
++  // sent the entire second factor to a third party — and into that party's
++  // access logs, the user's browser history, and any proxy in between.
++  //
++  // The QR is now drawn client-side from `otpauthUrl` with the `qrcode`
++  // package the app already depends on (src/components/qr-img.tsx), which is
++  // how the rest of the app has rendered QR codes since the qrserver
++  // migration. The secret still reaches the browser — it has to, the user is
++  // enrolling — but it no longer leaves our origin.
++
+   const { plaintext, hashes } = await generateRecoveryCodes(userId, 8);
+ 
+   // Persist the in-flight secret + recovery hashes. totpEnrolledAt stays null
+@@ -129,7 +144,6 @@ app.post("/enroll", async (c) => {
+     success: true,
+     data: {
+       otpauthUrl: otpauth,
+-      qrUrl,
+       secret, // shown so users can type it manually if QR scan fails
+       recoveryCodes: plaintext, // ⚠️ shown ONCE
+     },
+@@ -417,22 +431,51 @@ app.post("/setup-start", async (c) => {
+ 
+   // Generate or rotate the pending secret. We overwrite any prior pending
+   // secret because the user may have abandoned the setup once and is now
+-  // restarting it — no recovery codes are issued at this stage (the soft
+-  // flow defers them to a future enhancement per spec).
++  // restarting it.
++  //
++  // 2026-09-01 — recovery codes are now issued HERE, no longer deferred.
++  // They were "deferred to a future enhancement" while TOTP login was
++  // disabled, which was harmless: nobody could enrol, so nobody could be
++  // stranded. Now that /login-verify exists (BUG-2026-08-04-006) that is no
++  // longer true — an operator who loses their phone has no way back in
++  // except a DBA editing the users table by hand. Shipping the login gate
++  // without these would swap a lockout-on-enrolment bug for a
++  // lockout-on-lost-phone bug.
++  //
++  // Rotating the codes alongside the secret is deliberate: codes minted
++  // against an abandoned secret must not outlive it.
+   const secret = generateSecret();
+   const otpauthUrl = enrollUrl(user.email, secret, TOTP_ISSUER);
+-  // qrserver.com is a public QR image proxy — no API key, no SDK. The FE
+-  // could compute this on its own but doing it server-side keeps the QR
+-  // URL out of the browser's URL bar and lets us swap providers later.
+-  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(otpauthUrl)}`;
++  // 2026-09-01 — DO NOT build a qrserver.com URL here.
++  //
++  // This used to return
++  //   `https://api.qrserver.com/v1/create-qr-code/?...&data=${otpauth}`
++  // and the browser loaded it as an <img>. The otpauth URL carries
++  // `secret=<TOTP shared secret>` plus the user's email, so every enrolment
++  // sent the entire second factor to a third party — and into that party's
++  // access logs, the user's browser history, and any proxy in between.
++  //
++  // The QR is now drawn client-side from `otpauthUrl` with the `qrcode`
++  // package the app already depends on (src/components/qr-img.tsx), which is
++  // how the rest of the app has rendered QR codes since the qrserver
++  // migration. The secret still reaches the browser — it has to, the user is
++  // enrolling — but it no longer leaves our origin.
++
++
++  // Only the salted hashes are stored; `plaintext` is returned once, in this
++  // response, and is unrecoverable afterwards. Same primitive /enroll uses.
++  const { plaintext: recoveryCodes, hashes } = await generateRecoveryCodes(
++    userId,
++    8,
++  );
+ 
+   // Persist the pending secret. totpEnrolledAt stays NULL — /setup-confirm
+   // flips it once the user proves they can produce a code.
+   try {
+     await c.var.DB.prepare(
+-      "UPDATE users SET totpSecret = ?, totpEnrolledAt = NULL WHERE id = ?",
++      "UPDATE users SET totpSecret = ?, totpRecoveryHashes = ?, totpEnrolledAt = NULL WHERE id = ?",
+     )
+-      .bind(secret, userId)
++      .bind(secret, JSON.stringify(hashes), userId)
+       .run();
+   } catch (err) {
+     console.warn(
+@@ -461,7 +504,7 @@ app.post("/setup-start", async (c) => {
+     success: true,
+     secret,
+     otpauthUrl,
+-    qrCodeUrl,
++    recoveryCodes, // ⚠️ plaintext, shown ONCE — never logged, never audited
+   });
+ });
+ 
+diff --git a/src/api/routes/auth.ts b/src/api/routes/auth.ts
+index dae3c7d9..709021cc 100644
+--- a/src/api/routes/auth.ts
++++ b/src/api/routes/auth.ts
+@@ -97,6 +97,9 @@ type UserRow = {
+   // a TOTP code (or recovery code) before /login issues a session.
+   totpSecret?: string | null;
+   totpEnrolledAt?: string | null;
++  // Dual-keyed like mustChangePassword below: the column is snake_case and
++  // db-pg camelCases it on read, but a raw SELECT can surface either.
++  totp_enrolled_at?: string | null;
+   // TRUE while the account still carries the password an ADMIN chose for it.
+   // Until the person changes it, nothing the account does can be attributed to
+   // them — the admin knows the credential too. Dual-keyed: the column is
+@@ -115,6 +118,13 @@ function publicUser(u: UserRow) {
+     // Surfaced so the app can make the first thing an admin-created user does
+     // be choosing their own password. Nothing else depends on it.
+     mustChangePassword: mustChange === true || mustChange === 1,
++    // Whether two-factor sign-in is live on this account. A BOOLEAN only —
++    // never the secret, never the recovery hashes, never the enrolment
++    // timestamp. Settings needs to render "on" or "off" and offer the right
++    // action; nothing else about the TOTP state may leave the server.
++    // A dangling secret with totpEnrolledAt still NULL is an ABANDONED
++    // enrolment and reads as off, matching what auth.ts enforces at login.
++    totpEnabled: Boolean(u.totpEnrolledAt ?? u.totp_enrolled_at),
+   };
+ }
+ 
+@@ -381,7 +391,11 @@ app.post("/login", async (c) => {
+ // (reading 'user')"). A SUPER_ADMIN (nico) locked himself out exactly this way.
+ // Until the verify flow ships, disable BOTH the hard gate AND the soft prompt
+ // that lures admins into enrolling. Flip back to true when login-verify exists.
+-const TOTP_LOGIN_ENFORCEMENT_ENABLED = false;
++// 2026-08-27 — RE-ENABLED IN THE SANDBOX. The kill switch above was flipped
++// because /login-verify had no frontend. src/pages/login-verify.tsx now
++// provides it, so the gate can run again. Verify the full enrol → log out →
++// log back in loop before this goes anywhere near production.
++const TOTP_LOGIN_ENFORCEMENT_ENABLED = true;
+ const TOTP_HARD_ENFORCE_CUTOFF_MS = Date.parse("2026-05-28T00:00:00.000Z");
+ const TOTP_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
+ const TOTP_DISMISS_COOLOFF_MS = 24 * 60 * 60 * 1000;
+diff --git a/src/lib/api-client.ts b/src/lib/api-client.ts
+index 4defcce8..d4fced37 100644
+--- a/src/lib/api-client.ts
++++ b/src/lib/api-client.ts
+@@ -162,6 +162,18 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+   // (Wei Siang 2026-05-10: "为什么登录了之后让我登录电脑版本"). WorkerLayout
+   // + workerFetch handle their own 401 → /worker/login redirect.
+   const onWorkerPortal = window.location.pathname.startsWith("/worker");
++  // /login-verify is step 2 of sign-in (BUG-2026-08-04-006). A 401 from
++  // /api/auth/totp/login-verify means "wrong code", NOT "session expired" —
++  // there is no session yet to expire. Bouncing to /login here is actively
++  // harmful: window.location.href below is a FULL PAGE LOAD, which discards
++  // the in-memory router state carrying `pendingToken`, so one mistyped digit
++  // costs the operator their whole password step.
++  //
++  // The backend deliberately does NOT burn the pending token on a bad code —
++  // "a gate that punishes typos is a gate that gets switched back off"
++  // (src/api/routes/auth-totp.ts). Redirecting here would defeat that on the
++  // frontend. Same shape of exception as the worker portal above.
++  const onLoginVerify = window.location.pathname === "/login-verify";
+   const isWorkerApi = /^\/api\/worker(-auth)?(\/|$)/.test(
+     url.startsWith("/") ? url : new URL(url, window.location.origin).pathname,
+   );
+@@ -170,7 +182,8 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+     isApiRequest(url) &&
+     window.location.pathname !== "/login" &&
+     !onWorkerPortal &&
+-    !isWorkerApi
++    !isWorkerApi &&
++    !onLoginVerify
+   ) {
+     clearAuth();
+     const intended = window.location.pathname + window.location.search;
+diff --git a/src/lib/qr-utils.ts b/src/lib/qr-utils.ts
+index 27ac5f39..f1657137 100644
+--- a/src/lib/qr-utils.ts
++++ b/src/lib/qr-utils.ts
+@@ -5,9 +5,18 @@ import QRCode from "qrcode";
+ import { appOrigin, canonicalizeOrigin } from "./app-origin";
+ 
+ /**
+- * Generate a QR code image URL using the free qrserver.com API.
+- * Kept as a fallback; prefer `getQRCodeDataURL` below for batch prints,
+- * which generates locally and avoids hundreds of network round-trips.
++ * @deprecated DO NOT USE. Sends `data` to a third party in a URL.
++ *
++ * This builds a link to api.qrserver.com with the payload in the query
++ * string, so the content of every QR generated this way lands in that
++ * company's access logs, the user's browser history, and any proxy on the
++ * path. It had no callers left as of 2026-09-01; the whole app renders QR
++ * codes locally via `getQRCodeDataURL` below (see components/qr-img.tsx).
++ *
++ * It is kept only so an old import does not break the build, and it must not
++ * be used again — in 2026 it was still wired into the 2FA setup page, where
++ * the payload was an `otpauth://` URL containing the user's TOTP secret.
++ * Anything worth putting in a QR code is worth not mailing to a stranger.
+  */
+ export function getQRCodeUrl(data: string, size: number = 150): string {
+   return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}`;
+diff --git a/src/pages/login-verify.tsx b/src/pages/login-verify.tsx
+new file mode 100644
+index 00000000..c0c9dadb
+--- /dev/null
++++ b/src/pages/login-verify.tsx
+@@ -0,0 +1,286 @@
++// ---------------------------------------------------------------------------
++// Two-factor sign-in — step 2 of 2.
++//
++// THIS PAGE IS THE PIECE THAT WAS MISSING (BUG-2026-08-04-006).
++//
++// The backend for 2FA has been complete since Phase C.6: enrollment, QR codes,
++// TOTP verification, recovery codes and POST /api/auth/totp/login-verify all
++// exist and work. What never shipped was a screen where the operator types
++// their 6-digit code. Without it, /api/auth/login would answer
++// { totpRequired: true } and the flow simply stopped — which is why enrolling
++// in 2FA locked a SUPER_ADMIN out of his own account on 2026-08-04, and why
++// TOTP_LOGIN_ENFORCEMENT_ENABLED has been false ever since.
++//
++// Contract (see src/api/routes/auth-totp.ts):
++//   POST /api/auth/totp/login-verify
++//   body { userId, code, pendingToken, rememberMe }
++//   → 200 { success, data: { user, csrfToken } }  — session cookies set
++//   → 401 "Invalid credentials"                    — wrong code
++//   → 401 "That sign-in attempt timed out…"        — pendingToken older than 5m
++//   → 429                                          — 10 attempts / 15 min
++//
++// `code` may be a 6-digit TOTP or a recovery code; the server decides by shape.
++//
++// SECURITY NOTE — why this page takes its inputs from router state and not
++// from the URL or storage:
++//   `pendingToken` is the proof that the PASSWORD step succeeded. It is a
++//   short-lived bearer credential. Putting it in a query string would write it
++//   into browser history, Referer headers and any proxy log in between; putting
++//   it in localStorage would leave it readable by every script on the origin
++//   and outlive the five-minute window. react-router's location.state lives in
++//   memory only. A direct visit to /login-verify therefore has no state and is
++//   bounced back to /login — which is correct, not a bug.
++// ---------------------------------------------------------------------------
++import { useState, useEffect, useRef } from "react";
++import { useLocation, useNavigate, Link } from "react-router-dom";
++import { ShieldCheck, ArrowLeft, KeyRound, Loader2 } from "lucide-react";
++import { setAuth, type AuthUser } from "@/lib/auth";
++
++type HandoffState = {
++  userId: string;
++  pendingToken?: string;
++  rememberMe: boolean;
++  email?: string;
++};
++
++type VerifyResponse =
++  | { success: true; data: { user: AuthUser; csrfToken: string } }
++  | { success: false; error?: string };
++
++const CODE_LEN = 6;
++
++export default function LoginVerify() {
++  const navigate = useNavigate();
++  const location = useLocation();
++  const state = (location.state ?? null) as HandoffState | null;
++
++  // One box per digit — matches how every authenticator app presents the code
++  // and makes a mistyped digit obvious.
++  const [digits, setDigits] = useState<string[]>(Array(CODE_LEN).fill(""));
++  const [recoveryMode, setRecoveryMode] = useState(false);
++  const [recoveryCode, setRecoveryCode] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [expired, setExpired] = useState(false);
++  const [loading, setLoading] = useState(false);
++  const inputsRef = useRef<Array<HTMLInputElement | null>>([]);
++
++  // No handoff state → someone navigated here directly, or refreshed the page
++  // (which discards in-memory state). Send them back to enter their password.
++  useEffect(() => {
++    if (!state?.userId) navigate("/login", { replace: true });
++  }, [state, navigate]);
++
++  useEffect(() => {
++    if (!recoveryMode) inputsRef.current[0]?.focus();
++  }, [recoveryMode]);
++
++  if (!state || !state.userId) return null;
++  // Narrowed once into a non-null const: TypeScript will not carry the guard
++  // above into the closures below, and `submit` reads it after an await.
++  const handoff: HandoffState = state;
++
++  const code = recoveryMode ? recoveryCode.trim() : digits.join("");
++  const ready = recoveryMode ? code.length > 0 : code.length === CODE_LEN;
++
++  function setDigit(i: number, raw: string) {
++    const v = raw.replace(/\D/g, "");
++    setError(null);
++    if (!v) {
++      setDigits((d) => d.map((x, j) => (j === i ? "" : x)));
++      return;
++    }
++    // Typing or pasting several digits at once fills forward from here.
++    setDigits((d) => {
++      const next = [...d];
++      for (let k = 0; k < v.length && i + k < CODE_LEN; k++) next[i + k] = v[k];
++      return next;
++    });
++    const land = Math.min(i + v.length, CODE_LEN - 1);
++    inputsRef.current[land]?.focus();
++  }
++
++  function onKeyDown(i: number, e: React.KeyboardEvent<HTMLInputElement>) {
++    if (e.key === "Backspace" && !digits[i] && i > 0) {
++      inputsRef.current[i - 1]?.focus();
++    }
++    if (e.key === "ArrowLeft" && i > 0) inputsRef.current[i - 1]?.focus();
++    if (e.key === "ArrowRight" && i < CODE_LEN - 1) inputsRef.current[i + 1]?.focus();
++  }
++
++  async function landingPage(): Promise<string> {
++    try {
++      const res = await fetch("/api/auth/me/permissions", { credentials: "include" });
++      const body = (await res.json()) as { home?: string };
++      if (body?.home) return body.home;
++    } catch {
++      /* fall through */
++    }
++    return "/settings";
++  }
++
++  async function submit(e?: React.FormEvent) {
++    e?.preventDefault();
++    if (!ready || loading) return;
++    setError(null);
++    setLoading(true);
++    try {
++      const res = await fetch("/api/auth/totp/login-verify", {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        credentials: "include",
++        body: JSON.stringify({
++          userId: handoff.userId,
++          code,
++          pendingToken: handoff.pendingToken,
++          rememberMe: handoff.rememberMe,
++        }),
++      });
++      const json = (await res.json()) as VerifyResponse;
++
++      if (!res.ok || !json.success) {
++        const msg =
++          ("error" in json && json.error) || "That code was not accepted.";
++        // The server deliberately distinguishes an expired attempt from a bad
++        // code — "start again" is actionable, and without it the operator goes
++        // hunting for a wrong password that was never wrong.
++        if (res.status === 401 && /timed out/i.test(msg)) setExpired(true);
++        setError(msg);
++        setDigits(Array(CODE_LEN).fill(""));
++        setRecoveryCode("");
++        inputsRef.current[0]?.focus();
++        return;
++      }
++
++      setAuth({ user: json.data.user, rememberMe: handoff.rememberMe });
++      navigate(await landingPage(), { replace: true });
++    } catch (err) {
++      setError(
++        err instanceof Error ? err.message : "Network error. Please try again.",
++      );
++    } finally {
++      setLoading(false);
++    }
++  }
++
++  // Auto-submit once the sixth digit lands — the code is only valid for ~30s,
++  // so making the operator reach for a button wastes part of the window.
++  useEffect(() => {
++    if (!recoveryMode && digits.every((d) => d) && !loading) void submit();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [digits.join("")]);
++
++  return (
++    <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 px-4">
++      <div className="w-full max-w-md">
++        <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-8">
++          <div className="flex flex-col items-center text-center mb-6">
++            <div className="h-12 w-12 rounded-full bg-amber-100 dark:bg-amber-950 flex items-center justify-center mb-4">
++              <ShieldCheck className="h-6 w-6 text-amber-700 dark:text-amber-400" />
++            </div>
++            <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100">
++              Two-factor sign-in
++            </h1>
++            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
++              {recoveryMode
++                ? "Enter one of your recovery codes."
++                : "Enter the 6-digit code from your authenticator app."}
++            </p>
++            {handoff.email && (
++              <p className="text-xs text-slate-400 dark:text-slate-500 mt-2">
++                {handoff.email}
++              </p>
++            )}
++          </div>
++
++          <form onSubmit={submit}>
++            {recoveryMode ? (
++              <input
++                autoFocus
++                value={recoveryCode}
++                onChange={(e) => {
++                  setRecoveryCode(e.target.value);
++                  setError(null);
++                }}
++                placeholder="Recovery code"
++                aria-label="Recovery code"
++                disabled={loading || expired}
++                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-4 py-3 text-center font-mono tracking-widest text-slate-900 dark:text-slate-100 outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
++              />
++            ) : (
++              <div className="flex justify-center gap-2" role="group" aria-label="6-digit code">
++                {digits.map((d, i) => (
++                  <input
++                    key={i}
++                    ref={(el) => { inputsRef.current[i] = el; }}
++                    value={d}
++                    onChange={(e) => setDigit(i, e.target.value)}
++                    onKeyDown={(e) => onKeyDown(i, e)}
++                    inputMode="numeric"
++                    autoComplete={i === 0 ? "one-time-code" : "off"}
++                    maxLength={CODE_LEN}
++                    aria-label={`Digit ${i + 1}`}
++                    disabled={loading || expired}
++                    className="h-14 w-12 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-center text-2xl font-semibold text-slate-900 dark:text-slate-100 outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
++                  />
++                ))}
++              </div>
++            )}
++
++            {error && (
++              <p role="alert" className="mt-4 text-sm text-red-600 dark:text-red-400 text-center">
++                {error}
++              </p>
++            )}
++
++            {expired ? (
++              <Link
++                to="/login"
++                replace
++                className="mt-6 flex items-center justify-center gap-2 w-full rounded-lg bg-amber-600 hover:bg-amber-700 px-4 py-3 text-white font-medium"
++              >
++                <ArrowLeft className="h-4 w-4" />
++                Start again
++              </Link>
++            ) : (
++              <button
++                type="submit"
++                disabled={!ready || loading}
++                className="mt-6 flex items-center justify-center gap-2 w-full rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-3 text-white font-medium"
++              >
++                {loading && <Loader2 className="h-4 w-4 animate-spin" />}
++                {loading ? "Verifying…" : "Verify"}
++              </button>
++            )}
++          </form>
++
++          {!expired && (
++            <button
++              type="button"
++              onClick={() => {
++                setRecoveryMode((m) => !m);
++                setError(null);
++                setDigits(Array(CODE_LEN).fill(""));
++                setRecoveryCode("");
++              }}
++              className="mt-4 flex items-center justify-center gap-2 w-full text-sm text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
++            >
++              <KeyRound className="h-3.5 w-3.5" />
++              {recoveryMode
++                ? "Use my authenticator app instead"
++                : "I've lost my authenticator — use a recovery code"}
++            </button>
++          )}
++
++          <Link
++            to="/login"
++            replace
++            className="mt-6 flex items-center justify-center gap-1.5 text-sm text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
++          >
++            <ArrowLeft className="h-3.5 w-3.5" />
++            Back to sign in
++          </Link>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/pages/login.tsx b/src/pages/login.tsx
+index 525f2374..223a2ef3 100644
+--- a/src/pages/login.tsx
++++ b/src/pages/login.tsx
+@@ -342,15 +342,33 @@ export default function LoginPage() {
+         );
+         return;
+       }
+-      // 2FA hard-gate response ({ success:true, totpRequired, userId }) carries
+-      // no `data`. The login-verify step isn't built (BUG-2026-08-04-006), so
+-      // handle it explicitly instead of crashing on json.data.user. The server
+-      // gate is currently disabled, but a stale worker / future re-enable must
+-      // never white-screen the login page again.
+-      if ("totpRequired" in json || !("data" in json) || !json.data?.user) {
+-        setError(
+-          "Two-factor sign-in isn't available yet. Ask an admin to reset your 2FA, then sign in with your password.",
+-        );
++      // 2FA hard-gate response ({ success:true, totpRequired, userId,
++      // pendingToken }) carries no `data` — the session is issued by
++      // /login-verify, not here. Hand off to the code-entry screen.
++      //
++      // BUG-2026-08-04-006 is fixed by this branch: previously there was no
++      // such screen, so this response was a dead end and enrolling in 2FA
++      // locked the operator out. See src/pages/login-verify.tsx.
++      //
++      // userId + pendingToken travel in router state (in memory) rather than
++      // the URL: pendingToken stands in for the password, and a query string
++      // would leak it into history, Referer headers and proxy logs.
++      if ("totpRequired" in json && json.totpRequired && json.userId) {
++        navigate("/login-verify", {
++          replace: true,
++          state: {
++            userId: json.userId,
++            pendingToken: json.pendingToken,
++            rememberMe,
++            email: trimmedEmail,
++          },
++        });
++        return;
++      }
++      // Any other shape without a user blob is a malformed response, not 2FA.
++      // Kept as a guard so a stale worker can never white-screen this page.
++      if (!("data" in json) || !json.data?.user) {
++        setError("Login failed. Please try again.");
+         return;
+       }
+       // Sprint 7: only the user blob lands in client storage; the session
+diff --git a/src/pages/settings/index.tsx b/src/pages/settings/index.tsx
+index dc05a11c..7887b8b3 100644
+--- a/src/pages/settings/index.tsx
++++ b/src/pages/settings/index.tsx
+@@ -14,7 +14,10 @@ import {
+   Clock,
+   Calendar,
+   DollarSign,
++  ShieldCheck,
++  ShieldOff,
+ } from "lucide-react";
++import { useNavigate } from "react-router-dom";
+ 
+ // ---- Types ----
+ 
+@@ -232,6 +235,13 @@ const tabs = [
+   { id: "numbering", label: "Numbering", icon: Hash },
+   { id: "production", label: "Production", icon: Factory },
+   { id: "system", label: "System", icon: Monitor },
++  // 2026-09-01 — Security. Two-factor sign-in previously had NO entry point
++  // anywhere in the UI: the only ways in were the SUPER_ADMIN-only login
++  // prompt (itself disabled by the BUG-2026-08-04-006 kill switch) and typing
++  // /setup-2fa by hand. Every non-admin role was therefore unable to turn 2FA
++  // on even if they wanted to. This tab is that missing door, and it is
++  // deliberately visible to EVERY role, not just SUPER_ADMIN.
++  { id: "security", label: "Security", icon: ShieldCheck },
+ ] as const;
+ 
+ type TabId = (typeof tabs)[number]["id"];
+@@ -1022,6 +1032,16 @@ export default function SettingsPage() {
+             </Button>
+           </CardContent>
+         </Card>
++
++        {/*
++          Two-factor sign-in is a PERSONAL account setting. It has nothing to
++          do with whether the company's configuration store has been seeded,
++          so it must not be hidden behind this early return — otherwise the
++          only route to 2FA disappears on any tenant that has not pressed
++          "Initialize defaults", which is exactly the situation this branch
++          exists to describe. Rendered here as well as in the tab bar below.
++        */}
++        <SecurityTab />
+       </div>
+     );
+   }
+@@ -1064,6 +1084,189 @@ export default function SettingsPage() {
+       {activeTab === "numbering" && renderNumberingTab()}
+       {activeTab === "production" && renderProductionTab()}
+       {activeTab === "system" && renderSystemTab()}
++      {activeTab === "security" && <SecurityTab />}
+     </div>
+   );
+ }
++
++// ---------------------------------------------------------------------------
++// Security tab — two-factor sign-in.
++//
++// WHY THIS EXISTS (2026-09-01)
++// ----------------------------
++// The TOTP backend has been complete since Phase C.6, but nothing in the UI
++// ever pointed at it. `/setup-2fa` was reachable only by typing the URL or by
++// the soft login prompt, and that prompt is gated on
++// `user.role !== "SUPER_ADMIN"` — so for Sales, Office, QA, R&D, HR and
++// Finance the feature was not merely off, it was undiscoverable. This tab is
++// the door, open to every role.
++//
++// Status comes from GET /api/auth/me, which returns `totpEnabled` — a boolean
++// and nothing more. The secret, the recovery hashes and the enrolment
++// timestamp never leave the server.
++//
++// Turning 2FA OFF is password-gated by POST /api/auth/totp/disable. That
++// re-auth is not ceremony: without it, anyone who walked up to an unlocked
++// laptop could strip the second factor off the account in two clicks. It is
++// also what makes re-enrolment possible — /setup-start refuses with a 409
++// while an enrolment is already live, so "turn off, then set up again" is the
++// only supported rotation path.
++// ---------------------------------------------------------------------------
++function SecurityTab() {
++  const navigate = useNavigate();
++  const [enabled, setEnabled] = useState<boolean | null>(null);
++  const [loadError, setLoadError] = useState<string | null>(null);
++
++  const [showDisable, setShowDisable] = useState(false);
++  const [password, setPassword] = useState("");
++  const [busy, setBusy] = useState(false);
++  const [disableError, setDisableError] = useState<string | null>(null);
++
++  const load = useCallback(async () => {
++    try {
++      const res = await fetch("/api/auth/me", { credentials: "include" });
++      const json = (await res.json()) as {
++        success?: boolean;
++        data?: { user?: { totpEnabled?: boolean } };
++      };
++      if (!res.ok || !json.success) {
++        setLoadError("Could not read your security settings.");
++        return;
++      }
++      setEnabled(Boolean(json.data?.user?.totpEnabled));
++    } catch {
++      setLoadError("Network error. Refresh to try again.");
++    }
++  }, []);
++
++  useEffect(() => {
++    void load();
++  }, [load]);
++
++  async function handleDisable(ev: React.FormEvent) {
++    ev.preventDefault();
++    setDisableError(null);
++    if (!password) {
++      setDisableError("Enter your password to confirm.");
++      return;
++    }
++    setBusy(true);
++    try {
++      const res = await fetch("/api/auth/totp/disable", {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        credentials: "include",
++        body: JSON.stringify({ password }),
++      });
++      const json = (await res.json()) as { success?: boolean; error?: string };
++      if (!res.ok || !json.success) {
++        setDisableError(json.error || "Could not turn off two-factor sign-in.");
++        return;
++      }
++      setPassword("");
++      setShowDisable(false);
++      await load();
++    } catch {
++      setDisableError("Network error. Try again in a moment.");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <Card>
++      <CardHeader>
++        <CardTitle>Two-factor sign-in</CardTitle>
++        <CardDescription>
++          Ask for a code from your phone as well as your password. Protects the
++          account even if the password is guessed, reused, or leaked.
++        </CardDescription>
++      </CardHeader>
++      <CardContent>
++        {loadError && (
++          <p className="text-sm text-red-600 mb-4">{loadError}</p>
++        )}
++
++        {enabled === null && !loadError && (
++          <p className="text-sm text-muted-foreground">Checking…</p>
++        )}
++
++        {enabled === true && (
++          <>
++            <div className="flex items-center gap-2 mb-4">
++              <ShieldCheck className="h-5 w-5 text-green-600" />
++              <span className="font-medium">
++                Two-factor sign-in is on for your account.
++              </span>
++            </div>
++            <p className="text-sm text-muted-foreground mb-4">
++              You'll be asked for a 6-digit code each time you sign in. If you
++              lose your phone, use one of the recovery codes you saved during
++              setup.
++            </p>
++
++            {!showDisable ? (
++              <Button variant="outline" onClick={() => setShowDisable(true)}>
++                Turn off two-factor sign-in
++              </Button>
++            ) : (
++              <form onSubmit={handleDisable} className="max-w-sm">
++                <p className="text-sm mb-2">
++                  Enter your password to confirm. This removes the second factor
++                  and invalidates your recovery codes.
++                </p>
++                <Input
++                  type="password"
++                  autoComplete="current-password"
++                  value={password}
++                  onChange={(e) => setPassword(e.target.value)}
++                  placeholder="Your password"
++                  className="mb-2"
++                />
++                {disableError && (
++                  <p className="text-sm text-red-600 mb-2">{disableError}</p>
++                )}
++                <div className="flex gap-2">
++                  <Button type="submit" variant="destructive" disabled={busy}>
++                    {busy ? "Turning off…" : "Confirm"}
++                  </Button>
++                  <Button
++                    type="button"
++                    variant="outline"
++                    onClick={() => {
++                      setShowDisable(false);
++                      setPassword("");
++                      setDisableError(null);
++                    }}
++                  >
++                    Cancel
++                  </Button>
++                </div>
++              </form>
++            )}
++          </>
++        )}
++
++        {enabled === false && (
++          <>
++            <div className="flex items-center gap-2 mb-4">
++              <ShieldOff className="h-5 w-5 text-amber-600" />
++              <span className="font-medium">
++                Two-factor sign-in is off for your account.
++              </span>
++            </div>
++            <p className="text-sm text-muted-foreground mb-4">
++              You'll need an authenticator app — Google Authenticator, Microsoft
++              Authenticator, 1Password or Authy all work. Setup takes about a
++              minute, and you'll be given recovery codes to save in case you
++              lose your phone.
++            </p>
++            <Button onClick={() => navigate("/setup-2fa")}>
++              Set up two-factor sign-in
++            </Button>
++          </>
++        )}
++      </CardContent>
++    </Card>
++  );
++}
+diff --git a/src/pages/setup-2fa.tsx b/src/pages/setup-2fa.tsx
+index f37af97c..08a2f781 100644
+--- a/src/pages/setup-2fa.tsx
++++ b/src/pages/setup-2fa.tsx
+@@ -15,19 +15,28 @@
+ // location.state.severity === "hard" (the FE only sends hard severity for
+ // newly-minted super admins per the soft-enforcement policy).
+ //
+-// Recovery codes are deferred to a future enhancement — the spec says ship
+-// without them now, prompt user to use /api/auth/totp/disable + /enroll later
+-// if they want recovery codes.
++//   Step 3 — 2026-09-01: show the RECOVERY CODES returned by /setup-start,
++//             once, and require an explicit "I have saved these" before
++//             leaving. Previously deferred ("ship without them now"), which
++//             was safe only while TOTP login was disabled — nobody could
++//             enrol, so nobody could be stranded. With /login-verify shipped
++//             (BUG-2026-08-04-006) an operator who loses their phone would
++//             otherwise need a DBA to edit the users table by hand.
++//
++// The codes are held in component state only. They are never written to
++// localStorage and never re-fetchable: the server keeps salted hashes, so
++// this render is the single opportunity to save them.
+ // ---------------------------------------------------------------------------
+ import { useEffect, useState } from "react";
+ import { useLocation, useNavigate } from "react-router-dom";
++import { QRImg } from "@/components/qr-img";
+ 
+ type StartResponse =
+   | {
+       success: true;
+       secret: string;
+       otpauthUrl: string;
+-      qrCodeUrl: string;
++      recoveryCodes?: string[];
+     }
+   | { success: false; error?: string };
+ 
+@@ -46,7 +55,9 @@ export default function Setup2FAPage() {
+     (location.state as { severity?: "soft" | "info" | "hard" } | null)
+       ?.severity ?? "soft";
+ 
+-  const [qrUrl, setQrUrl] = useState<string | null>(null);
++  // The otpauth:// string itself, NOT an image URL. The QR is drawn in the
++  // browser from this — see the render block below for why.
++  const [otpauthUrl, setOtpauthUrl] = useState<string | null>(null);
+   const [secret, setSecret] = useState<string | null>(null);
+   const [loadError, setLoadError] = useState<string | null>(null);
+ 
+@@ -54,6 +65,14 @@ export default function Setup2FAPage() {
+   const [confirming, setConfirming] = useState(false);
+   const [codeError, setCodeError] = useState<string | null>(null);
+ 
++  // Recovery codes arrive with /setup-start but are only REVEALED after
++  // /setup-confirm succeeds — codes for an enrolment the user abandoned
++  // would be worse than useless, they would be misleading.
++  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
++  const [showCodes, setShowCodes] = useState(false);
++  const [savedAck, setSavedAck] = useState(false);
++  const [copied, setCopied] = useState(false);
++
+   // Step 1: kick off setup as soon as the page mounts. We fire-and-forget
+   // the request — if it fails the user sees the error and can refresh.
+   useEffect(() => {
+@@ -75,8 +94,9 @@ export default function Setup2FAPage() {
+           );
+           return;
+         }
+-        setQrUrl(json.qrCodeUrl);
++        setOtpauthUrl(json.otpauthUrl);
+         setSecret(json.secret);
++        setRecoveryCodes(json.recoveryCodes ?? null);
+       } catch {
+         if (!cancelled) {
+           setLoadError("Network error. Refresh the page to try again.");
+@@ -114,6 +134,15 @@ export default function Setup2FAPage() {
+         );
+         return;
+       }
++      // Enrolment is now live. If the server issued recovery codes, this is
++      // the ONLY time they can be read — show them and block the exit until
++      // the user confirms they have them. An older deployment that predates
++      // the recovery-code change returns none; fall through rather than
++      // stranding the user on a blank step.
++      if (recoveryCodes && recoveryCodes.length > 0) {
++        setShowCodes(true);
++        return;
++      }
+       navigate("/dashboard", { replace: true });
+     } catch {
+       setCodeError("Network error. Try again in a moment.");
+@@ -139,6 +168,127 @@ export default function Setup2FAPage() {
+     navigate("/dashboard", { replace: true });
+   }
+ 
++  // ---------------------------------------------------------------------
++  // Step 3 — recovery codes. Rendered INSTEAD of the QR/code form once
++  // enrolment has succeeded. There is deliberately no "Skip" and no close
++  // button: the server stores only salted hashes, so navigating away here
++  // destroys the codes permanently and leaves the user one lost phone away
++  // from needing a DBA.
++  // ---------------------------------------------------------------------
++  if (showCodes && recoveryCodes) {
++    return (
++      <div
++        className="min-h-screen flex items-center justify-center px-4 py-12"
++        style={{ background: "#0F0E0C" }}
++      >
++        <div
++          className="w-full max-w-lg rounded-lg p-8"
++          style={{
++            background: "rgba(35, 32, 27, 0.85)",
++            border: "1px solid rgba(139, 122, 78, 0.2)",
++          }}
++        >
++          <h1 className="text-2xl font-semibold mb-2" style={{ color: "#F4EFE3" }}>
++            Save your recovery codes
++          </h1>
++          <p className="text-sm mb-4" style={{ color: "rgba(244,239,227,0.65)" }}>
++            Two-factor sign-in is now on. If you lose your phone, one of these
++            codes is the only way back into your account.
++          </p>
++
++          <div
++            className="rounded p-3 mb-5 text-sm"
++            style={{
++              background: "rgba(234,179,8,0.12)",
++              border: "1px solid rgba(234,179,8,0.35)",
++              color: "#FDE68A",
++            }}
++          >
++            <strong>Shown once.</strong> They cannot be displayed again — only
++            scrambled copies are stored. Print them, or put them somewhere you
++            can reach without this computer and without your phone.
++          </div>
++
++          <ul
++            className="grid grid-cols-2 gap-2 mb-5 rounded p-4 font-mono text-sm list-none"
++            style={{
++              background: "rgba(0,0,0,0.35)",
++              border: "1px solid rgba(139,122,78,0.2)",
++              color: "#F4EFE3",
++            }}
++          >
++            {recoveryCodes.map((rc) => (
++              <li key={rc} className="tracking-wider">{rc}</li>
++            ))}
++          </ul>
++
++          <div className="flex gap-2 mb-5">
++            <button
++              type="button"
++              onClick={() => {
++                void navigator.clipboard
++                  ?.writeText(recoveryCodes.join("\n"))
++                  .then(() => {
++                    setCopied(true);
++                    setTimeout(() => setCopied(false), 2000);
++                  })
++                  .catch(() => {
++                    /* clipboard blocked — the codes are on screen to copy */
++                  });
++              }}
++              className="flex-1 rounded px-4 py-2 text-sm font-medium"
++              style={{
++                background: "rgba(139,122,78,0.18)",
++                border: "1px solid rgba(139,122,78,0.4)",
++                color: "#F4EFE3",
++              }}
++            >
++              {copied ? "Copied" : "Copy to clipboard"}
++            </button>
++            <button
++              type="button"
++              onClick={() => window.print()}
++              className="flex-1 rounded px-4 py-2 text-sm font-medium"
++              style={{
++                background: "rgba(139,122,78,0.18)",
++                border: "1px solid rgba(139,122,78,0.4)",
++                color: "#F4EFE3",
++              }}
++            >
++              Print
++            </button>
++          </div>
++
++          <label
++            className="flex items-start gap-3 mb-5 text-sm cursor-pointer"
++            style={{ color: "rgba(244,239,227,0.85)" }}
++          >
++            <input
++              type="checkbox"
++              checked={savedAck}
++              onChange={(e) => setSavedAck(e.target.checked)}
++              className="mt-0.5"
++            />
++            <span>
++              I have saved these codes somewhere I can get to them without this
++              computer.
++            </span>
++          </label>
++
++          <button
++            type="button"
++            disabled={!savedAck}
++            onClick={() => navigate("/dashboard", { replace: true })}
++            className="w-full rounded px-4 py-3 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
++            style={{ background: "#8B7A4E", color: "#0F0E0C" }}
++          >
++            Continue to dashboard
++          </button>
++        </div>
++      </div>
++    );
++  }
++
+   return (
+     <div
+       className="min-h-screen flex items-center justify-center px-4 py-12"
+@@ -175,18 +325,32 @@ export default function Setup2FAPage() {
+           </div>
+         )}
+ 
+-        {qrUrl && (
++        {/*
++          2026-09-01 — the QR is generated IN THE BROWSER, not fetched.
++
++          This previously rendered <img src={qrCodeUrl}> where qrCodeUrl was
++          `https://api.qrserver.com/v1/create-qr-code/?data=<otpauth url>`.
++          That otpauth URL contains `secret=<the TOTP shared secret>` and the
++          user's email address, so every enrolment handed an unrelated company
++          the whole of the second factor — in a query string, which also lands
++          in browser history and any proxy log on the way.
++
++          The rest of the app already stopped using qrserver months ago (see
++          src/components/qr-img.tsx — done for speed, because the factory's
++          connection was slow). 2FA setup was the one caller left, and the one
++          with a secret in the payload. Same component, no new dependency.
++
++          `eager` skips the IntersectionObserver gate: this QR is the only
++          thing on screen and must appear immediately, not on scroll.
++        */}
++        {otpauthUrl && (
+           <div className="flex flex-col items-center mb-6">
+-            <img
+-              src={qrUrl}
++            <QRImg
++              data={otpauthUrl}
++              size={240}
++              eager
+               alt="Two-factor setup QR code"
+-              width={240}
+-              height={240}
+-              style={{
+-                background: "#fff",
+-                padding: 12,
+-                borderRadius: 8,
+-              }}
++              className="rounded-lg"
+             />
+             {secret && (
+               <div
+@@ -252,7 +416,7 @@ export default function Setup2FAPage() {
+ 
+           <button
+             type="submit"
+-            disabled={confirming || !qrUrl}
++            disabled={confirming || !otpauthUrl}
+             className="w-full rounded font-semibold text-white py-3 transition-opacity hover:opacity-90 disabled:opacity-50"
+             style={{
+               background: "linear-gradient(135deg,#6B5C32,#8B7A4E)",
+diff --git a/src/router.tsx b/src/router.tsx
+index 9244ea00..0b09d881 100644
+--- a/src/router.tsx
++++ b/src/router.tsx
+@@ -40,6 +40,10 @@ const InviteAccept = lazy(() => import('./pages/InviteAccept'))
+ // Self-service password reset (2026-05-27). Both pages are public — they
+ // run before the user has any session. The token in the URL is the only
+ // credential needed for /reset-password.
++// Two-factor sign-in step 2 (BUG-2026-08-04-006). PUBLIC — it runs after the
++// password check but before a session exists. The proof that the password step
++// happened is the short-lived pendingToken passed in router state, not a cookie.
++const LoginVerify = lazy(() => import('./pages/login-verify'))
+ const ForgotPassword = lazy(() => import('./pages/forgot-password'))
+ const ResetPassword = lazy(() => import('./pages/reset-password'))
+ 
+@@ -90,6 +94,9 @@ export const router = createBrowserRouter([
+ 
+   // Auth (standalone, no layout — PUBLIC)
+   { path: '/login', element: <S><Login /></S> },
++  // 2FA step 2 — reached only via navigate() from /login with in-memory state.
++  // A direct visit has no state and the page bounces back to /login.
++  { path: '/login-verify', element: <S><LoginVerify /></S> },
+   // Self-service password reset — PUBLIC (no session required, token is in URL)
+   { path: '/forgot-password', element: <S><ForgotPassword /></S> },
+   { path: '/reset-password', element: <S><ResetPassword /></S> },

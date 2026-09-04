@@ -1,0 +1,28 @@
+diff --git a/src/api/routes/admin-health.ts b/src/api/routes/admin-health.ts
+index 1cb915d2..f1b6478c 100644
+--- a/src/api/routes/admin-health.ts
++++ b/src/api/routes/admin-health.ts
+@@ -1294,7 +1294,10 @@ app.get("/audit-feed", async (c) => {
+            resource, resourceId, action, source, ts
+       FROM audit_events
+      WHERE orgId = ?
+-       AND ts > NOW() - INTERVAL '${pgInterval}'
++       -- ts is stored as TEXT (migration 0046), so a bare  ts > NOW()
++       -- throws 42883 (text vs timestamptz) and the catch below renders
++       -- the failure as an empty, all-clear panel. Cast so the query runs.
++       AND ts::timestamptz > NOW() - INTERVAL '${pgInterval}'
+   `;
+   if (resourceFilter) {
+     sql += " AND resource = ?";
+@@ -1453,7 +1456,10 @@ app.get("/security-events", async (c) => {
+              resource, resourceId, action, source, ipAddress, ts
+         FROM audit_events
+        WHERE orgId = ?
+-         AND ts > NOW() - INTERVAL '${pgInterval}'
++         -- ts is TEXT (migration 0046); an uncast comparison to a
++         -- timestamptz errors (42883) and the catch turns the failure
++         -- into an all-zero "Healthy" panel. Cast so the query runs.
++         AND ts::timestamptz > NOW() - INTERVAL '${pgInterval}'
+          AND ${inScope}
+        ORDER BY ts DESC
+        LIMIT 2000

@@ -1,0 +1,1056 @@
+diff --git a/migrations-postgres/0231_session_accountability.sql b/migrations-postgres/0231_session_accountability.sql
+new file mode 100644
+index 00000000..82f6005c
+--- /dev/null
++++ b/migrations-postgres/0231_session_accountability.sql
+@@ -0,0 +1,38 @@
++-- ---------------------------------------------------------------------------
++-- 0231_session_accountability.sql — make a live session accountable.
++--
++-- user_sessions shipped with (token, user_id, created_at, expires_at): enough
++-- to validate a session, not enough to review one. With "Remember me" a single
++-- login grants days of sliding access and emits no further login events, so an
++-- account can be in daily use while the login log shows nothing since week one.
++-- An ex-employee on a remembered session, or a shared PC nobody signed out of,
++-- is invisible to a login-only view.
++--
++-- These four columns close that:
++--   id            — random public handle, so the API can address a session
++--                   without ever carrying its TOKEN (the actual credential)
++--   ip_address    — where it signed in from
++--   user_agent    — which browser/OS, so an owner recognises their own session
++--   last_seen_at  — when the account was last USED, not last authenticated.
++--                   This is what separates "dormant" from "has not retyped a
++--                   password lately" — the two are not the same, and treating
++--                   them as the same mislabels active users as abandoned.
++--
++-- All additive and idempotent. Mirrored by a runtime self-apply in
++-- src/api/lib/session-registry.ts, because the migration runner cannot be
++-- relied on to have run (CLAUDE.md).
++-- ---------------------------------------------------------------------------
++
++ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS id TEXT;
++ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS ip_address TEXT;
++ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
++ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS last_seen_at TEXT;
++
++-- Sessions created before this migration have no handle. Without one they
++-- would be the only sessions that cannot be listed or revoked — and the oldest
++-- sessions are exactly the ones worth reviewing.
++UPDATE user_sessions SET id = gen_random_uuid()::text WHERE id IS NULL;
++
++-- Listing is always "sessions for this user, most recently used first".
++CREATE INDEX IF NOT EXISTS idx_user_sessions_user_seen
++  ON user_sessions(user_id, last_seen_at DESC);
+diff --git a/src/api/lib/auth-middleware.ts b/src/api/lib/auth-middleware.ts
+index bb4cf805..09dd7731 100644
+--- a/src/api/lib/auth-middleware.ts
++++ b/src/api/lib/auth-middleware.ts
+@@ -23,6 +23,7 @@
+ // ---------------------------------------------------------------------------
+ import type { MiddlewareHandler } from "hono";
+ import type { Env } from "../worker";
++import { LAST_SEEN_REFRESH_MS } from "./session-registry";
+ 
+ // Exact-match endpoints that always bypass the dashboard auth gate.
+ export const PUBLIC_PATHS = [
+@@ -463,6 +464,50 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
+     return c.json({ success: false, error: "Unauthorized" }, 401);
+   }
+ 
++  // 2026-09-03 — last-seen tracking.
++  //
++  // `users.lastLoginAt` records the last time a password was TYPED. With
++  // "Remember me" a session slides for days, so an account can be in use every
++  // day while lastLoginAt sits weeks in the past. A reviewer reads that as a
++  // dormant account when it is an active one that simply has not
++  // re-authenticated — and the reverse case is the security one: an account
++  // showing activity its owner cannot account for is what a hijacked session
++  // or an un-offboarded employee looks like from the outside.
++  //
++  // THROTTLED IN SQL, NOT IN JS, ON PURPOSE.
++  // The obvious approach is to read lastSeenAt with the session row and skip
++  // the write when it is fresh. That would mean adding the column to the
++  // session SELECT — and if the column is not there yet (first deploy, before
++  // the ALTER lands) that SELECT throws and EVERY authenticated request fails.
++  // Observability must never be able to break authentication. So the freshness
++  // test lives in the WHERE clause: the statement is always sent, but only
++  // touches a row when the timestamp is actually stale.
++  //
++  // Fire-and-forget, and errors are swallowed: on a deploy where the column
++  // does not exist this is a no-op, and the request is unaffected either way.
++  {
++    const seenIso = new Date(nowMs).toISOString();
++    const staleBefore = new Date(nowMs - LAST_SEEN_REFRESH_MS).toISOString();
++    const touchLastSeen = () =>
++      c.var.DB.prepare(
++        `UPDATE user_sessions
++            SET lastSeenAt = ?
++          WHERE token = ?
++            AND (lastSeenAt IS NULL OR lastSeenAt < ?)`,
++      )
++        .bind(seenIso, token, staleBefore)
++        .run()
++        .catch(() => {
++          /* column not present yet, or a transient blip — never fatal */
++        });
++    try {
++      c.executionCtx.waitUntil(touchLastSeen());
++    } catch {
++      // executionCtx getter throws outside Worker isolates (tests, local node).
++      void touchLastSeen();
++    }
++  }
++
+   // Sprint 4 — sliding session refresh.
+   // Gate the DB write by remaining-lifetime so an active user fires the
+   // UPDATE at most ~once per day, not on every request. After the push,
+diff --git a/src/api/lib/session-registry.ts b/src/api/lib/session-registry.ts
+new file mode 100644
+index 00000000..a7e592fa
+--- /dev/null
++++ b/src/api/lib/session-registry.ts
+@@ -0,0 +1,185 @@
++// ---------------------------------------------------------------------------
++// session-registry.ts — who is actually signed in, from where, and since when.
++//
++// WHY THIS EXISTS
++// ---------------
++// `user_sessions` shipped with four columns: token, userId, createdAt,
++// expiresAt. That is enough to *validate* a session and nothing else. It is
++// not enough to answer the question a security reviewer actually asks:
++//
++//     "This account looks active. Is that the person it belongs to?"
++//
++// The gap matters because of "Remember me". A session lives for days and
++// slides forward every time it is used, so ONE login can grant weeks of
++// access with no further login events. The login log — the thing everyone
++// reaches for — shows a single entry from three weeks ago and nothing since,
++// while somebody is using the account daily. An ex-employee on a remembered
++// session, or a shared factory PC nobody signed out of, is invisible to it.
++//
++// So this module adds the three facts that make a session accountable:
++//   · ip_address   — where it signed in from
++//   · user_agent   — what browser/OS, so the owner can recognise their own
++//   · last_seen_at — when the account was genuinely last USED, not last
++//                    authenticated. This is the column that distinguishes
++//                    "dormant" from "hasn't retyped a password lately".
++//
++// Plus `id`: a random public handle. Sessions are addressed by it in the API
++// so a revoke call never has to carry the session TOKEN, which is the actual
++// credential. Leaking a token in a URL or a log would hand over the session
++// it was meant to manage.
++//
++// Columns are added at runtime (the project's established pattern — the
++// migration runner cannot be relied on; see CLAUDE.md) and the migration file
++// exists for a clean rebuild. Both are additive and idempotent.
++// ---------------------------------------------------------------------------
++import { memoizeSelfApply } from "./self-apply";
++
++let sessionColumnsPromise: Promise<void> | null = null;
++
++/**
++ * Add the accountability columns to user_sessions. Idempotent, once per
++ * isolate, memo dropped on failure so a transient blip is retried.
++ */
++export function ensureSessionColumns(db: D1Database): Promise<void> {
++  return memoizeSelfApply(
++    () => sessionColumnsPromise,
++    (p) => {
++      sessionColumnsPromise = p;
++    },
++    async () => {
++      await db
++        .prepare(
++          `ALTER TABLE user_sessions
++             ADD COLUMN IF NOT EXISTS id TEXT`,
++        )
++        .run();
++      await db
++        .prepare(
++          `ALTER TABLE user_sessions
++             ADD COLUMN IF NOT EXISTS ip_address TEXT`,
++        )
++        .run();
++      await db
++        .prepare(
++          `ALTER TABLE user_sessions
++             ADD COLUMN IF NOT EXISTS user_agent TEXT`,
++        )
++        .run();
++      await db
++        .prepare(
++          `ALTER TABLE user_sessions
++             ADD COLUMN IF NOT EXISTS last_seen_at TEXT`,
++        )
++        .run();
++      // Existing sessions predate the id column. Give them one so they can be
++      // listed and revoked like any other — otherwise the oldest sessions, the
++      // ones most worth reviewing, would be the only ones you cannot act on.
++      await db
++        .prepare(
++          `UPDATE user_sessions
++              SET id = gen_random_uuid()::text
++            WHERE id IS NULL`,
++        )
++        .run();
++      // Listing is always "sessions for this user, newest first".
++      await db
++        .prepare(
++          `CREATE INDEX IF NOT EXISTS idx_user_sessions_user_seen
++             ON user_sessions(user_id, last_seen_at DESC)`,
++        )
++        .run();
++    },
++  );
++}
++
++/** Client IP as Cloudflare reports it, with the standard proxy fallback. */
++export function clientIp(c: {
++  req: { header: (k: string) => string | undefined };
++}): string | null {
++  return (
++    c.req.header("cf-connecting-ip") ??
++    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ??
++    null
++  );
++}
++
++/** Truncated UA string. 256 chars matches what the audit log stores. */
++export function clientUserAgent(c: {
++  req: { header: (k: string) => string | undefined };
++}): string | null {
++  return (c.req.header("user-agent") ?? "").slice(0, 256) || null;
++}
++
++/**
++ * How stale `last_seen_at` may get before a request refreshes it.
++ *
++ * Every authenticated request COULD write this, but that would add a DB write
++ * to every page view for no extra insight — "last seen 4 minutes ago" and
++ * "last seen 30 seconds ago" answer the same question. Five minutes keeps the
++ * write volume near zero while staying precise enough to catch an account in
++ * use right now. Same reasoning as the sliding-refresh gate in
++ * auth-middleware.ts, which throttles its own write to about once a day.
++ */
++export const LAST_SEEN_REFRESH_MS = 5 * 60 * 1000;
++
++/**
++ * Build the INSERT for a new session row.
++ *
++ * WHY THIS IS A HELPER AND NOT AN INLINE QUERY
++ * The four login paths (password, 2FA step-2, OAuth, accept-invite) all create
++ * sessions. Inlining the enrichment four times guarantees they drift, and a
++ * session created by a path that forgot the IP is a session you cannot review.
++ *
++ * WHY IT DEGRADES INSTEAD OF THROWING
++ * The accountability columns are added by a runtime ALTER. If that ALTER has
++ * not landed yet — a fresh isolate racing the first request, a DB role without
++ * ALTER rights — the enriched INSERT would fail, and this sits directly on the
++ * login path. Nobody being able to sign in is a far worse outcome than a
++ * session row missing its IP. So a failed ensure falls back to the original
++ * four-column INSERT: the user signs in, and that one row is simply less
++ * detailed. Fail open here is correct precisely because these columns are
++ * observability, not authorisation — they gate nothing.
++ */
++export async function sessionInsert(
++  db: D1Database,
++  c: { req: { header: (k: string) => string | undefined } },
++  s: { token: string; userId: string; createdAt: string; expiresAt: string },
++): Promise<D1PreparedStatement> {
++  let enriched = true;
++  try {
++    await ensureSessionColumns(db);
++  } catch (err) {
++    enriched = false;
++    console.warn(
++      "[session-registry] column ensure failed; inserting a bare session row:",
++      err instanceof Error ? err.message : String(err),
++    );
++  }
++
++  if (!enriched) {
++    return db
++      .prepare(
++        "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
++      )
++      .bind(s.token, s.userId, s.createdAt, s.expiresAt);
++  }
++
++  return db
++    .prepare(
++      "INSERT INTO user_sessions (id, token, userId, createdAt, expiresAt, ipAddress, userAgent, lastSeenAt)" +
++        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
++    )
++    .bind(
++      crypto.randomUUID(),
++      s.token,
++      s.userId,
++      s.createdAt,
++      s.expiresAt,
++      clientIp(c),
++      clientUserAgent(c),
++      // Seed last_seen with the login time so a session that is created and
++      // never used again still reports honestly, rather than showing NULL and
++      // reading as "never seen".
++      s.createdAt,
++    );
++}
+diff --git a/src/api/routes/auth-oauth.ts b/src/api/routes/auth-oauth.ts
+index fa76a84c..947ce040 100644
+--- a/src/api/routes/auth-oauth.ts
++++ b/src/api/routes/auth-oauth.ts
+@@ -34,10 +34,16 @@ import {
+ import { checkLoginRateLimit, clientIp } from "../lib/rate-limit";
+ import { emitAudit } from "../lib/audit";
+ import { CSRF_COOKIE } from "../lib/auth-middleware";
++import { sessionInsert } from "../lib/session-registry";
+ 
+ const app = new Hono<Env>();
+ 
+-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;      // 30 days, mirrors auth.ts
++// 2026-09-03 — was 30 days with a comment claiming it mirrored auth.ts. It did
++// not: auth.ts is 7 days, so signing in with Google bought a session four
++// times longer than signing in with a password, and the stale comment is why
++// nobody noticed. A session is an unattended credential; the shorter of the
++// two windows is the one to standardise on.
++const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;       // 7 days, matches auth.ts
+ const STATE_TTL_S = 10 * 60;                           // 10 minutes for the OAuth handshake
+ 
+ function safeNext(next: string | undefined): string {
+@@ -176,11 +182,12 @@ app.get("/google/callback", async (c) => {
+   const now = new Date();
+   const expires = new Date(now.getTime() + SESSION_TTL_MS);
+   await c.var.DB.batch([
+-    c.var.DB
+-      .prepare(
+-        "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
+-      )
+-      .bind(sessionToken, linked.userId, now.toISOString(), expires.toISOString()),
++    await sessionInsert(c.var.DB, c, {
++      token: sessionToken,
++      userId: linked.userId,
++      createdAt: now.toISOString(),
++      expiresAt: expires.toISOString(),
++    }),
+     c.var.DB
+       .prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?")
+       .bind(now.toISOString(), linked.userId),
+diff --git a/src/api/routes/auth-totp.ts b/src/api/routes/auth-totp.ts
+index e9b2d51a..0a594756 100644
+--- a/src/api/routes/auth-totp.ts
++++ b/src/api/routes/auth-totp.ts
+@@ -46,6 +46,7 @@ import {
+   checkLoginRateLimit,
+   clearLoginRateLimit,
+ } from "../lib/rate-limit";
++import { sessionInsert } from "../lib/session-registry";
+ import { emitAudit } from "../lib/audit";
+ import {
+   sessionCookieHeader,
+@@ -333,11 +334,12 @@ app.post("/login-verify", async (c) => {
+   const now = new Date();
+   const expires = new Date(now.getTime() + SESSION_TTL_MS);
+   await c.var.DB.batch([
+-    c.var.DB
+-      .prepare(
+-        "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
+-      )
+-      .bind(sessionToken, userId, now.toISOString(), expires.toISOString()),
++    await sessionInsert(c.var.DB, c, {
++      token: sessionToken,
++      userId,
++      createdAt: now.toISOString(),
++      expiresAt: expires.toISOString(),
++    }),
+     c.var.DB
+       .prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?")
+       .bind(now.toISOString(), userId),
+diff --git a/src/api/routes/auth.ts b/src/api/routes/auth.ts
+index 709021cc..48224617 100644
+--- a/src/api/routes/auth.ts
++++ b/src/api/routes/auth.ts
+@@ -31,6 +31,7 @@ import {
+   clearLoginRateLimit,
+   clientIp,
+ } from "../lib/rate-limit";
++import { sessionInsert } from "../lib/session-registry";
+ import { emitAudit } from "../lib/audit";
+ import { issuePendingTotpToken } from "../lib/totp-pending";
+ import {
+@@ -309,9 +310,12 @@ app.post("/login", async (c) => {
+ 
+   // Atomic: write session + update lastLoginAt in one batch.
+   await c.var.DB.batch([
+-    c.var.DB.prepare(
+-      "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
+-    ).bind(token, user.id, now.toISOString(), expires.toISOString()),
++    await sessionInsert(c.var.DB, c, {
++      token,
++      userId: user.id,
++      createdAt: now.toISOString(),
++      expiresAt: expires.toISOString(),
++    }),
+     c.var.DB.prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?").bind(
+       now.toISOString(),
+       user.id,
+@@ -1269,9 +1273,12 @@ app.post("/accept-invite", async (c) => {
+     c.var.DB.prepare(
+       "UPDATE user_invites SET acceptedAt = ? WHERE token = ?",
+     ).bind(nowIso, token),
+-    c.var.DB.prepare(
+-      "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
+-    ).bind(sessionToken, userId, nowIso, sessionExpires),
++    await sessionInsert(c.var.DB, c, {
++      token: sessionToken,
++      userId,
++      createdAt: nowIso,
++      expiresAt: sessionExpires,
++    }),
+   ]);
+ 
+   // Sprint 7: set both auth cookies; body returns user + csrfToken only.
+diff --git a/src/api/routes/sessions.ts b/src/api/routes/sessions.ts
+new file mode 100644
+index 00000000..0682fbcf
+--- /dev/null
++++ b/src/api/routes/sessions.ts
+@@ -0,0 +1,248 @@
++// ---------------------------------------------------------------------------
++// sessions.ts — see and end active sign-ins.
++//
++// Mounted at /api/sessions from worker.ts.
++//
++//   GET    /api/sessions            — my own live sessions
++//   DELETE /api/sessions/:id        — end one of mine
++//   GET    /api/sessions/all        — every user's live sessions (SUPER_ADMIN)
++//   DELETE /api/sessions/all/:id    — end anyone's (SUPER_ADMIN)
++//
++// WHY THIS EXISTS
++// A login log answers "who authenticated, and when". It cannot answer "who is
++// signed in right now" — and with "Remember me" those are weeks apart. One
++// login grants a sliding week of access, so the log shows a single entry from
++// last month while the account is used daily. That is exactly the shape of an
++// un-offboarded employee, a shared machine nobody signed out of, or a stolen
++// session. None of them produce a second login event.
++//
++// The account owner is the best detector: they are the one person who knows
++// they were not in Ipoh at 3am on a Linux box. This gives them the list and a
++// button, and gives an admin the same across every account.
++//
++// TOKENS NEVER LEAVE THE SERVER. Sessions are addressed by `id`, a random
++// handle. Returning the token — the actual credential — in a list endpoint
++// would mean a screenshot of the security page hands over every session on it.
++// ---------------------------------------------------------------------------
++import { Hono } from "hono";
++import type { Env } from "../worker";
++import { emitAudit } from "../lib/audit";
++import { ensureSessionColumns } from "../lib/session-registry";
++import { requireSuperAdmin } from "../lib/rbac";
++
++const app = new Hono<Env>();
++
++type SessionRow = {
++  id: string | null;
++  userId: string;
++  createdAt: string;
++  expiresAt: string;
++  ipAddress: string | null;
++  userAgent: string | null;
++  lastSeenAt: string | null;
++  email?: string | null;
++  displayName?: string | null;
++  role?: string | null;
++};
++
++function ctxUserId(c: unknown): string | undefined {
++  return (c as { get: (k: string) => unknown }).get("userId") as
++    | string
++    | undefined;
++}
++
++/**
++ * Turn a raw UA string into something a non-technical operator can match
++ * against "was that me?". Deliberately coarse: the point is recognition, not
++ * fingerprinting. "Chrome on Windows" is answerable; the full UA string is not.
++ */
++function describeDevice(ua: string | null): string {
++  if (!ua) return "Unknown device";
++  const browser =
++    /edg\//i.test(ua) ? "Edge"
++    : /opr\/|opera/i.test(ua) ? "Opera"
++    : /chrome|crios/i.test(ua) ? "Chrome"
++    : /firefox|fxios/i.test(ua) ? "Firefox"
++    : /safari/i.test(ua) ? "Safari"
++    : "Browser";
++  const os =
++    /windows/i.test(ua) ? "Windows"
++    : /android/i.test(ua) ? "Android"
++    : /iphone|ipad|ios/i.test(ua) ? "iOS"
++    : /mac os|macintosh/i.test(ua) ? "Mac"
++    : /linux/i.test(ua) ? "Linux"
++    : "";
++  return os ? `${browser} on ${os}` : browser;
++}
++
++function shape(r: SessionRow, currentToken: string | null, isCurrent: boolean) {
++  return {
++    id: r.id,
++    device: describeDevice(r.userAgent),
++    ipAddress: r.ipAddress,
++    createdAt: r.createdAt,
++    lastSeenAt: r.lastSeenAt,
++    expiresAt: r.expiresAt,
++    current: isCurrent,
++    ...(r.email !== undefined
++      ? { email: r.email, displayName: r.displayName, role: r.role }
++      : {}),
++  };
++}
++
++/** The caller's own session token, so the list can mark "This device". */
++function currentToken(c: {
++  req: { header: (k: string) => string | undefined };
++}): string | null {
++  const cookie = c.req.header("cookie") ?? "";
++  const m = cookie.match(/(?:^|;\s*)hookka_session=([^;]+)/);
++  return m ? decodeURIComponent(m[1]) : null;
++}
++
++// ----- GET /api/sessions ---------------------------------------------------
++// Every live session for the calling user. No permission gate beyond being
++// signed in: these are your own sessions, and a person who cannot see where
++// their account is signed in cannot notice that it is signed in somewhere wrong.
++app.get("/", async (c) => {
++  const userId = ctxUserId(c);
++  if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
++
++  try {
++    await ensureSessionColumns(c.var.DB);
++  } catch {
++    /* listing still works without the extra columns, just sparser */
++  }
++
++  const tok = currentToken(c);
++  const res = await c.var.DB
++    .prepare(
++      `SELECT id, userId, createdAt, expiresAt, ipAddress, userAgent, lastSeenAt, token
++         FROM user_sessions
++        WHERE userId = ?
++          AND expiresAt > ?
++        ORDER BY lastSeenAt DESC NULLS LAST, createdAt DESC`,
++    )
++    .bind(userId, new Date().toISOString())
++    .all<SessionRow & { token: string }>();
++
++  const rows = res.results ?? [];
++  return c.json({
++    success: true,
++    data: rows.map((r) => shape(r, tok, tok !== null && r.token === tok)),
++  });
++});
++
++// ----- GET /api/sessions/all ----------------------------------------------
++// Every live session across every account. SUPER_ADMIN only.
++//
++// REGISTERED BEFORE /:id DELIBERATELY. Hono matches in registration order and
++// /:id is a single-segment wildcard, so declaring it first would swallow
++// /all as an id lookup.
++//
++// This is the view that answers the questions a login log cannot: which
++// accounts are signed in right now, from how many places at once, and how long
++// since each was actually used. A shared account with five concurrent sessions
++// from five IPs, or a departed employee's account still being used on a
++// remembered session, both show up here and nowhere else.
++app.get("/all", async (c) => {
++  const su = requireSuperAdmin(c);
++  if (su) return su;
++
++  try {
++    await ensureSessionColumns(c.var.DB);
++  } catch {
++    /* sparser listing is better than none */
++  }
++
++  const tok = currentToken(c);
++  const res = await c.var.DB
++    .prepare(
++      `SELECT s.id AS id, s.userId AS userId, s.createdAt AS createdAt,
++              s.expiresAt AS expiresAt, s.ipAddress AS ipAddress,
++              s.userAgent AS userAgent, s.lastSeenAt AS lastSeenAt,
++              s.token AS token,
++              u.email AS email, u.displayName AS displayName, u.role AS role
++         FROM user_sessions s
++         JOIN users u ON u.id = s.userId
++        WHERE s.expiresAt > ?
++        ORDER BY s.lastSeenAt DESC NULLS LAST, s.createdAt DESC
++        LIMIT 500`,
++    )
++    .bind(new Date().toISOString())
++    .all<SessionRow & { token: string }>();
++
++  const rows = res.results ?? [];
++  return c.json({
++    success: true,
++    data: rows.map((r) => shape(r, tok, tok !== null && r.token === tok)),
++  });
++});
++
++// ----- DELETE /api/sessions/all/:id ---------------------------------------
++// End anyone's session. SUPER_ADMIN only.
++//
++// This is the offboarding lever that did not exist: previously the only way to
++// end someone else's session was to force a password change, which kills every
++// session they have and tells them something happened. This ends one.
++app.delete("/all/:id", async (c) => {
++  const su = requireSuperAdmin(c);
++  if (su) return su;
++  const id = c.req.param("id");
++
++  const row = await c.var.DB
++    .prepare("SELECT id, userId FROM user_sessions WHERE id = ? LIMIT 1")
++    .bind(id)
++    .first<{ id: string; userId: string }>();
++  if (!row) return c.json({ success: false, error: "Not found" }, 404);
++
++  await c.var.DB
++    .prepare("DELETE FROM user_sessions WHERE id = ?")
++    .bind(id)
++    .run();
++
++  // Compliance-critical: an admin ending another person's session is exactly
++  // the kind of action the journal must be able to reconstruct afterwards,
++  // including WHOSE session it was.
++  await emitAudit(c, {
++    resource: "auth",
++    resourceId: row.userId,
++    action: "session.revoke",
++    after: { sessionId: id, scope: "admin" },
++  });
++
++  return c.json({ success: true });
++});
++
++// ----- DELETE /api/sessions/:id -------------------------------------------
++// End one of MY sessions. Scoped by userId in the WHERE clause, so a guessed
++// id from another account matches nothing rather than revoking a stranger.
++app.delete("/:id", async (c) => {
++  const userId = ctxUserId(c);
++  if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
++  const id = c.req.param("id");
++
++  const row = await c.var.DB
++    .prepare("SELECT id FROM user_sessions WHERE id = ? AND userId = ? LIMIT 1")
++    .bind(id, userId)
++    .first<{ id: string }>();
++  if (!row) return c.json({ success: false, error: "Not found" }, 404);
++
++  await c.var.DB
++    .prepare("DELETE FROM user_sessions WHERE id = ? AND userId = ?")
++    .bind(id, userId)
++    .run();
++
++  // Signing a device out is a security action and belongs in the journal —
++  // it is also the trail that shows someone reacted to a session they did
++  // not recognise.
++  await emitAudit(c, {
++    resource: "auth",
++    resourceId: userId,
++    action: "session.revoke",
++    after: { sessionId: id, scope: "self" },
++  });
++
++  return c.json({ success: true });
++});
++
++export default app;
+diff --git a/src/api/worker.ts b/src/api/worker.ts
+index 31fe0aea..aeec6b4d 100644
+--- a/src/api/worker.ts
++++ b/src/api/worker.ts
+@@ -1049,6 +1049,7 @@ import auth from "./routes/auth";
+ import authOauth from "./routes/auth-oauth";
+ // Phase C.6 — TOTP 2FA enrollment + verify.
+ import authTotp from "./routes/auth-totp";
++import sessions from "./routes/sessions";
+ import users from "./routes/users";
+ import presence from "./routes/presence";
+ import bomMasterTemplates from "./routes/bom-master-templates";
+@@ -1277,6 +1278,9 @@ app.route("/api/price-history", priceHistory);
+ // 404 the OAuth/TOTP paths.
+ app.route("/api/auth/oauth", authOauth);
+ app.route("/api/auth/totp", authTotp);
++// Session visibility + revocation (see routes/sessions.ts). Authenticated;
++// the /all sub-routes gate themselves on SUPER_ADMIN.
++app.route("/api/sessions", sessions);
+ app.route("/api/auth", auth);
+ app.route("/api/users", users);
+ app.route("/api/presence", presence);
+diff --git a/src/pages/admin/health.tsx b/src/pages/admin/health.tsx
+index d4f0a578..232ae2f4 100644
+--- a/src/pages/admin/health.tsx
++++ b/src/pages/admin/health.tsx
+@@ -12,7 +12,7 @@
+ // before the data fetch even starts. The endpoint enforces the same
+ // role check server-side (defense-in-depth).
+ // ---------------------------------------------------------------------------
+-import { useEffect, useMemo, useState } from "react";
++import { useCallback, useEffect, useMemo, useState } from "react";
+ import { useCachedJson } from "@/lib/cached-fetch";
+ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+ import { Button } from "@/components/ui/button";
+@@ -1683,6 +1683,11 @@ export default function AdminHealthPage() {
+             </CardContent>
+           </Card>
+ 
++          {/* Sits directly under the security events on purpose: that panel is
++              "who signed in", this is "who is still in". The gap between them
++              is where a sliding Remember-me session hides. */}
++          <LiveSessionsPanel />
++
+           {/* ────────── AUTOMATION (CI) ────────── */}
+           <SectionHeader
+             title="Automation — GitHub Actions"
+@@ -1975,3 +1980,167 @@ export default function AdminHealthPage() {
+     </div>
+   );
+ }
++
++// ---------------------------------------------------------------------------
++// Live sessions — who is signed in right now, across every account.
++//
++// The Security panel above answers "who authenticated, and when". This answers
++// "who is IN, right now, and from where" — and with sliding "Remember me"
++// sessions those are different questions weeks apart. A single login grants
++// days of access with no further login events, so the panel above can look
++// quiet while accounts are actively in use.
++//
++// What this surfaces that nothing else does:
++//   · a shared account with several concurrent sessions from different IPs
++//   · a departed employee whose account was never disabled, still being used
++//   · a session last active at an hour nobody works
++// ---------------------------------------------------------------------------
++type LiveSession = {
++  id: string | null;
++  device: string;
++  ipAddress: string | null;
++  createdAt: string;
++  lastSeenAt: string | null;
++  expiresAt: string;
++  current: boolean;
++  email?: string | null;
++  displayName?: string | null;
++  role?: string | null;
++};
++
++function sessionAgo(iso: string | null): string {
++  if (!iso) return "unknown";
++  const ms = Date.now() - new Date(iso).getTime();
++  if (!Number.isFinite(ms)) return "unknown";
++  const m = Math.floor(ms / 60000);
++  if (m < 1) return "just now";
++  if (m < 60) return m + " min ago";
++  const h = Math.floor(m / 60);
++  if (h < 24) return h + "h ago";
++  return Math.floor(h / 24) + "d ago";
++}
++
++function LiveSessionsPanel() {
++  const [rows, setRows] = useState<LiveSession[] | null>(null);
++  const [err, setErr] = useState<string | null>(null);
++  const [busy, setBusy] = useState<string | null>(null);
++
++  const load = useCallback(async () => {
++    try {
++      const res = await fetch("/api/sessions/all", { credentials: "include" });
++      const json = (await res.json()) as {
++        success?: boolean;
++        data?: LiveSession[];
++      };
++      if (!res.ok || !json.success) {
++        setErr("Could not load sessions.");
++        return;
++      }
++      setRows(json.data ?? []);
++    } catch {
++      setErr("Network error.");
++    }
++  }, []);
++
++  useEffect(() => {
++    void load();
++  }, [load]);
++
++  async function revoke(id: string) {
++    setBusy(id);
++    try {
++      const res = await fetch("/api/sessions/all/" + encodeURIComponent(id), {
++        method: "DELETE",
++        credentials: "include",
++      });
++      if (res.ok) await load();
++    } finally {
++      setBusy(null);
++    }
++  }
++
++  // Several live sessions on one account is the pattern worth eyeballing:
++  // normal for a person with a phone and a desktop, a flag on a shared login.
++  const perAccount = new Map<string, number>();
++  for (const r of rows ?? []) {
++    const k = r.email ?? "?";
++    perAccount.set(k, (perAccount.get(k) ?? 0) + 1);
++  }
++
++  return (
++    <div className="rounded-lg border border-[#E2DDD8] bg-white p-5 mt-6">
++      <h3 className="text-base font-semibold text-[#1F1D1B]">
++        Live sessions — who is signed in right now
++      </h3>
++      <p className="text-xs text-[#6B7280] mt-1 mb-4">
++        A login log shows who signed in. This shows who is still in. With
++        &ldquo;Remember me&rdquo; those are weeks apart.
++      </p>
++
++      {err && <p className="text-sm text-red-600">{err}</p>}
++      {!rows && !err && <p className="text-sm text-[#6B7280]">Loading…</p>}
++      {rows && rows.length === 0 && (
++        <p className="text-sm text-[#6B7280]">No active sessions.</p>
++      )}
++
++      {rows && rows.length > 0 && (
++        <div className="overflow-x-auto">
++          <table className="w-full text-sm">
++            <thead>
++              <tr className="text-left text-[#6B7280] border-b border-[#E2DDD8]">
++                <th className="py-2 pr-3">Account</th>
++                <th className="py-2 pr-3">Device</th>
++                <th className="py-2 pr-3">IP</th>
++                <th className="py-2 pr-3">Last used</th>
++                <th className="py-2 pr-3">Signed in</th>
++                <th className="py-2"></th>
++              </tr>
++            </thead>
++            <tbody>
++              {rows.map((r) => {
++                const many = (perAccount.get(r.email ?? "?") ?? 0) > 1;
++                return (
++                  <tr
++                    key={r.id ?? r.createdAt}
++                    className="border-b border-[#F2EFEA]"
++                  >
++                    <td className="py-2 pr-3">
++                      <div className="font-medium">{r.email}</div>
++                      <div className="text-xs text-[#6B7280]">
++                        {r.role}
++                        {many && (
++                          <span className="ml-2 text-amber-700">
++                            multiple sessions
++                          </span>
++                        )}
++                      </div>
++                    </td>
++                    <td className="py-2 pr-3">{r.device}</td>
++                    <td className="py-2 pr-3">{r.ipAddress ?? "—"}</td>
++                    <td className="py-2 pr-3">{sessionAgo(r.lastSeenAt)}</td>
++                    <td className="py-2 pr-3">{sessionAgo(r.createdAt)}</td>
++                    <td className="py-2 text-right">
++                      {!r.current && r.id && (
++                        <button
++                          type="button"
++                          disabled={busy === r.id}
++                          onClick={() => void revoke(r.id as string)}
++                          className="text-xs text-red-700 hover:underline disabled:opacity-40"
++                        >
++                          {busy === r.id ? "Ending…" : "End session"}
++                        </button>
++                      )}
++                      {r.current && (
++                        <span className="text-xs text-green-700">You</span>
++                      )}
++                    </td>
++                  </tr>
++                );
++              })}
++            </tbody>
++          </table>
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/src/pages/settings/index.tsx b/src/pages/settings/index.tsx
+index 7887b8b3..b35f6058 100644
+--- a/src/pages/settings/index.tsx
++++ b/src/pages/settings/index.tsx
+@@ -1174,6 +1174,7 @@ function SecurityTab() {
+   }
+ 
+   return (
++    <>
+     <Card>
+       <CardHeader>
+         <CardTitle>Two-factor sign-in</CardTitle>
+@@ -1268,5 +1269,145 @@ function SecurityTab() {
+         )}
+       </CardContent>
+     </Card>
++    {/* Two-factor and "where am I signed in" are the same question from two
++        sides: one stops a stranger getting in, the other shows you if one
++        already is. They belong on the same screen. */}
++    <ActiveSessions />
++    </>
++  );
++}
++
++// ---------------------------------------------------------------------------
++// Active sessions — where this account is currently signed in.
++//
++// WHY THIS MATTERS MORE THAN IT LOOKS
++// The login log records authentications. With "Remember me" a session slides
++// for a week, so one login buys days of access and emits nothing further. An
++// account can therefore be in use daily while the login log shows a single
++// entry from last month. That gap is where a hijacked session, a shared
++// machine nobody signed out of, and an un-offboarded employee all hide.
++//
++// The account owner is the only person who can say "that is not me". This
++// gives them the list, in terms they can actually judge — a device they
++// recognise, a place, and when it was last used — plus a button.
++// ---------------------------------------------------------------------------
++type SessionRow = {
++  id: string | null;
++  device: string;
++  ipAddress: string | null;
++  createdAt: string;
++  lastSeenAt: string | null;
++  expiresAt: string;
++  current: boolean;
++};
++
++function timeAgo(iso: string | null): string {
++  if (!iso) return "unknown";
++  const ms = Date.now() - new Date(iso).getTime();
++  if (!Number.isFinite(ms)) return "unknown";
++  const m = Math.floor(ms / 60000);
++  if (m < 1) return "just now";
++  if (m < 60) return `${m} min ago`;
++  const h = Math.floor(m / 60);
++  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
++  const d = Math.floor(h / 24);
++  return `${d} day${d === 1 ? "" : "s"} ago`;
++}
++
++function ActiveSessions() {
++  const [rows, setRows] = useState<SessionRow[] | null>(null);
++  const [err, setErr] = useState<string | null>(null);
++  const [busy, setBusy] = useState<string | null>(null);
++
++  const load = useCallback(async () => {
++    try {
++      const res = await fetch("/api/sessions", { credentials: "include" });
++      const json = (await res.json()) as {
++        success?: boolean;
++        data?: SessionRow[];
++      };
++      if (!res.ok || !json.success) {
++        setErr("Could not load your sessions.");
++        return;
++      }
++      setRows(json.data ?? []);
++    } catch {
++      setErr("Network error.");
++    }
++  }, []);
++
++  useEffect(() => {
++    void load();
++  }, [load]);
++
++  async function revoke(id: string) {
++    setBusy(id);
++    try {
++      const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, {
++        method: "DELETE",
++        credentials: "include",
++      });
++      if (res.ok) await load();
++    } finally {
++      setBusy(null);
++    }
++  }
++
++  return (
++    <Card className="mt-6">
++      <CardHeader>
++        <CardTitle>Where you're signed in</CardTitle>
++        <CardDescription>
++          Every device with a live sign-in to your account. If you don't
++          recognise one — an unfamiliar device, place, or a time you weren't
++          working — sign it out and change your password.
++        </CardDescription>
++      </CardHeader>
++      <CardContent>
++        {err && <p className="text-sm text-red-600">{err}</p>}
++        {!rows && !err && (
++          <p className="text-sm text-muted-foreground">Checking…</p>
++        )}
++        {rows && rows.length === 0 && (
++          <p className="text-sm text-muted-foreground">
++            No other active sessions.
++          </p>
++        )}
++        {rows && rows.length > 0 && (
++          <div className="space-y-2">
++            {rows.map((r) => (
++              <div
++                key={r.id ?? r.createdAt}
++                className="flex items-center justify-between rounded border border-slate-200 dark:border-slate-800 p-3"
++              >
++                <div className="text-sm">
++                  <div className="font-medium">
++                    {r.device}
++                    {r.current && (
++                      <span className="ml-2 text-xs text-green-700 dark:text-green-400">
++                        This device
++                      </span>
++                    )}
++                  </div>
++                  <div className="text-muted-foreground text-xs mt-0.5">
++                    {r.ipAddress ?? "IP not recorded"} · last used{" "}
++                    {timeAgo(r.lastSeenAt)}
++                  </div>
++                </div>
++                {!r.current && r.id && (
++                  <Button
++                    variant="outline"
++                    disabled={busy === r.id}
++                    onClick={() => void revoke(r.id as string)}
++                  >
++                    {busy === r.id ? "Signing out…" : "Sign out"}
++                  </Button>
++                )}
++              </div>
++            ))}
++          </div>
++        )}
++      </CardContent>
++    </Card>
+   );
+ }
+diff --git a/tests/db-schema.json b/tests/db-schema.json
+index 30bf7378..52c7cc23 100644
+--- a/tests/db-schema.json
++++ b/tests/db-schema.json
+@@ -3444,8 +3444,12 @@
+   "user_sessions": [
+     "created_at",
+     "expires_at",
++    "id",
++    "ip_address",
++    "last_seen_at",
+     "org_id",
+     "token",
++    "user_agent",
+     "user_id"
+   ],
+   "users": [

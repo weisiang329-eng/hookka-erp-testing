@@ -1,0 +1,21 @@
+diff --git a/src/api/routes/auth-totp.ts b/src/api/routes/auth-totp.ts
+index 0a594756..6bdde54c 100644
+--- a/src/api/routes/auth-totp.ts
++++ b/src/api/routes/auth-totp.ts
+@@ -59,7 +59,15 @@ import {
+ 
+ const app = new Hono<Env>();
+ 
+-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
++// 2026-09-03 — was 30 days while every other login path issues 7
++// (auth.ts, auth-oauth.ts, and the sliding refresh in auth-middleware.ts).
++// That inverted the incentive: completing two-factor — the STRONGER check —
++// handed back a credential lasting four times longer than a password-only
++// sign-in. A session is an unattended credential, so the account that took
++// the extra security step ended up with the largest window for a stolen or
++// forgotten session to be reused. Same drift as the OAuth path fixed the
++// same day; both were single numbers nobody was comparing across files.
++const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;       // 7 days, matches auth.ts
+ const TOTP_ISSUER = "Hookka Manufacturing ERP";
+ 
+ type UserRow = {

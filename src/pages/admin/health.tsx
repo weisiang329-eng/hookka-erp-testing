@@ -12,7 +12,7 @@
 // before the data fetch even starts. The endpoint enforces the same
 // role check server-side (defense-in-depth).
 // ---------------------------------------------------------------------------
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";

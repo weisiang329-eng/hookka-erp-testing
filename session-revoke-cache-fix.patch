@@ -1,0 +1,65 @@
+diff --git a/src/api/routes/sessions.ts b/src/api/routes/sessions.ts
+index 0682fbcf..68d4c85a 100644
+--- a/src/api/routes/sessions.ts
++++ b/src/api/routes/sessions.ts
+@@ -29,6 +29,7 @@ import type { Env } from "../worker";
+ import { emitAudit } from "../lib/audit";
+ import { ensureSessionColumns } from "../lib/session-registry";
+ import { requireSuperAdmin } from "../lib/rbac";
++import { invalidateSessionCache } from "../lib/auth-middleware";
+ 
+ const app = new Hono<Env>();
+ 
+@@ -189,16 +190,22 @@ app.delete("/all/:id", async (c) => {
+   if (su) return su;
+   const id = c.req.param("id");
+ 
++  // Token fetched so the KV cache entry can be purged too — see the note on
++  // the self-revoke above. This one matters more: an admin ending a session
++  // is usually reacting to something (a departure, a device they do not
++  // recognise), and "it will stop working within five minutes" is not what
++  // ending a session is supposed to mean.
+   const row = await c.var.DB
+-    .prepare("SELECT id, userId FROM user_sessions WHERE id = ? LIMIT 1")
++    .prepare("SELECT id, userId, token FROM user_sessions WHERE id = ? LIMIT 1")
+     .bind(id)
+-    .first<{ id: string; userId: string }>();
++    .first<{ id: string; userId: string; token: string }>();
+   if (!row) return c.json({ success: false, error: "Not found" }, 404);
+ 
+   await c.var.DB
+     .prepare("DELETE FROM user_sessions WHERE id = ?")
+     .bind(id)
+     .run();
++  await invalidateSessionCache(c.env.SESSION_CACHE, row.token);
+ 
+   // Compliance-critical: an admin ending another person's session is exactly
+   // the kind of action the journal must be able to reconstruct afterwards,
+@@ -221,16 +228,25 @@ app.delete("/:id", async (c) => {
+   if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
+   const id = c.req.param("id");
+ 
++  // The TOKEN is fetched, not just the id, because deleting the row is only
++  // half of a revoke. Sessions are cached in KV for SESSION_CACHE_TTL_S (5
++  // min) and the middleware trusts that cache without re-reading the DB — so
++  // a row-only delete leaves the "signed out" device working for up to five
++  // more minutes. auth-middleware.ts states the rule: every write that
++  // mutates a cached session must purge the KV entry explicitly. A sign-out
++  // button that does not actually sign the device out is worse than no
++  // button, because it reports safety it has not delivered.
+   const row = await c.var.DB
+-    .prepare("SELECT id FROM user_sessions WHERE id = ? AND userId = ? LIMIT 1")
++    .prepare("SELECT id, token FROM user_sessions WHERE id = ? AND userId = ? LIMIT 1")
+     .bind(id, userId)
+-    .first<{ id: string }>();
++    .first<{ id: string; token: string }>();
+   if (!row) return c.json({ success: false, error: "Not found" }, 404);
+ 
+   await c.var.DB
+     .prepare("DELETE FROM user_sessions WHERE id = ? AND userId = ?")
+     .bind(id, userId)
+     .run();
++  await invalidateSessionCache(c.env.SESSION_CACHE, row.token);
+ 
+   // Signing a device out is a security action and belongs in the journal —
+   // it is also the trail that shows someone reacted to a session they did

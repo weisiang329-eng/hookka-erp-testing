@@ -10869,14 +10869,35 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 Something dated in or before {month} was added or changed. Check what, then Re-open and finalise again.
               </div>
             )}
-            {(() => { const shown = recoFinal ?? report; return (
+            {(() => {
+              const shown = recoFinal ?? report;
+              // The headline the owner reads first: bank vs book, difference,
+              // and whether every sen of it is explained by the rows below.
+              const diffSen = shown.statementClosingSen != null ? shown.glSen - shown.statementClosingSen : null;
+              const explainedSen = shown.unclearedBookSen - shown.unbookedStmtSen;
+              return (
               <table className="text-sm w-full max-w-md">
                 <tbody>
                   <tr><td className="py-0.5 text-[#6B7280]">Bank statement closing balance</td><td className="py-0.5 text-right tabular-nums">{shown.statementClosingSen != null ? formatCurrency(shown.statementClosingSen) : "—"}</td></tr>
-                  <tr><td className="py-0.5 text-[#6B7280]">+ In the book, not yet in the bank ({shown.unclearedBookCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(shown.unclearedBookSen)}</td></tr>
-                  <tr><td className="py-0.5 text-[#6B7280]">− In the bank, not yet in the book ({shown.unbookedStmtCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(shown.unbookedStmtSen)}</td></tr>
-                  <tr className="border-t border-[#E2DDD8]"><td className="py-0.5 font-medium">= Book balance should be</td><td className="py-0.5 text-right tabular-nums font-medium">{shown.computedGlSen != null ? formatCurrency(shown.computedGlSen) : "—"}</td></tr>
-                  <tr><td className="py-0.5 font-medium">Book balance {recoFinal ? "at finalising" : "today"} (GL {account})</td><td className="py-0.5 text-right tabular-nums font-medium">{formatCurrency(shown.glSen)}</td></tr>
+                  <tr><td className="py-0.5 text-[#6B7280]">Book balance {recoFinal ? "at finalising" : "today"} (GL {account})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(shown.glSen)}</td></tr>
+                  {diffSen != null && (
+                    <tr className="border-t border-[#E2DDD8]">
+                      <td className="py-0.5 font-semibold">Difference — book {diffSen >= 0 ? "above" : "below"} bank</td>
+                      <td className="py-0.5 text-right tabular-nums font-semibold">{formatCurrency(Math.abs(diffSen))}</td>
+                    </tr>
+                  )}
+                  <tr><td className="py-0.5 text-[#6B7280] pl-4">+ In the book, not yet in the bank ({shown.unclearedBookCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(shown.unclearedBookSen)}</td></tr>
+                  <tr><td className="py-0.5 text-[#6B7280] pl-4">− In the bank, not yet in the book ({shown.unbookedStmtCount})</td><td className="py-0.5 text-right tabular-nums">{formatCurrency(shown.unbookedStmtSen)}</td></tr>
+                  {diffSen != null && (
+                    <tr className="border-t border-[#E2DDD8]">
+                      <td className={`py-0.5 font-medium ${diffSen === explainedSen ? "text-[#27500A]" : "text-[#9A3A2D]"}`}>
+                        {diffSen === explainedSen ? "= explained to the sen by the two lines above ✓" : "= NOT fully explained — unexplained part"}
+                      </td>
+                      <td className={`py-0.5 text-right tabular-nums font-medium ${diffSen === explainedSen ? "text-[#27500A]" : "text-[#9A3A2D]"}`}>
+                        {diffSen === explainedSen ? formatCurrency(Math.abs(explainedSen)) : formatCurrency(Math.abs(diffSen - explainedSen))}
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             ); })()}

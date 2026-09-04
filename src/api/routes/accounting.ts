@@ -12582,10 +12582,16 @@ async function computeBankRecoReport(
   try { meta = metaRow?.value ? JSON.parse(metaRow.value) : null; } catch { meta = null; }
   const { legs: stateLegs, clearedOn, openingDate: obDateRp } = await loadBankRecoState(db, account);
   const stmtRes = await db.prepare(
-    `SELECT amountSen, txnDate, description FROM bank_statement_lines
-      WHERE accountCode = ? AND matchedLegId IS NULL AND ignored_at IS NULL AND txnDate <= ?`,
-  ).bind(account, monthEnd).all<{ amountSen: number; txnDate: string; description: string | null }>();
-  const matchedIds = new Set(clearedOn.keys());
+    `SELECT amountSen, txnDate, description, matchedLegId FROM bank_statement_lines
+      WHERE accountCode = ? AND ignored_at IS NULL AND txnDate <= ?`,
+  ).bind(account, monthEnd).all<{ amountSen: number; txnDate: string; description: string | null; matchedLegId: string | null }>();
+  // A match clears an item only WITHIN the report's month. A June voucher the
+  // bank processed on 2 July is matched — correctly — yet as of 30 June it is
+  // still in transit, so June must list it as uncleared (and, mirrored, a
+  // statement line whose book leg is dated after month end is still unbooked
+  // for that month). Ignoring the dates made June "Out by" exactly such
+  // amounts (BUG-2026-09-04-176: HPV-2606-003 RM 600, leg 29/06, bank 02/07).
+  const legDayById = new Map(stateLegs.map((l) => [l.id, l.day]));
   let glSen = 0;
   let unclearedBookSen = 0;
   let unclearedBookCount = 0;
@@ -12604,7 +12610,8 @@ async function computeBankRecoReport(
     // 未达账项 — the bank has no "opening balance" transaction to clear them
     // against. Counting them made the report insensitive to the keyed opening
     // figure entirely (BUG-2026-09-02-173).
-    if (!matchedIds.has(l.id) && !isOpeningSource(l.sourceType)) {
+    const clearedDay = clearedOn.get(l.id);
+    if ((clearedDay === undefined || clearedDay > monthEnd) && !isOpeningSource(l.sourceType)) {
       unclearedBookSen += amt;
       unclearedBookCount++;
       if (unclearedBook.length < 200) unclearedBook.push({ day, description: l.description ?? "", amountSen: amt });
@@ -12615,6 +12622,12 @@ async function computeBankRecoReport(
   const unbookedStmt: BankRecoOutstanding[] = [];
   for (const r of stmtRes.results ?? []) {
     if (obDateRp && r.txnDate < obDateRp) continue; // pre-opening: inside the opening balance
+    if (r.matchedLegId) {
+      const legDay = legDayById.get(r.matchedLegId);
+      // Booked within the month → cleared. A missing leg (match target outside
+      // the walk) keeps today's semantics: treated as booked, not resurfaced.
+      if (legDay === undefined || legDay <= monthEnd) continue;
+    }
     const amt = Math.round(Number(r.amountSen) || 0);
     unbookedStmtSen += amt;
     unbookedStmtCount++;

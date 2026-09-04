@@ -14,6 +14,16 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-09-04 — ✅ 六月 Out by 600 精查 + 修（BUG-176：跨月配对不按月底切）
+
+Owner（挂图）：「可以帮我检查这个600.00是什么？只检查」→ prod 全量核查（配对差=0、无重复行、
+两条 ignore 是他裁过的且有 opening 抵消）→ 唯一来源：**HPV-2606-003（RM 600 付 TIOW WAI KEONG）
+单 29/06、银行 02/07 过账**——配对本身正确，但报表 walk 把「任何日期配上」当「本月已清」，
+6 月就少列一条在途 → Out by +600。他的账分毫没错。裁决「修」→ `computeBankRecoReport` 两侧
+按月底切：书侧 `clearedOn.get(id) <= monthEnd` 才算清；账单侧改抓 matchedLegId，腿在月底后的
+配对行仍算 unbooked（腿缺失=沿旧口径当已入账）。board `/cash-position` 本来就按日期切，只有
+报表瞎。守卫 +1 测试（month-scopes both sides）。BUG-2026-09-04-176。
+
 ## 2026-09-02 — ✅ 每月银行对账：上传 HLBB PDF 自动对账 + Cash Book 视图重整（bank reco v1）
 
 Owner：「我要做到每个月我upload文件自动对账。你先看清楚再回答我」+（看完别家系统的对账模块，

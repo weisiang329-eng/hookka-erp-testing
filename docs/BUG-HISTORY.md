@@ -34,6 +34,31 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-09-04-176 — a cross-month match cleared an item for a month it hadn't reached the bank in `accounting` `bank-reco` 🟢
+
+June's reconciliation showed "Out by RM 600.00 · book below bank" with every
+pair matched correctly and nothing ignored wrongly. Measured on prod: exactly
+one item — HPV-2606-003 (RM 600 to TIOW WAI KEONG), voucher dated 29/06,
+processed by the bank 02/07 and matched to that July statement line. The
+walk built its cleared-set from `clearedOn.keys()` — matched at ANY date
+counted as cleared — so June's report dropped the leg from "In the book,
+not yet in the bank" even though on 30/06 the money was still in transit.
+The mirrored gap existed on the statement side (a line whose book leg is
+dated after month end left `unbookedStmt` because the SQL pre-filtered all
+matches away); zero live instances of that direction, fixed with the same
+stroke. The board (`/cash-position`) already date-scoped (`matchedOn <=
+date`) — only the report walk was blind.
+
+Fix ([accounting.ts](../src/api/routes/accounting.ts)
+`computeBankRecoReport`): book side treats a leg as cleared only when
+`clearedOn.get(id) <= monthEnd`; statement side fetches `matchedLegId` and
+keeps a matched line in unbooked when its leg is dated after month end
+(missing-leg matches keep the old treated-as-booked semantics). Verified on
+prod: June flipped to Balanced ✓ (computedGl = GL 34,631.35), May snapshot
+and July figures unchanged. Guard:
+`tests/bank-reco-opening-legs.test.mjs` ("report month-scopes clearing on
+both sides of the walk").
+
 ## BUG-2026-09-02-175 — a void pre-opening match still occupied the leg in the write path `accounting` `bank-reco` 🟢
 
 Minutes after the 174 fix shipped, the owner picked HPV-2605-018 in the

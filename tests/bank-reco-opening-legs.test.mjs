@@ -56,7 +56,24 @@ test("report walk keeps opening legs in glSen but out of the uncleared list", ()
   // glSen accumulates BEFORE the uncleared guard…
   assert.match(body, /glSen \+= amt;/);
   // …and the uncleared line carries BOTH conditions.
-  assert.match(body, /!matchedIds\.has\(l\.id\) && !isOpeningSource\(l\.sourceType\)/);
+  assert.match(body, /\(clearedDay === undefined \|\| clearedDay > monthEnd\) && !isOpeningSource\(l\.sourceType\)/);
+});
+
+// BUG-2026-09-04-176 — a match clears an item only WITHIN the report's month.
+// HPV-2606-003 (RM 600, leg 29/06) was matched to its 02/07 statement line;
+// June's walk counted the leg as cleared even though the money was still in
+// transit on 30/06, so June showed "Out by RM 600 · book below bank". Both
+// sides of the walk must compare the matched counterpart's date to monthEnd.
+test("report month-scopes clearing on both sides of the walk", () => {
+  const body = walkBody();
+  // Book side: cleared only if the matching statement line is <= monthEnd.
+  assert.match(body, /const clearedDay = clearedOn\.get\(l\.id\);/);
+  assert.match(body, /clearedDay > monthEnd/);
+  // Statement side: a matched line stays unbooked when its leg is dated
+  // after month end (missing leg keeps the old treated-as-booked semantics).
+  assert.match(body, /if \(legDay === undefined \|\| legDay <= monthEnd\) continue;/);
+  // The unbooked query no longer pre-filters matches away in SQL.
+  assert.doesNotMatch(body, /matchedLegId IS NULL AND ignored_at IS NULL/);
 });
 
 // ---------------------------------------------------------------------------

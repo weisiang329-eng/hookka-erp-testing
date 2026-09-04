@@ -22,7 +22,10 @@ Owner（挂图）：「可以帮我检查这个600.00是什么？只检查」→
 6 月就少列一条在途 → Out by +600。他的账分毫没错。裁决「修」→ `computeBankRecoReport` 两侧
 按月底切：书侧 `clearedOn.get(id) <= monthEnd` 才算清；账单侧改抓 matchedLegId，腿在月底后的
 配对行仍算 unbooked（腿缺失=沿旧口径当已入账）。board `/cash-position` 本来就按日期切，只有
-报表瞎。守卫 +1 测试（month-scopes both sides）。BUG-2026-09-04-176。
+报表瞎。守卫 +1 测试（month-scopes both sides）。BUG-2026-09-04-176。**追加（owner：「这会让人混乱，
+我想要一眼就看得出tally 没有」）**：徽章改三态——红 NOT TALLY — out by X（对不上=有错）／黄
+Tally ✓ · N bank lines to record（数对了但银行有账里没录）／绿 Tally ✓ · all recorded（全清）；
+finalised 版同逻辑带 🔒 前缀；Finalise 按钮只在全绿时 primary。
 
 ## 2026-09-02 — ✅ 每月银行对账：上传 HLBB PDF 自动对账 + Cash Book 视图重整（bank reco v1）
 

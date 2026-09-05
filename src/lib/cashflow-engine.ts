@@ -243,11 +243,15 @@ export function buildStatement(opts: {
   // 成department」): same shape as rmSplit, applied to DIRECT_LABOUR legs.
   deptSplit?: RmSplit;
   stockGroupOverride: Record<string, string>;
+  // Supplier → template category ("Purchase of Fabric" …) for nesting the
+  // per-supplier Opening/Unallocated rows (owner 2026-09-05 「做」). Caller
+  // merges the auto-guess with the kv override before passing it in.
+  supplierCategory?: Record<string, string>;
   fyeMonth: number;
   period: string;
   editable?: boolean;
 }): CfStatement {
-  const { classified, bankLegs, coa, map, rmSplit, deptSplit = {}, stockGroupOverride, fyeMonth, period, editable } = opts;
+  const { classified, bankLegs, coa, map, rmSplit, deptSplit = {}, stockGroupOverride, supplierCategory = {}, fyeMonth, period, editable } = opts;
   const months = fyMonths(period, fyeMonth);        // newest first
   const fyStart = months[months.length - 1];        // FY start ym
   const columns: CfColumn[] = [
@@ -371,9 +375,19 @@ export function buildStatement(opts: {
       if (a.accountCode) {
         const p = coa.get(a.accountCode)?.parentCode ?? undefined;
         if (p && p !== a.accountCode && coa.has(p)) pCode = p;
-      } else if (sec === "RAW_MATERIALS" && rmLineOrder(a.label) === 10) {
-        const p = RM_LINE_PARENT[rawMaterialLineFor(a.label, stockGroupOverride)];
-        if (p && coa.has(p)) pCode = p;
+      } else if (sec === "RAW_MATERIALS") {
+        if (rmLineOrder(a.label) === 10) {
+          const p = RM_LINE_PARENT[rawMaterialLineFor(a.label, stockGroupOverride)];
+          if (p && coa.has(p)) pCode = p;
+        } else {
+          // Per-supplier Opening/Unallocated rows file under the category
+          // assigned to that SUPPLIER — the row keeps its label, it just
+          // sits under the right purchase parent. No category → stays flat.
+          const m = /^(?:Opening creditors|Unallocated) — (.+)$/.exec(a.label);
+          const cat = m ? supplierCategory[m[1]] : undefined;
+          const p = cat ? RM_LINE_PARENT[cat] : undefined;
+          if (p && coa.has(p)) pCode = p;
+        }
       }
       if (pCode) {
         const cl = clusters.get(pCode) ?? { code: pCode, label: coa.get(pCode)?.name ?? pCode, members: [] };

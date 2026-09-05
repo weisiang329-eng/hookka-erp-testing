@@ -209,6 +209,37 @@ test("buildStatement — a lone COA child stays flat; RM stock rows join their p
   assert.equal(stock.groupId, "RAW_MATERIALS>701-0000");
 });
 
+// Owner 2026-09-05 「做」: per-supplier Opening/Unallocated rows file under the
+// purchase parent of that supplier's assigned category; no category → flat.
+test("buildStatement — supplier category nests Opening rows under their purchase parent", () => {
+  const coa2 = new Map(coaMap);
+  coa2.set("703-0000", acct("703-0000", "COST", null, "PURCHASE - FILLER"));
+  const classified = [
+    L("400-0000", 0, 50000, "2026-03", "supplier_payment", "PAY1"),
+    L("400-0000", 0, 7000, "2026-03", "supplier_payment", "PAY2"),
+  ];
+  const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 57000, ym: "2026-03" }];
+  const st = cf.buildStatement({
+    classified, bankLegs, coa: coa2, map: {},
+    rmSplit: {
+      PAY1: [{ line: "Opening creditors — SUNMAT INDUSTRIES SDN. BHD", weight: 1 }],
+      PAY2: [{ line: "Unallocated — MYSTERY SUPPLIER", weight: 1 }],
+    },
+    stockGroupOverride: {},
+    supplierCategory: { "SUNMAT INDUSTRIES SDN. BHD": "Purchase of Filler" },
+    fyeMonth: 8, period: "2026-03",
+  });
+  const sunmat = st.rows.find((r) => r.kind === "line" && r.label.includes("SUNMAT"));
+  assert.equal(sunmat.groupId, "RAW_MATERIALS>703-0000");
+  const parent = st.rows.find((r) => r.kind === "group" && r.label === "PURCHASE - FILLER");
+  assert.ok(parent, "filler parent missing");
+  const mIdx = st.columns.findIndex((c) => c.key === "2026-03");
+  assert.equal(parent.values[mIdx], 50000);
+  // Unmapped supplier stays flat under the section.
+  const mystery = st.rows.find((r) => r.kind === "line" && r.label.includes("MYSTERY"));
+  assert.equal(mystery.groupId, "RAW_MATERIALS");
+});
+
 test("buildStatement — editable emits empty section headers as drop targets", () => {
   const classified = [L("900-0001", 0, 15000, "2026-03")];
   const bankLegs = [{ accountCode: "310-0010", debitSen: 0, creditSen: 15000, ym: "2026-03" }];

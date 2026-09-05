@@ -37,7 +37,10 @@ account 的（OCB 路）早已按 account 分；PI 行无 account 概念。⑥ �
 `supplierCategory` opts——Opening/Unallocated — X 行**保留供应商标签**、嵌进对应购买父级；
 GET/PUT /cashflow/map 带 supplierCategoryMap（+guess）；Edit 模式新「Supplier categories」卡
 （Auto—猜值/四类/Keep flat 下拉，改即存即刷）。引擎测试 26/26（+1）。⑦ Cshflw Summary 汇总
-视图＝owner 裁「不需要，毕竟我有level了」，关闭。
+视图＝owner 裁「不需要，毕竟我有level了」，关闭。⑧ ✅ Cash Position 板 TO RECEIVE 默认改
+「上个月之前、按发票月全部欠款（totalSen）」（owner 09-03 提、09-05 拍「对」）：recvRows 按
+`month < curMonth` 过滤（⇄ 切全部）、金额恒 totalSen（dueSen 退役）、按钮文案 Before this
+month；与 supplier 侧同规则，CASH AFTER 净额卡自动跟随。
 
 ## 2026-09-04 — ✅ 六月 Out by 600 精查 + 修（BUG-176：跨月配对不按月底切）
 

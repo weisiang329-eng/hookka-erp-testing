@@ -9929,8 +9929,11 @@ function DailyCashTab() {
   // in the repay scope and collecting everything in the receive scope.
   const repayRows = (cur?.repay ?? []).filter((r) => repayAll || r.month < curMonth);
   const repayAmt = (r: CashPosPartyRow) => r.outstandingSen ?? 0;
-  const recvRows = cur?.receive ?? [];
-  const recvAmt = (r: CashPosPartyRow) => (recvAll ? r.totalSen ?? 0 : r.dueSen ?? 0);
+  // Owner 2026-09-05 「对」: customers default to every ringgit still owed
+  // from LAST month back (by invoice month) — mirroring the supplier side —
+  // instead of "due per terms". The toggle widens to all months.
+  const recvRows = (cur?.receive ?? []).filter((r) => recvAll || r.month < curMonth);
+  const recvAmt = (r: CashPosPartyRow) => r.totalSen ?? 0;
   const repayShownSen = repayRows.reduce((s, r) => s + repayAmt(r), 0);
   const recvShownSen = recvRows.reduce((s, r) => s + recvAmt(r), 0);
   const netAfterSen = (cur?.totalAvailableSen ?? 0) - repayShownSen + recvShownSen;
@@ -10274,7 +10277,7 @@ function DailyCashTab() {
               title="TO RECEIVE — Customers"
               rows={recvRows}
               amountOf={recvAmt}
-              scope={!recvAll} scopeLabel="Due now (per terms)" scopeAlt="All outstanding"
+              scope={!recvAll} scopeLabel="Before this month" scopeAlt="All outstanding"
               onScope={() => setRecvAll(!recvAll)}
               tone="receive"
               collapseUpTo={cur.openingMonth ?? null}

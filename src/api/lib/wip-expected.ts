@@ -62,9 +62,19 @@ const seq = (j: WipJobCardLike): number => Number(j.sequence ?? 0);
 export const isWipDone = (status: string | null | undefined): boolean =>
   status === "COMPLETED" || status === "TRANSFERRED";
 
-/** A stage has "taken" its upstream once it starts, not only once it finishes. */
+/**
+ * A stage has "taken" its upstream once it starts, not only once it finishes.
+ *
+ * PAUSED counts (added 2026-09-06). Pausing does not put the material back on
+ * the upstream shelf — the work is on the bench, stopped. This is also the ONE
+ * definition the cascade in `production-orders/_helpers.ts` imports, so the
+ * writer and this derivation cannot disagree about what "started" means; when
+ * they disagreed, every reconcile report showed drift the cascade would never
+ * produce. No card was PAUSED when this changed (measured: 0 of 45,511), so no
+ * expected balance moved on the day.
+ */
 export const isWipActive = (status: string | null | undefined): boolean =>
-  status === "IN_PROGRESS" || isWipDone(status);
+  status === "IN_PROGRESS" || status === "PAUSED" || isWipDone(status);
 
 export function wipCardQty(
   card: WipJobCardLike,

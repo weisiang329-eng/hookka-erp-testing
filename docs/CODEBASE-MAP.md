@@ -1356,9 +1356,9 @@ in that file). Also read-only despite its POST verb and `production-orders:updat
   lands** (silent under-apply). `poNo` is deterministic (`PO-IMPORT-${docNo}` :476) but is never
   checked in this loop.
 - **The WIP + labor cascades ARE replay-guarded, but only when `orgId` is threaded.**
-  `applyWipInventoryChange` (`src/api/routes/production-orders/_helpers.ts:2654`) claims an
-  idempotency ticket by INSERTing into `wip_cascade_log` (:2725) and returns early when it loses
-  the race — but that whole block is wrapped in `if (options.orgId)` at :2715. `processRow`
+  `applyWipInventoryChange` (`src/api/routes/production-orders/_helpers.ts:2798`) claims an
+  idempotency ticket by INSERTing into `wip_cascade_log` (:2869) and returns early when it loses
+  the race — but that whole block is wrapped in `if (options.orgId)` at :2859. `processRow`
   (`src/api/routes/import-completion/_shared.ts:317`) passes `{ orgId, source: "BACKFILL" }` at
   :529 and `/cascade-upstream-completion` passes it at `completion-cascades.ts:642`, so both are
   covered. `postJobCardLabor` (`src/api/lib/po-cost-cascade.ts:1116`) is independently guarded on an

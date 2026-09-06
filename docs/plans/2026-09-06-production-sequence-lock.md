@@ -268,14 +268,33 @@ behind"). It looked certain.
 mismatches.** The defect is real in the code and produces no damage today.
 Recorded so nobody re-derives it and calls it the answer.
 
-### d) Root cause of the large negatives — NOT YET ESTABLISHED
+### d) Root cause of the large negatives — ESTABLISHED, and fixed
 
-The remaining suspect is `settlePoTerminalWip`, which on terminal completion
-subtracts the terminal rows **and** `poOrphanedUpstream`, against labels shared
-by thousands of POs, with no org filter. **This is a hypothesis, not a finding.**
-It needs a per-label ledger walk (every write to `8" Divan- 5FT`, in order) which
-the HTTP surface does not expose. Do not repair WIP quantities until it is
-proven — a repair against the wrong model just moves the error.
+It was `settlePoTerminalWip`, and the defect is not in what it subtracts but in
+**how often**. It drains the terminal rows and `poOrphanedUpstream` when the last
+stage finishes, guarded only by `isWipTerminalDone(...)` — which stays true
+forever once the last stage is done. It is called at the end of every non-UPH
+completion, so **every later completion on the same order settled it again**.
+
+The skip workflow is precisely what creates those later completions: finish
+UPHOLSTERY first, then tick the FRAMING nobody recorded, and that second tick
+drains the whole order a second time. So the two halves of this document are one
+problem — the lock stops the skip, this stops the skip's damage.
+
+**Measured on production 2026-09-06: 779 orders have an upstream card completing
+AFTER the terminal — 2,109 extra settles.** Worst labels `1013-(Q) -HB 20"`
+(131), `5531-2A(RHF)` (85), `5531-2A(LHF)` (74). That is the shape of −446 on a
+shared label: drained once per catch-up, forever.
+
+Fixed by reading the cards as they stood BEFORE the transition and settling only
+when THIS change is what made the terminal done — the technique
+`unsettlePoTerminalWip` already used for the inverse, so the two are now exact
+mirrors. **The drain amounts are untouched**; only when it runs moved. Shipped
+separately as `fix/wip-settle-once` with `tests/wip-settle-once.test.mjs`.
+
+**The 513 historical negative rows are still NOT repaired.** The fix stops new
+ones. Repairing the old ones is an owner decision, and it comes after the fix is
+live — otherwise the repair races the thing that caused it.
 
 ---
 
@@ -298,7 +317,7 @@ proven — a repair against the wrong model just moves the error.
 | 2 | Shadow-unlock UI (desktop 3 actions, mobile) | — |
 | 3 | Weekly unlock report — who unlocked, which step, real skip vs data | ongoing |
 | 4 | Tighten to supervisor-only | after the report is quiet |
-| 5 | WIP root cause (§6d), then decide on repairing history | separate |
+| 5 | WIP root cause (§6d) — **found and fixed**; repairing the 513 historical rows is still the owner's call | separate |
 
 Defects 6(b)1–3 are small and independent — ship them whenever, they are not
 blockers for the lock.

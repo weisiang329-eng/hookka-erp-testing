@@ -34,6 +34,11 @@ import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { resolveWorkerToken } from "./worker-auth";
 import { workerCoversDept } from "../../lib/worker";
 import { requirePermission } from "../lib/rbac";
+import {
+  sequenceBlockers,
+  blockerMessage,
+  type SequenceCard,
+} from "../lib/sequence-lock";
 import { salesOrderScopeSql, isCustomerScoped } from "../lib/customer-scope";
 import {
   ensureJobCardQrTokenColumn,
@@ -63,6 +68,7 @@ import {
   PO_LIST_BODY_TTL_S,
   applyPoStatusChange,
   applyPoUpdate,
+  recordSequenceUnlock,
   applyWipInventoryChange,
   attachCustomerSO,
   buildPoListBodyKey,
@@ -2031,6 +2037,41 @@ app.post("/:id/scan-complete", async (c) => {
       409,
     );
   }
+  // ---- Upstream sequence lock (owner 2026-09-06) --------------------------
+  // A scan completes the card, so it consumes upstream WIP — the same reason
+  // the desktop PATCH path is gated in _helpers.ts. Gating one surface and not
+  // the other only moves the skipping to whichever screen stayed open.
+  //
+  // The floor keeps a way out during the shadow phase (`unlock`), but it is
+  // recorded. `force` was the old flag for this; it went in 760d08b3 together
+  // with the unreliable `prerequisiteMet` predicate it guarded. This is the
+  // same escape hatch behind a rule that holds up.
+  {
+    const siblings = await db
+      .prepare(
+        "SELECT id, departmentCode, status, sequence, wipKey, branchKey FROM job_cards WHERE productionOrderId = ?",
+      )
+      .bind(scannedId)
+      .all<SequenceCard>();
+    const blockers = sequenceBlockers(scannedJc, siblings.results ?? []);
+    if (blockers.length > 0) {
+      const unlock = (body as { unlock?: { reason?: string } })?.unlock;
+      if (!unlock) {
+        return c.json(
+          {
+            success: false,
+            code: "UPSTREAM_INCOMPLETE",
+            error: blockerMessage(blockers),
+            blockedBy: blockers,
+            canSelfUnlock: true,
+          },
+          409,
+        );
+      }
+      await recordSequenceUnlock(db, c, scannedJc, blockers, unlock.reason);
+    }
+  }
+
   const stickerKey = `${scannedPo.id}::${scannedJc.id}::${pieceNo}`;
   const slots = await ensurePiecePicsForJc(db, scannedJc);
   // Mirror a legacy JC-level PIC onto slot[0] so the same-worker / share / full
@@ -2500,6 +2541,60 @@ app.post("/:id/scan-complete", async (c) => {
 // set is filtered to status NOT IN (COMPLETED,TRANSFERRED) — a re-scan finds
 // nothing to do and returns success-empty.
 // ---------------------------------------------------------------------------
+/**
+ * The sequence gate for the two FAN-OUT scan endpoints, which complete several
+ * cards in one post. One definition for both — the single-card gate lives
+ * inline in /scan-complete because it already holds the row it needs.
+ *
+ * Reports EVERY blocked card, not the first. A fan-out that names one problem,
+ * gets unlocked, then names the next is three round trips on a factory floor.
+ *
+ * Returns a Response to send, or null to continue.
+ */
+async function gateFanOutSequence(
+  db: D1Database,
+  c: Context<Env>,
+  productionOrderId: string,
+  cards: Array<{ id: string; departmentCode?: string | null; status?: string | null; sequence?: number | null; wipKey?: string | null; branchKey?: string | null }>,
+  body: unknown,
+): Promise<Response | null> {
+  const siblings = await db
+    .prepare(
+      "SELECT id, departmentCode, status, sequence, wipKey, branchKey FROM job_cards WHERE productionOrderId = ?",
+    )
+    .bind(productionOrderId)
+    .all<SequenceCard>();
+  const all = siblings.results ?? [];
+  const blocked = cards
+    .map((jc) => ({ jc, blockers: sequenceBlockers(jc, all) }))
+    .filter((x) => x.blockers.length > 0);
+  if (blocked.length === 0) return null;
+
+  const unlock = (body as { unlock?: { reason?: string } } | null)?.unlock;
+  if (!unlock) {
+    const merged = [
+      ...new Map(
+        blocked.flatMap((b) => b.blockers).map((b) => [b.id, b]),
+      ).values(),
+    ];
+    return c.json(
+      {
+        success: false,
+        code: "UPSTREAM_INCOMPLETE",
+        error: blockerMessage(merged),
+        blockedBy: merged,
+        blockedCards: blocked.map((b) => b.jc.id),
+        canSelfUnlock: true,
+      },
+      409,
+    );
+  }
+  for (const b of blocked) {
+    await recordSequenceUnlock(db, c, b.jc as never, b.blockers, unlock.reason);
+  }
+  return null;
+}
+
 app.post("/:id/scan-complete-dept", async (c) => {
   // Two auth paths (mirrors /scan-complete): a dashboard user (userId stamped
   // by auth-middleware) is authorised via RBAC; a shop-floor worker call
@@ -2631,9 +2726,14 @@ app.post("/:id/scan-complete-dept", async (c) => {
 
   // Prerequisite gate — soft-warn (202) if ANY compartment's upstream dept
   // hasn't completed, unless the worker already acknowledged and re-posted
-  // with force:true. Mirrors /scan-complete's single-card gate.
-  // prerequisiteMet warning REMOVED (Wei Siang 2026-06-08) — workers may
-  // complete any dept directly; no "earlier dept hasn't completed" gate.
+  // Upstream sequence lock (owner 2026-09-06). Replaces the note that stood
+  // here since 2026-06-08 saying workers may complete any dept directly — that
+  // is the permission this change withdraws, and leaving the sentence would
+  // have left the file arguing with itself.
+  {
+    const gate = await gateFanOutSequence(db, c, poId, cards, body);
+    if (gate) return gate;
+  }
 
   const nowIso = new Date().toISOString();
   const today = nowIso.split("T")[0];
@@ -3011,6 +3111,13 @@ app.post("/:id/scan-complete-shared", async (c) => {
     .bind(...(wipKey ? [poId, targetDept, wipKey] : [poId, targetDept]))
     .all<JobCardRow>();
   const cards = cardsRes.results ?? [];
+  // Upstream sequence lock (owner 2026-09-06). Placed AFTER the empty check
+  // below would have been wrong: an already-finished compartment must still
+  // report "already done", not "blocked" — the work is not being repeated.
+  if (cards.length > 0) {
+    const gate = await gateFanOutSequence(db, c, poId, cards, body);
+    if (gate) return gate;
+  }
   if (cards.length === 0) {
     // No open cards of THIS worker's dept on this compartment → it's already
     // done. Report it for the worker's own dept (never advance to the next),
@@ -3073,8 +3180,10 @@ app.post("/:id/scan-complete-shared", async (c) => {
     }
   }
 
-  // prerequisiteMet warning REMOVED (Wei Siang 2026-06-08) — workers may
-  // complete any dept directly; no "earlier dept hasn't completed" gate.
+  // The sequence lock is applied above, on the resolved card set (owner
+  // 2026-09-06). The 2026-06-08 note that used to sit here — workers may
+  // complete any dept directly — described the permission this change
+  // withdraws.
 
   const nowIso = new Date().toISOString();
   const today = nowIso.split("T")[0];

@@ -6,6 +6,12 @@
 // ---------------------------------------------------------------------------
 import type { Context } from "hono";
 import { runSelfApply } from "../../lib/self-apply";
+import {
+  sequenceBlockers,
+  transitionConsumesUpstream,
+  blockerMessage,
+  type SequenceBlocker,
+} from "../../lib/sequence-lock";
 import type { Env } from "../../worker";
 import { postProductionOrderCompletion } from "../../lib/fg-completion";
 import { archiveUnionSource } from "../../lib/archive-union";
@@ -4399,18 +4405,51 @@ export async function applyPoUpdate(
       );
     }
 
-    // Upstream-lock disabled (2026-04-26, user request).
+    // ---- Upstream sequence lock -------------------------------------------
+    // Restored 2026-09-06, on the owner's instruction — 「上一道工序还没 mark
+    // complete，系统应该锁起来」 — and satisfying the condition the 2026-04-26
+    // disable-comment set for its own return: "Will be restored once the lock
+    // chain is derived from the actual BOM template at runtime."
     //
-    // The wipKey + sequence predicate doesn't model the BOM tree's parallel
-    // branches: within one wipKey ("DIVAN" / "HEADBOARD" / "SOFA_*") the
-    // FAB chain (FAB_CUT→FAB_SEW…) and WOOD chain (WOOD_CUT→FRAMING→
-    // WEBBING…) run independently and only converge at UPHOLSTERY. The
-    // previous predicate treated WOOD_CUT (sequence 3) as downstream of
-    // FAB_CUT/FAB_SEW (sequences 1/2), so completing Wood Cut wrongly 409'd
-    // pure-date edits on the fabric branch. Frontend lock UI is also a
-    // no-op (see src/pages/production/index.tsx buildSched). Will be
-    // restored once the lock chain is derived from the actual BOM template
-    // at runtime.
+    // It is. `sequence-lock.ts` reads `branchKey`, which `bom-wip-breakdown.ts`
+    // stamps from the BOM tree, so the two faults that killed the earlier
+    // attempts are both gone:
+    //
+    //   · 2026-04-26 — the wipKey+sequence predicate ignored branches and
+    //     409'd the fabric branch when Wood Cut completed. Branches are now
+    //     independent, and a convergence step (empty branchKey) is the ONLY
+    //     thing that waits for all of them.
+    //   · 2026-06-08 — `prerequisiteMet` was stale. It is not read at all.
+    //
+    // Two further things the earlier version got wrong and this does not:
+    // a PURE DATE EDIT is never blocked (only a transition that actually
+    // consumes upstream WIP is), and the block is escapable — see the unlock
+    // below. A lock with no way out is one the floor routes around.
+    if (transitionConsumesUpstream(body.status)) {
+      const blockers = sequenceBlockers(jcRow, allJcRows);
+      if (blockers.length > 0) {
+        const unlock = (body as { unlock?: { reason?: string } }).unlock;
+        if (!unlock) {
+          return c.json(
+            {
+              success: false,
+              code: "UPSTREAM_INCOMPLETE",
+              error: blockerMessage(blockers),
+              blockedBy: blockers,
+              // Shadow-unlock (owner 2026-09-06): the lock is real and visible
+              // from day one, but anyone may release it themselves so nobody is
+              // stopped while the floor learns the rule. Tighten to supervisors
+              // by making this a permission check — the client must never
+              // decide it, or changing the policy means changing three screens
+              // and a worker can bypass it by calling the API directly.
+              canSelfUnlock: true,
+            },
+            409,
+          );
+        }
+        await recordSequenceUnlock(db, c, jcRow, blockers, unlock.reason);
+      }
+    }
 
     // Mutate a shallow copy — final UPDATE statement below writes it.
     const updated: JobCardRow = { ...jcRow };
@@ -5880,3 +5919,48 @@ export async function applyPoStatusChange(
   });
 }
 
+/**
+ * Record that someone released a sequence lock, and against what.
+ *
+ * Reuses `scan_override_audit` — the table the 2026-06-08 force-scan path
+ * already wrote to — rather than adding one. The point of the shadow phase is
+ * this row: a skip stops being invisible and becomes a question somebody can
+ * ask on Monday.
+ *
+ * Deliberately non-fatal. If the audit INSERT fails the work still goes
+ * through: refusing a completion because a log line could not be written would
+ * stop the factory for the sake of the record.
+ */
+export async function recordSequenceUnlock(
+  db: D1Database,
+  c: Context<Env>,
+  jcRow: JobCardRow,
+  blockers: SequenceBlocker[],
+  reason: string | null | undefined,
+): Promise<void> {
+  try {
+    const actor =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ??
+      "unknown";
+    const waiting = [...new Set(blockers.map((b) => b.departmentCode))].join(", ");
+    await db
+      .prepare(
+        `INSERT INTO scan_override_audit
+           (id, workerId, workerName, jobCardId, productionOrderId,
+            overrideCode, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, 'UPSTREAM_INCOMPLETE', ?, ?)`,
+      )
+      .bind(
+        `soa-${crypto.randomUUID().slice(0, 8)}`,
+        actor,
+        actor,
+        jcRow.id,
+        jcRow.productionOrderId,
+        `${jcRow.departmentCode ?? ""} unlocked past ${waiting}${reason ? ` — ${reason}` : ""}`,
+        new Date().toISOString(),
+      )
+      .run();
+  } catch (e) {
+    console.error("[sequence-lock] audit write failed (work still applied):", e);
+  }
+}

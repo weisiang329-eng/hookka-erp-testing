@@ -2367,16 +2367,36 @@ export default function ProductionPage({
       });
       if (res.ok) {
         const body = (await res.json()) as {
-          results?: Array<{ poId: string; jobCardId: string; success: boolean; error?: string }>;
+          results?: Array<{
+            poId: string;
+            jobCardId: string;
+            success: boolean;
+            error?: string;
+            // Upstream sequence lock. Carried so the reverted cell can say
+            // WHICH department it is waiting for instead of a bare failure —
+            // the operator needs to know where to go, not that something broke.
+            code?: string;
+          }>;
         };
-        const perJc = new Map<string, { success: boolean; error?: string }>();
+        const perJc = new Map<string, { success: boolean; error?: string; code?: string }>();
         for (const r of body.results ?? []) perJc.set(r.jobCardId, r);
         results = drafts.map((d) => {
           const r = perJc.get(d.jcId);
           return {
             draft: d,
             result: r
-              ? { success: r.success, error: r.error, attemptsUsed: 1 }
+              ? {
+                  success: r.success,
+                  // A locked cell is not a fault to retry — it is a step whose
+                  // turn has not come. Marking it permanent stops the retry
+                  // loop from hammering a gate that will not open until someone
+                  // finishes the upstream work.
+                  error:
+                    r.code === "UPSTREAM_INCOMPLETE"
+                      ? `Locked — ${r.error ?? "an earlier step is not finished"}`
+                      : r.error,
+                  attemptsUsed: 1,
+                }
               : { success: false, error: "no result in bulk response", attemptsUsed: 1 },
           };
         });

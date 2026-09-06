@@ -34,6 +34,57 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-09-06-177 — the WIP terminal settle ran again on every later completion `production` `inventory` 🟢
+
+🟢 Fixed. Owner, repeatedly and correctly: 「查看一下我的 WIP 的入库出库问题，它应
+该是有 bug 的，因为数据是不对的」. Reconcile on prod: 6,251 codes checked, **1,659
+disagree, 513 rows negative**, `8" Divan- 5FT` at **−446** against an expected 4.
+
+**Root cause.** `settlePoTerminalWip` drains the order's terminal rows AND its
+orphaned upstream when the last stage finishes. Its only condition was
+`isWipTerminalDone(...)` — which stays true forever once the last stage is done.
+It is called at the end of every non-UPH completion, so **every later completion
+on the same order settled it again**.
+
+The skip workflow is what creates those later completions: finish UPHOLSTERY
+first, then tick the FRAMING nobody recorded, and that second tick drains the
+whole order a second time. **Measured: 779 orders have an upstream card
+completing AFTER the terminal — 2,109 extra settles.** One order with three
+catch-ups settled 4× instead of once.
+
+**Fix**: read the cards as they stood BEFORE the transition and settle only when
+THIS change is what made the terminal done — the technique
+`unsettlePoTerminalWip` already used to decide whether a revert breaks
+terminal-done. The two are now exact mirrors, which is the property that makes
+complete → revert → complete safe. **The drain amounts are untouched**; only
+*when* it runs moved. Changing amounts while chasing a trigger bug is how a
+repair becomes a second incident.
+
+**Two wrong answers were ruled out first, and both are recorded so nobody
+re-derives them:**
+- *"the negatives are deliberate"* — TRUE (`no MAX(0) clamp` … "go negative as a
+  visibility signal") and a real consequence of skipping, but it does not
+  explain −446 on one label.
+- *"UPH consumes each branch with its own wipQty"* — the same bug class the
+  sibling non-UPH path was already fixed for, and it looked certain.
+  **DISPROVEN: 12,899 branch terminals on production, 0 quantity mismatches.**
+
+**Three further defects found in the same read, all latent today** — measured, of
+45,511 job cards only 2 are IN_PROGRESS and 0 are PAUSED, so the floor goes
+WAITING → COMPLETED directly:
+1. `IN_PROGRESS → WAITING` never refunds (the refund branch is `wasDone && !isDone`).
+2. `PAUSED → IN_PROGRESS` consumes again — `PAUSED` is missing from the
+   double-consume guard's `wasActive` list.
+3. All 8 stock updates match on `code` alone while the upsert conflict target is
+   `(org_id, code)`, and four organisations exist. One org's production can move
+   another's stock.
+
+**The historical −513 rows are NOT repaired by this** — it stops new ones being
+created. Repairing them is a separate decision the owner has not made, and it
+must not be attempted against a model that has not been proven first.
+
+Regression: `tests/wip-settle-once.test.mjs`.
+
 ## BUG-2026-09-04-176 — a cross-month match cleared an item for a month it hadn't reached the bank in `accounting` `bank-reco` 🟢
 
 June's reconciliation showed "Out by RM 600.00 · book below bank" with every

@@ -2530,8 +2530,40 @@ export async function settlePoTerminalWip(
   db: D1Database,
   poRow: ProductionOrderRow,
   allJcRows: JobCardRow[],
+  /**
+   * The card whose transition triggered this, and what it was before.
+   *
+   * Without them the only condition is "is the terminal done", which is TRUE
+   * for every later completion on the same order — so the settle ran again on
+   * each one, draining the terminal rows and the orphaned upstream another
+   * time. Measured on production 2026-09-06: 779 orders have an upstream card
+   * finishing AFTER the terminal, worth **2,109 extra settles**. That is the
+   * shape of the large negatives (`8" Divan- 5FT` at -446 against an expected
+   * 4) — a shared label drained once per catch-up, forever.
+   *
+   * It is the skip workflow that creates them: complete UPHOLSTERY first, then
+   * tick the FRAMING nobody recorded, and the second tick settles the whole
+   * order a second time.
+   *
+   * Optional so the historical callers that pass neither keep the old
+   * behaviour rather than silently changing meaning; every live call site
+   * passes both.
+   */
+  trigger?: { jcRow: JobCardRow; prevStatus: string | null },
 ): Promise<void> {
   if (!isWipTerminalDone(poRow, allJcRows)) return;
+  if (trigger) {
+    // Only the transition that MAKES the terminal done may settle. Reading the
+    // cards as they stood BEFORE this change is the same technique
+    // `unsettlePoTerminalWip` already uses to decide whether a revert is the
+    // one that breaks terminal-done — the two are now exact mirrors.
+    const asBefore = allJcRows.map((j) =>
+      j.id === trigger.jcRow.id
+        ? { ...j, status: trigger.prevStatus ?? j.status }
+        : j,
+    );
+    if (isWipTerminalDone(poRow, asBefore)) return; // already settled earlier
+  }
   for (const terminal of wipTerminalCards(poRow, allJcRows)) {
     if (!terminal.wipLabel) continue;
     const subQty = terminal.wipQty || poRow.quantity || 1;
@@ -3434,7 +3466,7 @@ export async function applyWipInventoryChange(
       // last stage is done", where the last stage is read off the job cards'
       // own (wipKey, sequence) shape. On every PO that ends at UPHOLSTERY this
       // is the same set as before.
-      await settlePoTerminalWip(db, poRow, allJcRows);
+      await settlePoTerminalWip(db, poRow, allJcRows, { jcRow, prevStatus });
       return;
     }
 
@@ -3466,7 +3498,7 @@ export async function applyWipInventoryChange(
     // the WIP→FG subtract and the upstream drain both hung off a hardcoded
     // UPHOLSTERY check, so those orders shipped and their rows stayed forever.
     // The settle is structural, so the last stage drains whatever it is.
-    await settlePoTerminalWip(db, poRow, allJcRows);
+    await settlePoTerminalWip(db, poRow, allJcRows, { jcRow, prevStatus });
     return;
   }
 

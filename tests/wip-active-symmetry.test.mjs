@@ -27,15 +27,25 @@ import { readFileSync } from "node:fs";
 const SRC = readFileSync("src/api/routes/production-orders/_helpers.ts", "utf8");
 const FN = SRC.slice(SRC.indexOf("export async function applyWipInventoryChange"));
 
-test("one definition of active, and PAUSED is in it", () => {
-  const defs = SRC.match(/const isActiveStatus = /g) ?? [];
-  assert.equal(defs.length, 1, "exactly one definition");
-  const def = SRC.slice(SRC.indexOf("const isActiveStatus = "), SRC.indexOf("const becomingActive ="));
-  for (const s of ["IN_PROGRESS", "PAUSED", "COMPLETED", "TRANSFERRED"]) {
+const DERIVED = readFileSync("src/api/lib/wip-expected.ts", "utf8");
+
+test("one definition of active, shared by the writer and the audit", () => {
+  // The cascade MOVES the stock; wip-expected DERIVES what it should be, and
+  // the reconcile report and the WIP reset are both built on the derivation.
+  // Two definitions of "started" means the audit reports drift the cascade
+  // never produced — so there is one, and the cascade imports it.
+  const def = DERIVED.slice(
+    DERIVED.indexOf("export const isWipActive"),
+    DERIVED.indexOf("export function wipCardQty"),
+  );
+  for (const s of ["IN_PROGRESS", "PAUSED"]) {
     assert.match(def, new RegExp(`"${s}"`), `${s} must count as active`);
   }
-  assert.match(FN, /const becomingActive = isActiveStatus\(newStatus\);/);
-  assert.match(FN, /const wasActive = isActiveStatus\(prevStatus\);/);
+  assert.match(def, /isWipDone\(status\)/, "COMPLETED / TRANSFERRED via isWipDone");
+  assert.ok(!SRC.includes("const isActiveStatus ="), "no local restatement");
+  assert.match(SRC, /^\s*isWipActive,$/m, "imported from wip-expected");
+  assert.match(FN, /const becomingActive = isWipActive\(newStatus\);/);
+  assert.match(FN, /const wasActive = isWipActive\(prevStatus\);/);
 });
 
 test("the consume guard reads that same definition, not its own list", () => {

@@ -90,6 +90,7 @@ import {
 export { filterJcsForCompletionGate } from "../../lib/wip-expected";
 import {
   filterJcsForCompletionGate,
+  isWipActive,
   isWipTerminalDone,
   poOrphanedUpstream,
   wipTerminalCards,
@@ -2993,13 +2994,12 @@ export async function applyWipInventoryChange(
   // nothing is mid-flight across this change. A card paused under the old rule
   // and resumed under the new one would keep a consume it never made — with
   // zero such cards, that window is closed.
-  const isActiveStatus = (s: string | null | undefined) =>
-    s === "IN_PROGRESS" ||
-    s === "PAUSED" ||
-    s === "COMPLETED" ||
-    s === "TRANSFERRED";
-  const becomingActive = isActiveStatus(newStatus);
-  const wasActive = isActiveStatus(prevStatus);
+  // `isWipActive` — imported, not restated. The derivation that the reconcile
+  // report and the WIP reset are built on has to mean the same thing by
+  // "started" as the code that moves the stock, or the audit reports drift the
+  // cascade never produced.
+  const becomingActive = isWipActive(newStatus);
+  const wasActive = isWipActive(prevStatus);
 
   // ---------------------------------------------------------------------
   // BUG-2026-04-27-002 — rollback branch.

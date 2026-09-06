@@ -54,12 +54,16 @@ own-row subtract and `unsettlePoTerminalWip` stay behind `wasDone`, and an
 UPHOLSTERY card that never completed returns early (its consume-all lives in the
 COMPLETED branch, so it has taken nothing).
 
-**2. PAUSED was in neither set.** `IN_PROGRESS → PAUSED` gave nothing back and
+**2. PAUSED was in neither set — and the audit disagreed with the writer.** `IN_PROGRESS → PAUSED` gave nothing back and
 `PAUSED → IN_PROGRESS` looked like a fresh start and consumed a second time. The
 rest of the file already reads PAUSED as work in progress (`isInProgress` in the
 PO status derivation) and the material is on the bench either way. There is now
-one `isActiveStatus` and both directions read it — the inline re-listing of
-statuses is exactly how PAUSED came to be in one list and not the other.
+one definition and both directions read it — the inline re-listing of statuses
+is exactly how PAUSED came to be in one list and not the other. That definition
+is `isWipActive` in `wip-expected.ts`, which the cascade now IMPORTS: the code
+that moves the stock and the derivation the reconcile report and the WIP reset
+are built on now mean the same thing by "started". They did not before, so the
+audit could have reported drift the cascade never produced.
 
 **3. The upstream row was resolved twice, by two different pieces of code.** The
 consume had four ways to find a merged FAB_CUT row (constructed wipKey, any FC

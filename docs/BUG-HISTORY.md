@@ -34,6 +34,51 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-09-06-178 — the cascade took upstream stock on one transition and could only give it back on another `production` `inventory` 🟢
+
+🟢 Fixed. Three defects, one shape, all found while proving
+[BUG-2026-09-06-177](#bug-2026-09-06-177). All three were **latent on the day
+they were fixed** — measured on production, of 45,511 job cards **2 were
+IN_PROGRESS and 0 were PAUSED**, because the floor goes WAITING → COMPLETED
+directly. They are fixed now because the sequence lock gates IN_PROGRESS as
+well, which will put real traffic through these paths for the first time.
+
+**1. Started, then put back = the stock never came back.** The forward consume
+fires on IN_PROGRESS *or* COMPLETED; the refund branch was gated on
+`wasDone && !isDone`. So `IN_PROGRESS → WAITING` kept the upstream consumed with
+nothing produced against it, and the row stayed down forever. The gate is now
+`wasActive && !becomingActive` — every step out of the active set is paired with
+the step in. What is undone still depends on how far the card got: only a
+COMPLETED card produced its own row or could have settled the order, so the
+own-row subtract and `unsettlePoTerminalWip` stay behind `wasDone`, and an
+UPHOLSTERY card that never completed returns early (its consume-all lives in the
+COMPLETED branch, so it has taken nothing).
+
+**2. PAUSED was in neither set.** `IN_PROGRESS → PAUSED` gave nothing back and
+`PAUSED → IN_PROGRESS` looked like a fresh start and consumed a second time. The
+rest of the file already reads PAUSED as work in progress (`isInProgress` in the
+PO status derivation) and the material is on the bench either way. There is now
+one `isActiveStatus` and both directions read it — the inline re-listing of
+statuses is exactly how PAUSED came to be in one list and not the other.
+
+**3. The upstream row was resolved twice, by two different pieces of code.** The
+consume had four ways to find a merged FAB_CUT row (constructed wipKey, any FC
+on the PO, a walk across sibling POs of the same SO/CO); the refund had one. A
+consume found through a fallback could not be reversed — the row stayed down
+forever. Extracted to `resolveUpstreamWip`, used by both, so there is no second
+copy to drift. This is BUG-CLASSES' "fixed in the copy in front of the author",
+caught before it bit.
+
+**Deliberately NOT fixed, and the reason is recorded in the test**: the eight
+`UPDATE wip_items … WHERE code = ?` writes carry no org filter while the insert
+conflicts on `(org_id, code)`. The insert does not name `org_id` at all — it
+relies on the column default — so adding `AND org_id = ?` with the wrong value
+would turn every cascade write into a silent no-op. That needs a measurement of
+the live table which the HTTP surface does not expose. **UNMEASURED**, and left
+visible rather than half-fixed.
+
+Regression: `tests/wip-active-symmetry.test.mjs`.
+
 ## BUG-2026-09-06-177 — the WIP terminal settle ran again on every later completion `production` `inventory` 🟢
 
 🟢 Fixed. Owner, repeatedly and correctly: 「查看一下我的 WIP 的入库出库问题，它应

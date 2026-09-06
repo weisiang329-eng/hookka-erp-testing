@@ -2626,6 +2626,156 @@ export async function unsettlePoTerminalWip(
 }
 
 // ---------------------------------------------------------------------------
+// resolveUpstreamWip — which wip_items row does THIS job card draw from?
+//
+// One answer, three callers: the forward consume, the refund when a completed
+// card is reverted, and the refund when a started-but-never-completed card is
+// put back to WAITING.
+//
+// It used to be written out twice, and the two copies were not the same. The
+// consume had four ways to find a merged FAB_CUT row (constructed wipKey, any
+// FC on the PO, a walk across sibling POs of the same SO/CO); the refund had
+// one. So a FAB_SEW card whose upstream was found by a fallback consumed a row
+// the revert could never find, and the row stayed down forever — the exact
+// asymmetry that BUG-CLASSES calls "fixed in the copy in front of the author".
+// Extracting it is the fix: there is now no second copy to drift.
+//
+// Returns the label and the quantity read off the SAME card, because a consume
+// that takes N must be handed back N.
+// ---------------------------------------------------------------------------
+async function resolveUpstreamWip(
+  db: D1Database,
+  poRow: ProductionOrderRow,
+  jcRow: JobCardRow,
+  allJcRows: JobCardRow[],
+  deptUpper: string,
+  wipKey: string | null | undefined,
+): Promise<{ label: string | null; wipQty: number | null }> {
+  let upstreamLabel: string | null = null;
+  // What the UPSTREAM card put into that row. The producer-add below binds
+  // the producing card's own `wipQty`, so a set-level consume has to take
+  // that same number back out — see the merged-FC branch further down, where
+  // a hardcoded 1 left `wipQty − 1` behind on every merged card that cuts
+  // more than one piece. Always read off the same card the label came from,
+  // so the two can never describe different cards.
+  let upstreamWipQty: number | null = null;
+  if (wipKey) {
+    const myBranch = jcRow.branchKey ?? "";
+    const children = allJcRows
+      .filter(
+        (j) =>
+          j.wipKey === wipKey &&
+          (j.branchKey ?? "") === myBranch &&
+          j.sequence < jcRow.sequence,
+      )
+      .sort((a, b) => b.sequence - a.sequence);
+    if (children[0]?.wipLabel) {
+      upstreamLabel = children[0].wipLabel;
+      upstreamWipQty = children[0].wipQty ?? null;
+    }
+  }
+  // Option C fallback: FAB_SEW's upstream FC is no longer per-piece on
+  // the same PO — it's the merged FC JC. Two wipKey shapes depending on
+  // category:
+  //   SOFA   → `{companySOId}::{baseModel}::{fabric}::FAB_CUT` (cross-PO
+  //            merge across same SO).
+  //   BF/ACC → `{productionOrderId}::{baseModel}::{fabric}::FAB_CUT`
+  //            (per-PO merge inside one set's POs).
+  //
+  // Try both shapes; whichever matches a real FC JC wins. Falling back
+  // to a plain "any FC JC on this PO" lookup catches the BF case where
+  // the bom_templates baseModel doesn't match the productCode prefix
+  // exactly (legacy BOMs sometimes use different baseModel strings).
+  if (!upstreamLabel && deptUpper === "FAB_SEW") {
+    // Parent-doc key for SOFA cross-PO merge. Falls back to CO-side ids
+    // (companyCOId / consignmentOrderId) when SO ids are NULL — without
+    // this, CO sofa SEW completion couldn't find the merged FC and
+    // dedup/refund cascades misbehaved.
+    const parentDocKey =
+      poRow.companySOId ||
+      poRow.salesOrderId ||
+      poRow.companyCOId ||
+      poRow.consignmentOrderId ||
+      "";
+    const fabricCode = poRow.fabricCode || "";
+    const bomLookup = await db
+      .prepare(
+        `SELECT baseModel FROM bom_templates
+         WHERE productCode = ?
+         ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(poRow.productCode ?? "")
+      .first<{ baseModel: string | null }>();
+    const baseModel = bomLookup?.baseModel || poRow.productCode || "";
+    const candidates: string[] = [];
+    // BF / ACC: per-PO merge.
+    candidates.push(
+      `${jcRow.productionOrderId}::${baseModel}::${fabricCode}::FAB_CUT`,
+    );
+    // SOFA: cross-PO merge keyed by parent doc id (SO or CO).
+    if (parentDocKey) {
+      candidates.push(
+        `${parentDocKey}::${baseModel}::${fabricCode}::FAB_CUT`,
+      );
+    }
+    for (const cand of candidates) {
+      const mergedFc = await db
+        .prepare(
+          `SELECT wipLabel, wipQty FROM job_cards
+           WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
+           LIMIT 1`,
+        )
+        .bind(cand)
+        .first<{ wipLabel: string; wipQty: number | null }>();
+      if (mergedFc?.wipLabel) {
+        upstreamLabel = mergedFc.wipLabel;
+        upstreamWipQty = mergedFc.wipQty ?? null;
+        break;
+      }
+    }
+    // Last-resort fallback: any FC JC on this PO. Catches the BF case
+    // where the constructed wipKey above doesn't match (legacy baseModel
+    // mismatch). Safe because Option C guarantees at most one FC JC
+    // per PO.
+    if (!upstreamLabel) {
+      const anyFc = await db
+        .prepare(
+          `SELECT wipLabel, wipQty FROM job_cards
+           WHERE productionOrderId = ? AND departmentCode = 'FAB_CUT'
+           LIMIT 1`,
+        )
+        .bind(jcRow.productionOrderId)
+        .first<{ wipLabel: string; wipQty: number | null }>();
+      if (anyFc?.wipLabel) {
+        upstreamLabel = anyFc.wipLabel;
+        upstreamWipQty = anyFc.wipQty ?? null;
+      }
+    }
+    // For SOFA cross-PO: when this SEW row is on a sibling PO of a
+    // merged sofa group, the FC JC may live on the anchor PO (different
+    // productionOrderId). Walk same-(SO|CO) siblings.
+    if (!upstreamLabel && parentDocKey) {
+      const sibFc = await db
+        .prepare(
+          `SELECT jc.wipLabel, jc.wipQty FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+           WHERE (po.companySOId = ? OR po.companyCOId = ?)
+             AND ? <> ''
+             AND jc.departmentCode = 'FAB_CUT'
+           LIMIT 1`,
+        )
+        .bind(parentDocKey, parentDocKey, parentDocKey)
+        .first<{ wipLabel: string; wipQty: number | null }>();
+      if (sibFc?.wipLabel) {
+        upstreamLabel = sibFc.wipLabel;
+        upstreamWipQty = sibFc.wipQty ?? null;
+      }
+    }
+  }
+  return { label: upstreamLabel, wipQty: upstreamWipQty };
+}
+
+// ---------------------------------------------------------------------------
 // WIP inventory — mirror of the in-memory applyWipInventoryChange().
 // Writes directly to wip_items (code-keyed).
 //
@@ -2832,10 +2982,24 @@ export async function applyWipInventoryChange(
   // (wood cut starts the wooden-frame chain, fabric cut starts the fabric
   // chain). Neither has an upstream wip_items to consume.
   const isWoodCut = deptUpper === "WOOD_CUT";
-  const becomingActive =
-    newStatus === "IN_PROGRESS" ||
-    newStatus === "COMPLETED" ||
-    newStatus === "TRANSFERRED";
+  // A card HOLDS upstream stock from the moment work starts on it until it is
+  // put back. PAUSED belongs in that set: the rest of the file already reads it
+  // as work in progress (`isInProgress` in the PO status derivation), the floor
+  // uses it for "started, stopped for now", and the material is on the bench
+  // either way. Leaving it out made PAUSED → IN_PROGRESS look like a fresh
+  // start and consume the upstream a second time.
+  //
+  // Deploy note: no card is PAUSED today (measured 2026-09-06: 0 of 45,511), so
+  // nothing is mid-flight across this change. A card paused under the old rule
+  // and resumed under the new one would keep a consume it never made — with
+  // zero such cards, that window is closed.
+  const isActiveStatus = (s: string | null | undefined) =>
+    s === "IN_PROGRESS" ||
+    s === "PAUSED" ||
+    s === "COMPLETED" ||
+    s === "TRANSFERRED";
+  const becomingActive = isActiveStatus(newStatus);
+  const wasActive = isActiveStatus(prevStatus);
 
   // ---------------------------------------------------------------------
   // BUG-2026-04-27-002 — rollback branch.
@@ -2851,9 +3015,16 @@ export async function applyWipInventoryChange(
   // ---------------------------------------------------------------------
   const wasDone =
     prevStatus === "COMPLETED" || prevStatus === "TRANSFERRED";
-  const isDone =
-    newStatus === "COMPLETED" || newStatus === "TRANSFERRED";
-  if (wasDone && !isDone) {
+  // Widened 2026-09-06 from `wasDone && !isDone`. The forward consume fires on
+  // IN_PROGRESS as well as COMPLETED, but only a COMPLETED card could ever give
+  // the stock back — so a card started and then put back to WAITING kept its
+  // upstream consumed with nothing to show for it, and the row stayed down
+  // forever. Every step in and out of the active set is now paired.
+  //
+  // What is undone depends on how far the card got, which is why `wasDone`
+  // still gates the parts below: only a COMPLETED card produced its own row or
+  // could have settled the order.
+  if (wasActive && !becomingActive) {
     const refundQty = wipQty;
     // BUG-2026-04-30-003 reverse symmetry: if the PO's last stage was fully
     // done (so `settlePoTerminalWip` had fired in the forward COMPLETED
@@ -2866,7 +3037,16 @@ export async function applyWipInventoryChange(
     // runs for EVERY department because the last stage is structural, not
     // necessarily UPHOLSTERY, and it no-ops unless this very revert is what
     // breaks the terminal-done state.
-    await unsettlePoTerminalWip(db, poRow, jcRow, allJcRows, prevStatus);
+    if (wasDone) {
+      await unsettlePoTerminalWip(db, poRow, jcRow, allJcRows, prevStatus);
+    }
+
+    // UPHOLSTERY consumes its upstream only when it COMPLETES (its consume-all
+    // lives in the COMPLETED branch below, not in the becomingActive one). So a
+    // UPH card that was merely started has taken nothing and there is nothing
+    // to hand back.
+    if (isUpholstery && !wasDone) return;
+
     if (isUpholstery) {
       // Net effect on the reverting UPH card's own label: +wipQty (added back
       // by the unsettle) − wipQty (the subtract just below) = 0 — correct,
@@ -2923,12 +3103,19 @@ export async function applyWipInventoryChange(
     // BUG-2026-04-27-013: no MAX(0) clamp — symmetric with the forward
     // consume so a "rollback before any completion" goes negative as a
     // visibility signal that something is out of order.
-    await db
-      .prepare(
-        "UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?",
-      )
-      .bind(refundQty, wipLabel)
-      .run();
+    //
+    // Only a card that COMPLETED ever added its own row (the producer-add sits
+    // in the COMPLETED branch). Taking it back from a card that was merely
+    // started would invent a subtraction — the mirror image of the bug this
+    // branch was widened to fix.
+    if (wasDone) {
+      await db
+        .prepare(
+          "UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?",
+        )
+        .bind(refundQty, wipLabel)
+        .run();
+    }
     // Refund the upstream sibling that the becomingActive branch consumed.
     // FAB_CUT and WOOD_CUT have no upstream so they skip the refund —
     // matches the forward path's `!isFabCut && !isWoodCut && !isUpholstery`
@@ -2938,72 +3125,12 @@ export async function applyWipInventoryChange(
     // Wood Cut completion was wrongly consuming Fab Sew stock because the
     // old wipKey-only filter pulled siblings from both branches).
     if (!isFabCut && !isWoodCut) {
-      let refundLabel: string | null = null;
-      // Mirrors `upstreamWipQty` in the forward consume — the merged-FC
-      // refund has to hand back the same number the consume took, and both
-      // read it off the same card.
-      let refundUpstreamWipQty: number | null = null;
-      if (wipKey) {
-        const myBranch = jcRow.branchKey ?? "";
-        const children = allJcRows
-          .filter(
-            (j) =>
-              j.wipKey === wipKey &&
-              (j.branchKey ?? "") === myBranch &&
-              j.sequence < jcRow.sequence,
-          )
-          .sort((a, b) => b.sequence - a.sequence);
-        if (children[0]?.wipLabel) {
-          refundLabel = children[0].wipLabel;
-          refundUpstreamWipQty = children[0].wipQty ?? null;
-        }
-      }
-      // Option C fallback (mirror of forward consume) — refund the merged
-      // FC wip_items row when no per-PO sibling found. Try both wipKey
-      // shapes (BF per-PO, SOFA cross-PO).
-      if (!refundLabel && deptUpper === "FAB_SEW") {
-        // Parent-doc key for SOFA cross-PO merge: prefer SO-side ids,
-        // fall back to CO-side ids (CO sofa POs have companySOId NULL).
-        const parentDocKey =
-          poRow.companySOId ||
-          poRow.salesOrderId ||
-          poRow.companyCOId ||
-          poRow.consignmentOrderId ||
-          "";
-        const fabricCode = poRow.fabricCode || "";
-        const bomLookup = await db
-          .prepare(
-            `SELECT baseModel FROM bom_templates
-             WHERE productCode = ?
-             ORDER BY effectiveFrom DESC LIMIT 1`,
-          )
-          .bind(poRow.productCode ?? "")
-          .first<{ baseModel: string | null }>();
-        const baseModel = bomLookup?.baseModel || poRow.productCode || "";
-        const candidates: string[] = [
-          `${jcRow.productionOrderId}::${baseModel}::${fabricCode}::FAB_CUT`,
-        ];
-        if (parentDocKey) {
-          candidates.push(
-            `${parentDocKey}::${baseModel}::${fabricCode}::FAB_CUT`,
-          );
-        }
-        for (const cand of candidates) {
-          const mergedFc = await db
-            .prepare(
-              `SELECT wipLabel, wipQty FROM job_cards
-               WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
-               LIMIT 1`,
-            )
-            .bind(cand)
-            .first<{ wipLabel: string; wipQty: number | null }>();
-          if (mergedFc?.wipLabel) {
-            refundLabel = mergedFc.wipLabel;
-            refundUpstreamWipQty = mergedFc.wipQty ?? null;
-            break;
-          }
-        }
-      }
+      // The same resolution the forward consume uses — see resolveUpstreamWip.
+      // This path used to carry its own shorter copy, which could not find the
+      // merged FAB_CUT rows the consume found through its fallbacks.
+      const up = await resolveUpstreamWip(db, poRow, jcRow, allJcRows, deptUpper, wipKey);
+      const refundLabel = up.label;
+      const refundUpstreamWipQty = up.wipQty;
       if (refundLabel) {
         // Option C dedup-aware refund: forward consume only fired ONCE
         // per merge group (first DONE sibling). Refund must mirror that:
@@ -3090,10 +3217,6 @@ export async function applyWipInventoryChange(
   // (i.e. IN_PROGRESS→COMPLETED), but still allow the IN_PROGRESS
   // early-return so COMPLETED falls through to the producer-add below.
   if (!isFabCut && !isWoodCut && !isUpholstery && becomingActive) {
-    const wasActive =
-      prevStatus === "IN_PROGRESS" ||
-      prevStatus === "COMPLETED" ||
-      prevStatus === "TRANSFERRED";
     // Per-component upstream consume — sibling lookup is now BOM-branch
     // aware (BUG-2026-04-27 fix, migration 0058). Within one wipKey
     // ("DIVAN" / "HEADBOARD" / "SOFA_*") the BOM has parallel branches
@@ -3103,126 +3226,15 @@ export async function applyWipInventoryChange(
     // wrongly consumed Fab Sew stock (Wei Siang report 2026-04-27).
     // Filter siblings by (wipKey, branchKey) so each branch's consume
     // only reaches its own true upstream.
+    // Resolved by resolveUpstreamWip — one implementation shared with both
+    // refund paths, so a consume can never take from a row a revert cannot
+    // find. Only resolved when this transition actually consumes.
     let upstreamLabel: string | null = null;
-    // What the UPSTREAM card put into that row. The producer-add below binds
-    // the producing card's own `wipQty`, so a set-level consume has to take
-    // that same number back out — see the merged-FC branch further down, where
-    // a hardcoded 1 left `wipQty − 1` behind on every merged card that cuts
-    // more than one piece. Always read off the same card the label came from,
-    // so the two can never describe different cards.
     let upstreamWipQty: number | null = null;
-    if (!wasActive && wipKey) {
-      const myBranch = jcRow.branchKey ?? "";
-      const children = allJcRows
-        .filter(
-          (j) =>
-            j.wipKey === wipKey &&
-            (j.branchKey ?? "") === myBranch &&
-            j.sequence < jcRow.sequence,
-        )
-        .sort((a, b) => b.sequence - a.sequence);
-      if (children[0]?.wipLabel) {
-        upstreamLabel = children[0].wipLabel;
-        upstreamWipQty = children[0].wipQty ?? null;
-      }
-    }
-    // Option C fallback: FAB_SEW's upstream FC is no longer per-piece on
-    // the same PO — it's the merged FC JC. Two wipKey shapes depending on
-    // category:
-    //   SOFA   → `{companySOId}::{baseModel}::{fabric}::FAB_CUT` (cross-PO
-    //            merge across same SO).
-    //   BF/ACC → `{productionOrderId}::{baseModel}::{fabric}::FAB_CUT`
-    //            (per-PO merge inside one set's POs).
-    //
-    // Try both shapes; whichever matches a real FC JC wins. Falling back
-    // to a plain "any FC JC on this PO" lookup catches the BF case where
-    // the bom_templates baseModel doesn't match the productCode prefix
-    // exactly (legacy BOMs sometimes use different baseModel strings).
-    if (!upstreamLabel && deptUpper === "FAB_SEW") {
-      // Parent-doc key for SOFA cross-PO merge. Falls back to CO-side ids
-      // (companyCOId / consignmentOrderId) when SO ids are NULL — without
-      // this, CO sofa SEW completion couldn't find the merged FC and
-      // dedup/refund cascades misbehaved.
-      const parentDocKey =
-        poRow.companySOId ||
-        poRow.salesOrderId ||
-        poRow.companyCOId ||
-        poRow.consignmentOrderId ||
-        "";
-      const fabricCode = poRow.fabricCode || "";
-      const bomLookup = await db
-        .prepare(
-          `SELECT baseModel FROM bom_templates
-           WHERE productCode = ?
-           ORDER BY effectiveFrom DESC LIMIT 1`,
-        )
-        .bind(poRow.productCode ?? "")
-        .first<{ baseModel: string | null }>();
-      const baseModel = bomLookup?.baseModel || poRow.productCode || "";
-      const candidates: string[] = [];
-      // BF / ACC: per-PO merge.
-      candidates.push(
-        `${jcRow.productionOrderId}::${baseModel}::${fabricCode}::FAB_CUT`,
-      );
-      // SOFA: cross-PO merge keyed by parent doc id (SO or CO).
-      if (parentDocKey) {
-        candidates.push(
-          `${parentDocKey}::${baseModel}::${fabricCode}::FAB_CUT`,
-        );
-      }
-      for (const cand of candidates) {
-        const mergedFc = await db
-          .prepare(
-            `SELECT wipLabel, wipQty FROM job_cards
-             WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
-             LIMIT 1`,
-          )
-          .bind(cand)
-          .first<{ wipLabel: string; wipQty: number | null }>();
-        if (mergedFc?.wipLabel) {
-          upstreamLabel = mergedFc.wipLabel;
-          upstreamWipQty = mergedFc.wipQty ?? null;
-          break;
-        }
-      }
-      // Last-resort fallback: any FC JC on this PO. Catches the BF case
-      // where the constructed wipKey above doesn't match (legacy baseModel
-      // mismatch). Safe because Option C guarantees at most one FC JC
-      // per PO.
-      if (!upstreamLabel) {
-        const anyFc = await db
-          .prepare(
-            `SELECT wipLabel, wipQty FROM job_cards
-             WHERE productionOrderId = ? AND departmentCode = 'FAB_CUT'
-             LIMIT 1`,
-          )
-          .bind(jcRow.productionOrderId)
-          .first<{ wipLabel: string; wipQty: number | null }>();
-        if (anyFc?.wipLabel) {
-          upstreamLabel = anyFc.wipLabel;
-          upstreamWipQty = anyFc.wipQty ?? null;
-        }
-      }
-      // For SOFA cross-PO: when this SEW row is on a sibling PO of a
-      // merged sofa group, the FC JC may live on the anchor PO (different
-      // productionOrderId). Walk same-(SO|CO) siblings.
-      if (!upstreamLabel && parentDocKey) {
-        const sibFc = await db
-          .prepare(
-            `SELECT jc.wipLabel, jc.wipQty FROM job_cards jc
-             JOIN production_orders po ON po.id = jc.productionOrderId
-             WHERE (po.companySOId = ? OR po.companyCOId = ?)
-               AND ? <> ''
-               AND jc.departmentCode = 'FAB_CUT'
-             LIMIT 1`,
-          )
-          .bind(parentDocKey, parentDocKey, parentDocKey)
-          .first<{ wipLabel: string; wipQty: number | null }>();
-        if (sibFc?.wipLabel) {
-          upstreamLabel = sibFc.wipLabel;
-          upstreamWipQty = sibFc.wipQty ?? null;
-        }
-      }
+    if (!wasActive) {
+      const up = await resolveUpstreamWip(db, poRow, jcRow, allJcRows, deptUpper, wipKey);
+      upstreamLabel = up.label;
+      upstreamWipQty = up.wipQty;
     }
     if (!wasActive && upstreamLabel) {
       // Option C — when the upstream is a MERGED FC ("X | (FC)" label),

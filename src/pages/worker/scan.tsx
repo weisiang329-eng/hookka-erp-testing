@@ -35,6 +35,7 @@ import {
   Search,
   CheckCircle2,
   AlertTriangle,
+  Lock,
   X,
   ChevronRight,
   Images,
@@ -55,6 +56,11 @@ import { deriveBarcodeToken } from "@/lib/job-card-id";
 import { deriveWipName } from "@/lib/wip-name";
 import { todayYmdMY } from "@/lib/utils";
 import { z } from "zod";
+import {
+  asSequenceLockRefusal,
+  blockingDepartments,
+  type SequenceLockRefusal,
+} from "@/lib/sequence-unlock";
 
 // Loose passthrough envelopes — runtime validation at boundaries while
 // keeping the page's local Order/JobCard types as the typed view of `data`.
@@ -73,6 +79,11 @@ const ScanCompleteEnvelope = z
     // Backend error code (ALREADY_PIC1 / ALREADY_PIC2 / PIC_FULL / …). Lets the
     // page route a PACKING already-done response to the rack picker (BUG-2026-06-08).
     code: z.string().optional(),
+    // Upstream sequence lock — which departments must finish first, and whether
+    // this user may release it. Parsed by src/lib/sequence-unlock.ts, which is
+    // the ONE place that reads this shape across all five screens.
+    blockedBy: z.array(z.unknown()).optional(),
+    canSelfUnlock: z.boolean().optional(),
     data: z
       .object({
         assignedSlot: z.number().optional(),
@@ -230,6 +241,16 @@ type Result =
       fifoDueDate?: string;
     }
   | { kind: "error"; message: string; decoded?: string }
+  // The step before this one is not finished (owner 2026-09-06). Its own kind,
+  // not an "error": nothing went wrong and nothing needs reporting — it is
+  // simply not this bench's turn yet. Rendering it as a red failure would teach
+  // the floor that the system is broken, which is how a lock gets routed
+  // around. During the shadow phase the worker may release it themselves.
+  | {
+      kind: "blocked";
+      refusal: SequenceLockRefusal;
+      retry: () => void;
+    }
   // Department QR (owner 2026-06-11): "I am now working in <dept>" — the
   // day's hours re-route to this department (and, for per-line QRs, this
   // Sofa/Bedframe line) from `time` until the next scan or punch-out.
@@ -2060,14 +2081,21 @@ export default function WorkerScanPage() {
     [decodeFromFile],
   );
 
-  // `opts.force` — when true, adds `force: true` to the request body so
-  // the server bypasses the soft-warning guards (PREREQUISITE_NOT_MET /
-  // UPSTREAM_LOCKED) and records an audit row in scan_override_audit.
-  // Used by the confirm dialog's Continue button after the worker
-  // acknowledges the warning on a prior 202 round-trip.
+  // `opts.unlock` — releases the upstream sequence lock and re-posts the SAME
+  // scan, so the worker never walks back to the sticker to scan twice. The
+  // server records a scan_override_audit row for every release.
+  //
+  // This replaces `force`, which guarded the prerequisiteMet soft-warning
+  // deleted in 760d08b3 (2026-06-08) and had been dead ever since — no endpoint
+  // read it, and the comment describing a "202 round-trip" described a response
+  // nothing returned any more.
   async function handleConfirmScan(
     opts?: {
-      force?: boolean;
+      // Releases the upstream sequence lock and re-posts the same scan
+      // (owner 2026-09-06). This replaces `force`, which guarded the
+      // prerequisiteMet warning removed in 760d08b3 and had been dead ever
+      // since — no endpoint read it.
+      unlock?: { reason: string };
       ctx?: {
         order: Order;
         jobCard: JobCard;
@@ -2156,7 +2184,7 @@ export default function WorkerScanPage() {
               jobCardId: ctx.jobCard.id,
               workerId,
               completeWholeCard: true,
-              ...(opts?.force ? { force: true } : {}),
+              ...(opts?.unlock ? { unlock: opts.unlock } : {}),
             }
           : isShared
           ? {
@@ -2167,10 +2195,10 @@ export default function WorkerScanPage() {
               ...(sharedWk ? { wipKey: sharedWk } : {}),
               // per-piece: which physical piece this sticker is (from QR p=)
               pieceNo: ctx.piece?.pieceNo,
-              ...(opts?.force ? { force: true } : {}),
+              ...(opts?.unlock ? { unlock: opts.unlock } : {}),
             }
           : isFabCut
-            ? { deptCode: "FAB_CUT", workerId, ...(opts?.force ? { force: true } : {}) }
+            ? { deptCode: "FAB_CUT", workerId, ...(opts?.unlock ? { unlock: opts.unlock } : {}) }
             : {
             jobCardId: ctx.jobCard.id,
             workerId,
@@ -2182,9 +2210,9 @@ export default function WorkerScanPage() {
             // that slot (enables 2-worker share on a single piece). Defaults
             // to 1 server-side if omitted, so manual entry still works.
             pieceNo: ctx.piece?.pieceNo,
-            // Forced overrides bypass the PREREQUISITE_NOT_MET / UPSTREAM_LOCKED
-            // soft warnings. Server records an audit row in scan_override_audit.
-            ...(opts?.force ? { force: true } : {}),
+            // Releasing the upstream sequence lock. The server records a
+            // scan_override_audit row for every one.
+            ...(opts?.unlock ? { unlock: opts.unlock } : {}),
           };
       const res = await workerFetch(endpoint, {
         method: "POST",
@@ -2192,9 +2220,25 @@ export default function WorkerScanPage() {
       });
       const raw = await res.json();
       const data = ScanCompleteEnvelope.parse(raw);
-      // (Removed 2026-06-08) The HTTP 202 `requiresConfirmation` soft-warning
-      // path is gone — no scan endpoint returns it since the prerequisite
-      // check was deleted. Responses are now success | error only.
+      // Upstream sequence lock (owner 2026-09-06). Replaces the note that stood
+      // here since 2026-06-08 saying responses are success-or-error only — a
+      // third answer exists again: "not your turn yet".
+      //
+      // `opts.unlock` re-posts the SAME scan with the release attached, so the
+      // worker never walks back to the sticker and scans a second time.
+      const refusal = asSequenceLockRefusal(raw);
+      if (refusal) {
+        setResult({
+          kind: "blocked",
+          refusal,
+          retry: () =>
+            void handleConfirmScan({
+              ...(opts ?? {}),
+              unlock: { reason: "Released on the shop floor" },
+            }),
+        });
+        return;
+      }
       if (data.success && data.data) {
         setResult({
           kind: "success",
@@ -2824,6 +2868,56 @@ export default function WorkerScanPage() {
               </p>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Upstream sequence lock (owner 2026-09-06). AMBER, not red: nothing
+          went wrong and there is nothing to report — it is simply not this
+          bench's turn yet. Dressing it as a failure teaches the floor that the
+          system is broken, which is how a lock ends up being routed around.
+
+          The worker is standing, one-handed, often holding the piece: big type,
+          the blocking departments as a LIST (a convergence step names three),
+          and one action. */}
+      {result.kind === "blocked" && (
+        <div className="bg-[#FAEFCB] border border-[#E8D9A8] rounded-xl p-4 text-[#7A5610]">
+          <div className="flex items-start gap-2">
+            <Lock className="h-6 w-6 mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <p className="text-lg font-bold leading-tight">Not this step yet</p>
+              <p className="mt-2 text-sm">Finish first:</p>
+              <ul className="mt-1 space-y-0.5">
+                {blockingDepartments(result.refusal).map((d) => (
+                  <li key={d} className="text-xl font-bold leading-snug">
+                    {d}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+          {result.refusal.canSelfUnlock && (
+            <button
+              type="button"
+              // Two taps on purpose: the first opens the confirm, the second
+              // commits. A single big button next to a camera view is a
+              // mis-tap waiting to happen, and every release is audited.
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Unlock and complete this step anyway? This will be recorded.",
+                  )
+                ) {
+                  result.retry();
+                }
+              }}
+              className="mt-4 w-full rounded-lg bg-[#7A5610] px-4 py-3 text-base font-semibold text-white active:bg-[#5E420C]"
+            >
+              Unlock and complete
+            </button>
+          )}
+          <p className="mt-2 text-center text-[11px] text-[#7A5610]/70">
+            Later this will need a supervisor.
+          </p>
         </div>
       )}
 

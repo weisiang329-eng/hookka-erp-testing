@@ -3753,13 +3753,29 @@ app.post("/bulk-patch", async (c) => {
           return { poId, jobCardId, success: true };
         }
         let msg = `HTTP ${res.status}`;
+        // The sequence lock's refusal is STRUCTURED — which departments, and
+        // whether this user may release it. Flattening it to a string here
+        // would leave the grid unable to tell "waiting on Framing" from a
+        // network blip, and the operator would get "error 409" on a batch of
+        // twenty. Carry the shape through; the client parses it in one place
+        // (src/lib/sequence-unlock.ts).
+        let code: string | undefined;
+        let blockedBy: unknown;
+        let canSelfUnlock: boolean | undefined;
         try {
-          const errBody = (await res.json()) as { error?: string } | null;
+          const errBody = (await res.json()) as
+            | { error?: string; code?: string; blockedBy?: unknown; canSelfUnlock?: boolean }
+            | null;
           if (errBody && typeof errBody.error === "string") msg = errBody.error;
+          if (errBody && typeof errBody.code === "string") code = errBody.code;
+          if (errBody && Array.isArray(errBody.blockedBy)) blockedBy = errBody.blockedBy;
+          if (errBody && typeof errBody.canSelfUnlock === "boolean") {
+            canSelfUnlock = errBody.canSelfUnlock;
+          }
         } catch {
           /* non-json error body */
         }
-        return { poId, jobCardId, success: false, error: msg };
+        return { poId, jobCardId, success: false, error: msg, code, blockedBy, canSelfUnlock };
       } catch (err) {
         return {
           poId,

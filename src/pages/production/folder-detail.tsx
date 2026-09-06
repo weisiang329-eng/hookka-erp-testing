@@ -19,6 +19,7 @@ import { Trash2, ArrowLeft, Printer } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column } from "@/components/ui/data-grid";
 import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
+import { asSequenceLockRefusal } from "@/lib/sequence-unlock";
 import { invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   BatchActionToolbar,
@@ -586,7 +587,19 @@ export default function ProductionFolderDetailPage() {
               body: JSON.stringify({ patches }),
               credentials: "include",
             });
-            const j = (await res.json()) as { results?: Array<{ success: boolean; error?: string }>; error?: string; missingPermission?: string };
+            const j = (await res.json()) as {
+              results?: Array<{
+                success: boolean;
+                error?: string;
+                // Carried through bulk-patch so the grid can tell "waiting on
+                // Framing" from a network blip — see src/lib/sequence-unlock.ts.
+                code?: string;
+                blockedBy?: unknown;
+                canSelfUnlock?: boolean;
+              }>;
+              error?: string;
+              missingPermission?: string;
+            };
             if (!res.ok) {
               toast.error(
                 j.missingPermission
@@ -596,8 +609,37 @@ export default function ProductionFolderDetailPage() {
               return;
             }
             const failed = (j.results || []).filter((x) => !x.success);
-            if (failed.length > 0) toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
-            else toast.success(`${date ? "Stamped" : "Cleared"} completion date on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+            // Upstream sequence lock (owner 2026-09-06). A batch must never be
+            // all-or-nothing: 「20 张里 17 张可以直接盖，3 张被锁」. Refusing all
+            // twenty because three are waiting on Framing is what makes an
+            // operator stop using the batch tool — and then the lock has taught
+            // them to work around the system instead of with it.
+            //
+            // So the ones that went through are reported as done, and the
+            // locked ones are named separately with WHAT they are waiting for.
+            const locked = failed.filter((x) => x.code === "UPSTREAM_INCOMPLETE");
+            const otherFailures = failed.filter((x) => x.code !== "UPSTREAM_INCOMPLETE");
+            const okCount = patches.length - failed.length;
+            if (locked.length > 0) {
+              const waiting = [
+                ...new Set(
+                  locked.flatMap((x) =>
+                    (asSequenceLockRefusal(x)?.blockedBy ?? []).map((b) => b.departmentCode),
+                  ),
+                ),
+              ];
+              toast.error(
+                `${okCount} stamped. ${locked.length} locked — ${
+                  waiting.length ? `finish ${waiting.join(", ")} first` : "an earlier step is not finished"
+                }.`,
+              );
+            }
+            if (otherFailures.length > 0) {
+              toast.error(`${otherFailures.length} of ${patches.length} failed: ${otherFailures[0].error ?? "unknown"}`);
+            }
+            if (failed.length === 0) {
+              toast.success(`${date ? "Stamped" : "Cleared"} completion date on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+            }
             // Cross-page freshness (2026-07-04 cache sweep): other consumers
             // of the production list (delivery pipeline, dashboards, /m)
             // read it through the localStorage cache — broadcast the change.

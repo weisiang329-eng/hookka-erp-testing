@@ -129,8 +129,14 @@ WAITING → COMPLETED directly:
    another's stock.
 
 **The historical −513 rows are NOT repaired by this** — it stops new ones being
-created. Repairing them is a separate decision the owner has not made, and it
-must not be attempted against a model that has not been proven first.
+created. The repair itself is `.github/workflows/wip-reset.yml` (plan / apply,
+apply needs a typed confirm phrase and uploads the pre-write snapshot of every
+row), driving the long-prepared `scripts/reset-wip-quantities.mjs`. It re-derives
+every balance from the job-card history using the same `wip-expected.ts` the
+cascade and the reconcile report use, so the repair cannot disagree with the
+engine that has to keep it true afterwards. **Run it only after this fix is
+live** — repairing balances while the cause is still running just rebuilds the
+damage — and only on the owner's word.
 
 Regression: `tests/wip-settle-once.test.mjs`.
 

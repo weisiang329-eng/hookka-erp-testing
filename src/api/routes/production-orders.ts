@@ -2724,8 +2724,6 @@ app.post("/:id/scan-complete-dept", async (c) => {
     });
   }
 
-  // Prerequisite gate — soft-warn (202) if ANY compartment's upstream dept
-  // hasn't completed, unless the worker already acknowledged and re-posted
   // Upstream sequence lock (owner 2026-09-06). Replaces the note that stood
   // here since 2026-06-08 saying workers may complete any dept directly — that
   // is the permission this change withdraws, and leaving the sentence would

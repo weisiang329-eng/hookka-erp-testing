@@ -20,6 +20,8 @@ import { DataGrid } from "@/components/ui/data-grid";
 import type { Column } from "@/components/ui/data-grid";
 import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
 import { asSequenceLockRefusal } from "@/lib/sequence-unlock";
+import { SequenceUnlockDialog } from "@/components/sequence-unlock-dialog";
+import type { SequenceLockRefusal } from "@/lib/sequence-unlock";
 import { invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   BatchActionToolbar,
@@ -107,6 +109,15 @@ export default function ProductionFolderDetailPage() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<FolderJcRow[]>([]);
   const [dateOpen, setDateOpen] = useState(false);
+  // Upstream sequence lock (owner 2026-09-06). Holds the refusal AND enough to
+  // re-send: the operator's three choices all end in another bulk-patch, and
+  // making them re-pick the rows first would be a punishment for hitting a gate.
+  const [lockPrompt, setLockPrompt] = useState<{
+    refusal: SequenceLockRefusal;
+    lockedJcIds: string[];
+    date: string;
+  } | null>(null);
+  const [lockBusy, setLockBusy] = useState(false);
   const [dueDateOpen, setDueDateOpen] = useState(false);
   const [picOpen, setPicOpen] = useState(false);
 
@@ -633,6 +644,21 @@ export default function ProductionFolderDetailPage() {
                   waiting.length ? `finish ${waiting.join(", ")} first` : "an earlier step is not finished"
                 }.`,
               );
+              // Offer the way out immediately. Making the operator re-select
+              // the rows and try again is how a lock turns into a reason to
+              // stop using the tool.
+              const firstRefusal = locked
+                .map((x) => asSequenceLockRefusal(x))
+                .find((r): r is SequenceLockRefusal => r !== null);
+              if (firstRefusal) {
+                setLockPrompt({
+                  refusal: firstRefusal,
+                  lockedJcIds: locked
+                    .map((x) => (x as { jobCardId?: string }).jobCardId ?? "")
+                    .filter(Boolean),
+                  date: date ?? "",
+                });
+              }
             }
             if (otherFailures.length > 0) {
               toast.error(`${otherFailures.length} of ${patches.length} failed: ${otherFailures[0].error ?? "unknown"}`);
@@ -658,6 +684,87 @@ export default function ProductionFolderDetailPage() {
             );
           } catch (err) {
             toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }}
+      />
+      <SequenceUnlockDialog
+        refusal={lockPrompt?.refusal ?? null}
+        subject={
+          lockPrompt
+            ? `${lockPrompt.lockedJcIds.length} job card${lockPrompt.lockedJcIds.length === 1 ? "" : "s"}`
+            : undefined
+        }
+        busy={lockBusy}
+        onCancel={() => setLockPrompt(null)}
+        onChoose={async (choice) => {
+          if (!lockPrompt) return;
+          setLockBusy(true);
+          try {
+            // "Complete the earlier step too" sends the BLOCKING cards first,
+            // in sequence order, then the ones the operator picked. Order is
+            // the whole point: completing upstream first means the WIP produce
+            // happens before the consume, so no negative row is created — which
+            // is the problem this lock exists to stop, not one it should cause.
+            const upstream =
+              choice.action === "completeUpstream"
+                ? lockPrompt.refusal.blockedBy.map((b) => {
+                    const row = rows.find((r) => r.jobCardId === b.id);
+                    return {
+                      poId: row?.poId ?? "",
+                      jobCardId: b.id,
+                      completedDate: lockPrompt.date,
+                      status: "COMPLETED",
+                      unlock: { reason: choice.reason },
+                    };
+                  })
+                : [];
+            const targets = lockPrompt.lockedJcIds.map((jcId) => {
+              const row = rows.find((r) => r.jobCardId === jcId);
+              return {
+                poId: row?.poId ?? "",
+                jobCardId: jcId,
+                completedDate: lockPrompt.date,
+                status: lockPrompt.date ? "COMPLETED" : "WAITING",
+                unlock: { reason: choice.reason },
+              };
+            });
+            const patches = [...upstream, ...targets].filter((p) => p.poId);
+            const res = await fetch("/api/production-orders/bulk-patch", {
+              method: "POST",
+              headers: csrfHeaders(),
+              body: JSON.stringify({ patches }),
+              credentials: "include",
+            });
+            const j = (await res.json()) as {
+              results?: Array<{ success: boolean; error?: string }>;
+              error?: string;
+            };
+            const bad = (j.results || []).filter((x) => !x.success);
+            if (!res.ok) {
+              toast.error(`Unlock failed — ${j.error ?? `error ${res.status}`}.`);
+            } else if (bad.length > 0) {
+              toast.error(`${bad.length} still failed: ${bad[0].error ?? "unknown"}`);
+            } else {
+              toast.success(
+                choice.action === "completeUpstream"
+                  ? `Completed the earlier step and ${targets.length} card${targets.length === 1 ? "" : "s"}.`
+                  : `Unlocked and completed ${targets.length} card${targets.length === 1 ? "" : "s"}.`,
+              );
+            }
+            invalidateCachePrefix("/api/production-orders");
+            const touched = new Set(patches.map((p) => p.jobCardId));
+            setRows((prev) =>
+              prev.map((r) =>
+                touched.has(r.jobCardId)
+                  ? { ...r, completedDate: lockPrompt.date || null, status: lockPrompt.date ? "COMPLETED" : "WAITING" }
+                  : r,
+              ),
+            );
+            setLockPrompt(null);
+          } catch (err) {
+            toast.error(`Unlock failed: ${err instanceof Error ? err.message : String(err)}`);
+          } finally {
+            setLockBusy(false);
           }
         }}
       />

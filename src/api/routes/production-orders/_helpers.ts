@@ -5939,6 +5939,13 @@ export async function recordSequenceUnlock(
   reason: string | null | undefined,
 ): Promise<void> {
   try {
+    // 'UPSTREAM_LOCKED', not the refusal code the client sees. The column
+    // carries a CHECK from migration 0022 that allows exactly
+    // PREREQUISITE_NOT_MET / UPSTREAM_LOCKED, so 'UPSTREAM_INCOMPLETE' throws —
+    // and because this write is non-fatal by design, it would have thrown
+    // SILENTLY on every unlock and left the weekly review permanently empty.
+    // Measured on production 2026-09-07 by an insert that actually ran
+    // (BUG-2026-09-07-179). The reason text below says which override it was.
     const actor =
       (c as unknown as { get: (k: string) => string | undefined }).get("userId") ??
       "unknown";
@@ -5948,7 +5955,7 @@ export async function recordSequenceUnlock(
         `INSERT INTO scan_override_audit
            (id, workerId, workerName, jobCardId, productionOrderId,
             overrideCode, reason, created_at)
-         VALUES (?, ?, ?, ?, ?, 'UPSTREAM_INCOMPLETE', ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, 'UPSTREAM_LOCKED', ?, ?)`,
       )
       .bind(
         `soa-${crypto.randomUUID().slice(0, 8)}`,

@@ -254,10 +254,28 @@ test("the stale note that contradicted the lock is gone", () => {
 test("every unlock is recorded, and the audit never blocks the work", () => {
   const helpers = readFileSync("src/api/routes/production-orders/_helpers.ts", "utf8");
   assert.match(helpers, /INSERT INTO scan_override_audit/);
-  assert.match(helpers, /'UPSTREAM_INCOMPLETE'/);
   // Non-fatal: refusing a completion because a log line failed would stop the
   // factory for the sake of the record.
   assert.match(helpers, /audit write failed \(work still applied\)/);
+});
+
+test("the audit writes a code the audit table accepts (BUG-2026-09-07-179)", () => {
+  // `scan_override_audit.override_code` carries a CHECK from migration 0022
+  // allowing exactly PREREQUISITE_NOT_MET / UPSTREAM_LOCKED. Inserting the
+  // client-facing refusal code throws — and because the write above is
+  // non-fatal BY DESIGN, it threw silently on every unlock, which would have
+  // left the weekly review permanently empty and looking like nobody ever
+  // unlocked anything. Measured on production by an insert that actually ran.
+  const helpers = readFileSync("src/api/routes/production-orders/_helpers.ts", "utf8");
+  const insert = helpers.slice(
+    helpers.indexOf("INSERT INTO scan_override_audit"),
+    helpers.indexOf("INSERT INTO scan_override_audit") + 400,
+  );
+  assert.match(insert, /'UPSTREAM_LOCKED'/);
+  assert.equal(/'UPSTREAM_INCOMPLETE'/.test(insert), false);
+  // The refusal the CLIENT sees keeps its own, more precise code — the two are
+  // different vocabularies and only one of them is constrained by a table.
+  assert.match(helpers, /code: "UPSTREAM_INCOMPLETE"/);
 });
 
 // ---------------------------------------------------------------------------

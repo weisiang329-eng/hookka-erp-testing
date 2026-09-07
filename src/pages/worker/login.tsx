@@ -502,12 +502,25 @@ export default function WorkerLoginPage() {
   useEffect(() => {
     if (mode !== "login") return;
     function onKey(ev: KeyboardEvent) {
+      // Never take keystrokes that belong to a focused field. The empNo box is
+      // a real <input>, so typing "Test-001" was ALSO pushing 0, 0, 1 into the
+      // PIN — three dots filled before the worker had touched the keypad.
+      //
+      // The Backspace branch already guarded against exactly this (its comment
+      // said so); the digit branch never did. Same guard, applied once, above
+      // both — and widened past INPUT, since a textarea or contenteditable
+      // would swallow keystrokes the same way.
+      const el = document.activeElement as HTMLElement | null;
+      const typingInAField =
+        !!el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.isContentEditable);
+      if (typingInAField) return;
+
       if (ev.key >= "0" && ev.key <= "9") {
         pressKey(ev.key);
       } else if (ev.key === "Backspace") {
-        // don't steal Backspace while focused in the empNo input
-        const el = document.activeElement as HTMLElement | null;
-        if (el && el.tagName === "INPUT") return;
         pressKey("back");
       }
     }

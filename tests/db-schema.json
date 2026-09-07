@@ -3462,8 +3462,12 @@
   "user_sessions": [
     "created_at",
     "expires_at",
+    "id",
+    "ip_address",
+    "last_seen_at",
     "org_id",
     "token",
+    "user_agent",
     "user_id"
   ],
   "users": [

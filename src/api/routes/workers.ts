@@ -431,8 +431,29 @@ app.post("/", async (c) => {
       after: rowToWorker(created),
     });
     return c.json({ success: true, data: rowToWorker(created) }, 201);
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (e) {
+    // Was a bare `catch` reporting EVERY failure here as "Invalid request
+    // body" with a 400 — the department lookup, the insert, the audit write,
+    // all of it — while logging nothing at all, because `catch {` never bound
+    // the error. A create that failed inside the server told the user they had
+    // typed something wrong, and left no trace to check.
+    //
+    // Same shape, and the same fix, as payslips.generate (see the note there
+    // dated 2026-08-02, where a bare catch disguised a destructive failure as
+    // a bad request). 400 means the caller sent something wrong; anything else
+    // is ours and is a 500.
+    const ref = crypto.randomUUID().slice(0, 8);
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[workers.create ${ref}] ${msg}`, e);
+    const isBadBody = /JSON|Unexpected token|body/i.test(msg);
+    return c.json(
+      {
+        success: false,
+        error: isBadBody ? "Invalid request body" : `Create worker failed: ${msg}`,
+        ref,
+      },
+      isBadBody ? 400 : 500,
+    );
   }
 });
 

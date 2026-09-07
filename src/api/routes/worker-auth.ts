@@ -18,6 +18,7 @@ import { hashPin, isPinHashed } from "../lib/auth-utils";
 import {
   checkLoginRateLimit,
   clearLoginRateLimit,
+  clientIp,
 } from "../lib/rate-limit";
 
 const app = new Hono<Env>();
@@ -137,6 +138,20 @@ app.post("/login", async (c) => {
   const rlDenied = await checkLoginRateLimit(c, rlKey);
   if (rlDenied) return rlDenied;
 
+  // Second limit, keyed on IP. The empNo limit above protects ONE account and
+  // never fires against the attack that matters here: one common PIN tried
+  // against every employee number in turn, where each account only ever sees a
+  // single attempt.
+  //
+  // The threshold is deliberately far higher than the per-account one. The
+  // factory shares an outbound IP, so a shift clocking in together arrives as
+  // one address — at 10 attempts the floor would lock itself out before the
+  // first machine started. 100 leaves room for 35 workers plus mistyped PINs
+  // while still stopping a script that wants thousands.
+  const rlIpKey = `wlogin-ip:${clientIp(c)}`;
+  const rlIpDenied = await checkLoginRateLimit(c, rlIpKey, 100);
+  if (rlIpDenied) return rlIpDenied;
+
   // Match by case-insensitive empNo.
   const worker = await c.var.DB.prepare(
     "SELECT * FROM workers WHERE LOWER(empNo) = LOWER(?) LIMIT 1",
@@ -223,8 +238,10 @@ app.post("/login", async (c) => {
   // idempotent and a missed reset just costs the next 15-min window.
   try {
     c.executionCtx.waitUntil(clearLoginRateLimit(c, rlKey));
+    c.executionCtx.waitUntil(clearLoginRateLimit(c, rlIpKey));
   } catch {
     void clearLoginRateLimit(c, rlKey).catch(() => {});
+    void clearLoginRateLimit(c, rlIpKey).catch(() => {});
   }
 
   return c.json({
@@ -257,6 +274,12 @@ app.post("/reset-pin", async (c) => {
   const rlKey = `wreset:${empNo.trim().toLowerCase()}`;
   const rlDenied = await checkLoginRateLimit(c, rlKey);
   if (rlDenied) return rlDenied;
+
+  // Same reasoning as /login: the empNo key protects one worker, not the
+  // company. Resets are rare, so this ceiling is lower than the login one —
+  // nobody legitimately resets 40 PINs from one address in 15 minutes.
+  const rlIpDenied = await checkLoginRateLimit(c, `wreset-ip:${clientIp(c)}`, 40);
+  if (rlIpDenied) return rlIpDenied;
 
   const worker = await c.var.DB.prepare(
     "SELECT * FROM workers WHERE LOWER(empNo) = LOWER(?) LIMIT 1",

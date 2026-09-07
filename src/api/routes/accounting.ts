@@ -12113,6 +12113,7 @@ app.get("/bank-reco", async (c) => {
       amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
     }))
     .filter((l) => !legBeforeOpening(l.sourceType, l.day, obDateBr) && !isOpeningSource(l.sourceType) && l.day >= from && l.day <= to); // pre-opening + opening legs: not matchable (BUG-2026-09-02-173)
+  await attachSupplierNames(c.var.DB, legs);
   let stmtLines: unknown[] = [];
   let migrationMissing = false;
   const matchedLegIds = new Set<string>();
@@ -12282,11 +12283,28 @@ app.post("/bank-reco/unmatch", async (c) => {
     const body = await c.req.json();
     const lineId = String(body.statementLineId || "");
     const umLine = await c.var.DB.prepare(
-      "SELECT id, accountCode, txnDate FROM bank_statement_lines WHERE id = ?",
-    ).bind(lineId).first<{ id: string; accountCode: string; txnDate: string }>();
+      "SELECT id, accountCode, txnDate, matchedLegId FROM bank_statement_lines WHERE id = ?",
+    ).bind(lineId).first<{ id: string; accountCode: string; txnDate: string; matchedLegId: string | null }>();
     if (!umLine) return c.json({ success: false, error: "Statement line not found" }, 404);
     if (await bankRecoMonthFinalized(c.var.DB, umLine.accountCode, umLine.txnDate)) {
       return c.json({ success: false, error: BANK_RECO_FINALIZED_ERR }, 400);
+    }
+    // Unmatching one piece of a combo group dissolves the WHOLE group — a
+    // half-matched payment is never left behind (its remaining pieces would
+    // silently sit in the Matched area while the leg went back to uncleared).
+    if (umLine.matchedLegId) {
+      const siblings = await c.var.DB.prepare(
+        "SELECT id, txnDate FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId = ?",
+      ).bind(umLine.accountCode, umLine.matchedLegId).all<{ id: string; txnDate: string }>();
+      for (const s of siblings.results ?? []) {
+        if (await bankRecoMonthFinalized(c.var.DB, umLine.accountCode, s.txnDate)) {
+          return c.json({ success: false, error: BANK_RECO_FINALIZED_ERR }, 400);
+        }
+      }
+      await c.var.DB.prepare(
+        "UPDATE bank_statement_lines SET matchedLegId = NULL, matchedAt = NULL WHERE accountCode = ? AND matchedLegId = ?",
+      ).bind(umLine.accountCode, umLine.matchedLegId).run();
+      return c.json({ success: true, data: { released: (siblings.results ?? []).length } });
     }
     await c.var.DB.prepare(
       "UPDATE bank_statement_lines SET matchedLegId = NULL, matchedAt = NULL WHERE id = ?",
@@ -12297,6 +12315,99 @@ app.post("/bank-reco/unmatch", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// Combo match (owner 2026-09-07 「做」): SEVERAL statement lines paid ONE book
+// payment — the bank executed HPV-2607-024's RM 911 as two transfers of
+// 32.00 + 879.00. The pieces must sum EXACTLY to the leg; the write is
+// all-or-nothing, so the walk never sees a fresh partial group.
+app.post("/bank-reco/match-group", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const legId = String(body.legId || "");
+    const lineIds = Array.isArray(body.lineIds) ? [...new Set(body.lineIds.map((x: unknown) => String(x)))] : [];
+    if (lineIds.length < 2 || lineIds.length > 20) {
+      return c.json({ success: false, error: "Pick 2–20 statement lines to combine" }, 400);
+    }
+    const marks = lineIds.map(() => "?").join(",");
+    const lineRes = await c.var.DB.prepare(
+      `SELECT id, accountCode, txnDate, amountSen, matchedLegId, ignored_at FROM bank_statement_lines WHERE id IN (${marks})`,
+    ).bind(...lineIds).all<{ id: string; accountCode: string; txnDate: string; amountSen: number; matchedLegId: string | null; ignored_at?: string | null; ignoredAt?: string | null }>();
+    const lines = lineRes.results ?? [];
+    if (lines.length !== lineIds.length) return c.json({ success: false, error: "Statement line not found" }, 404);
+    const account = lines[0].accountCode;
+    const obDateG = await getOpeningDate(c.var.DB);
+    for (const l of lines) {
+      if (l.accountCode !== account) return c.json({ success: false, error: "Lines belong to different accounts" }, 400);
+      if (l.matchedLegId) return c.json({ success: false, error: "A selected line is already matched" }, 400);
+      if ((l.ignoredAt ?? l.ignored_at)) return c.json({ success: false, error: "A selected line is ignored — restore it first" }, 400);
+      if (obDateG && l.txnDate < obDateG) {
+        return c.json({ success: false, error: `A selected line is dated before the opening date (${obDateG}) — its money is already inside the opening balance.` }, 400);
+      }
+      if (await bankRecoMonthFinalized(c.var.DB, account, l.txnDate)) {
+        return c.json({ success: false, error: BANK_RECO_FINALIZED_ERR }, 400);
+      }
+    }
+    const leg = await c.var.DB.prepare(
+      "SELECT id, accountCode, sourceType, debitSen, creditSen FROM ledger_journal_entries WHERE id = ? AND hidden = 0",
+    ).bind(legId).first<{ id: string; accountCode: string; sourceType: string; debitSen: number; creditSen: number }>();
+    if (!leg) return c.json({ success: false, error: "Ledger leg not found" }, 404);
+    const resolveG = await loadAccountResolver(c.var.DB);
+    if (resolveG(leg.accountCode) !== account) {
+      return c.json({ success: false, error: "Leg belongs to a different account" }, 400);
+    }
+    if (isOpeningSource(leg.sourceType)) {
+      return c.json({ success: false, error: "Opening-balance legs are the account's floor — they are never matched" }, 400);
+    }
+    const legAmt = (Number(leg.debitSen) || 0) - (Number(leg.creditSen) || 0);
+    const sumSen = lines.reduce((s, l) => s + Math.round(Number(l.amountSen) || 0), 0);
+    if (sumSen !== legAmt) {
+      return c.json({ success: false, error: `Amounts differ — selected lines total ${sumSen} sen vs book ${legAmt} sen. A combo match must be exact.` }, 400);
+    }
+    // Self-heal void pre-opening claims, then the taken check (BUG-175 order).
+    if (obDateG) {
+      await c.var.DB.prepare(
+        "UPDATE bank_statement_lines SET matchedLegId = NULL, matchedAt = NULL WHERE accountCode = ? AND matchedLegId IS NOT NULL AND txnDate < ?",
+      ).bind(account, obDateG).run();
+    }
+    const takenG = await c.var.DB.prepare(
+      "SELECT id FROM bank_statement_lines WHERE matchedLegId = ? LIMIT 1",
+    ).bind(legId).first();
+    if (takenG) return c.json({ success: false, error: "This ledger leg is already matched to another statement line" }, 400);
+    const nowG = new Date().toISOString();
+    await c.var.DB.prepare(
+      `UPDATE bank_statement_lines SET matchedLegId = ?, matchedAt = ? WHERE id IN (${marks})`,
+    ).bind(legId, nowG, ...lineIds).run();
+    return c.json({ success: true, data: { matched: lineIds.length } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// What one supplier payment actually settled — the bills behind the leg
+// (owner 2026-09-07 「没有show payment detail」).
+app.get("/bank-reco/payment-detail", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const paymentNo = c.req.query("paymentNo") || "";
+  if (!paymentNo) return c.json({ success: false, error: "paymentNo required" }, 400);
+  const res = await c.var.DB.prepare(
+    `SELECT sp.supplier_name AS supplier_name, sp.booked_sen AS booked_sen, sp.amount_sen AS amount_sen,
+            COALESCE(sp.method,'') AS method, pi.pi_no AS pi_no, pi.is_opening AS is_opening
+       FROM supplier_payments sp
+       LEFT JOIN purchase_invoices pi ON pi.id = sp.purchase_invoice_id
+      WHERE sp.payment_no = ? AND COALESCE(sp.method,'') <> 'CREDIT_NOTE'`,
+  ).bind(paymentNo).all<Record<string, unknown>>();
+  const rows = (res.results ?? []).map((r) => ({
+    supplierName: String((r.supplierName ?? r.supplier_name) ?? ""),
+    piNo: String((r.piNo ?? r.pi_no) ?? "") || null,
+    opening: !!(r.isOpening ?? r.is_opening),
+    method: String(r.method ?? ""),
+    bookedSen: Math.round(Number((r.bookedSen ?? r.booked_sen) ?? (r.amountSen ?? r.amount_sen)) || 0),
+  }));
+  return c.json({ success: true, data: { paymentNo, rows } });
 });
 
 // Auto-match: unique exact-amount candidates within ±7 days.
@@ -12604,10 +12715,42 @@ type BankRecoComputed = {
 // recurring in this repo, so there is only one copy.
 type BankRecoLegState = {
   legs: { id: string; day: string; sourceType: string; sourceId: string; description: string; amountSen: number }[];
-  // legId → txnDate of the (post-opening) statement line that cleared it.
+  // legId → the date the leg was FULLY cleared: the LAST txnDate of its
+  // (post-opening) matched lines, present only when those lines sum EXACTLY
+  // to the leg amount. One leg may be paid by several statement lines
+  // (owner 2026-09-07 combo match: HPV-2607-024 RM 911 = bank 32 + 879);
+  // a partial group leaves the leg uncleared AND its lines unbooked, so the
+  // reconciliation identity holds in every intermediate state.
   clearedOn: Map<string, string>;
   openingDate: string | null;
 };
+
+// "Supplier payment HPV-2605-021" says WHO nowhere — the payee lives in
+// supplier_payments, not on the ledger leg (owner 2026-09-07 「没有show
+// payment detail」). Append the supplier name to supplier-payment leg
+// descriptions wherever book rows are shown.
+async function attachSupplierNames(
+  db: Env["Variables"]["DB"],
+  legs: { sourceType: string; sourceId: string; description: string }[],
+): Promise<void> {
+  const nos = [...new Set(legs.filter((l) => l.sourceType.startsWith("supplier_payment")).map((l) => l.sourceId).filter(Boolean))];
+  if (!nos.length) return;
+  const marks = nos.map(() => "?").join(",");
+  const res = await db.prepare(
+    `SELECT payment_no, MIN(supplier_name) AS supplier_name FROM supplier_payments WHERE payment_no IN (${marks}) GROUP BY payment_no`,
+  ).bind(...nos).all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] }));
+  const byNo = new Map<string, string>();
+  for (const r of res.results ?? []) {
+    const no = String((r.paymentNo ?? r.payment_no) ?? "");
+    const nm = String((r.supplierName ?? r.supplier_name) ?? "").trim();
+    if (no && nm) byNo.set(no, nm);
+  }
+  for (const l of legs) {
+    if (!l.sourceType.startsWith("supplier_payment")) continue;
+    const nm = byNo.get(l.sourceId);
+    if (nm && !l.description.includes(nm)) l.description = `${l.description} · ${nm}`;
+  }
+}
 
 async function loadBankRecoState(
   db: Env["Variables"]["DB"],
@@ -12626,8 +12769,8 @@ async function loadBankRecoState(
         WHERE accountCode IN (${marks}) AND hidden = 0`,
     ).bind(...equivalents).all<{ id: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; description: string | null; postedAt: string }>(),
     db.prepare(
-      "SELECT matchedLegId, txnDate FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
-    ).bind(account).all<{ matchedLegId: string; txnDate: string }>(),
+      "SELECT matchedLegId, txnDate, amountSen FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
+    ).bind(account).all<{ matchedLegId: string; txnDate: string; amountSen: number }>(),
   ]);
   const { docDate, openingDate } = await loadDocDateResolver(db);
   const legs = (legRes.results ?? [])
@@ -12640,11 +12783,24 @@ async function loadBankRecoState(
       amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
     }))
     .filter((l) => !legBeforeOpening(l.sourceType, l.day, openingDate));
+  await attachSupplierNames(db, legs);
   // A match on a pre-opening statement line is void for reconciliation — that
   // bank movement is inside the keyed opening balance (BUG-2026-09-02-174).
-  const clearedOn = new Map<string, string>();
+  // Group-aware clearing: sum every leg's claiming lines; the leg is cleared
+  // only when they add EXACTLY to its amount, on the LAST piece's date.
+  const legAmtById = new Map(legs.map((l) => [l.id, l.amountSen] as const));
+  const grouped = new Map<string, { sumSen: number; lastDate: string }>();
   for (const r of matchedRes.results ?? []) {
-    if (!openingDate || r.txnDate >= openingDate) clearedOn.set(r.matchedLegId, r.txnDate);
+    if (openingDate && r.txnDate < openingDate) continue;
+    const g = grouped.get(r.matchedLegId) ?? { sumSen: 0, lastDate: "" };
+    g.sumSen += Math.round(Number(r.amountSen) || 0);
+    if (r.txnDate > g.lastDate) g.lastDate = r.txnDate;
+    grouped.set(r.matchedLegId, g);
+  }
+  const clearedOn = new Map<string, string>();
+  for (const [legId, g] of grouped) {
+    const legAmt = legAmtById.get(legId);
+    if (legAmt !== undefined && g.sumSen === legAmt) clearedOn.set(legId, g.lastDate);
   }
   return { legs, clearedOn, openingDate };
 }
@@ -12706,9 +12862,17 @@ async function computeBankRecoReport(
     if (obDateRp && r.txnDate < obDateRp) continue; // pre-opening: inside the opening balance
     if (r.matchedLegId) {
       const legDay = legDayById.get(r.matchedLegId);
-      // Booked within the month → cleared. A missing leg (match target outside
-      // the walk) keeps today's semantics: treated as booked, not resurfaced.
-      if (legDay === undefined || legDay <= monthEnd) continue;
+      // A missing leg (match target outside the walk) keeps the old
+      // semantics: treated as booked, not resurfaced.
+      if (legDay === undefined) continue;
+      // Booked within the month AND its group fully through the bank by
+      // month end → cleared. A partial combo group (or one whose last piece
+      // lands next month) keeps its pieces in unbooked, mirroring the leg
+      // staying in uncleared — the identity holds in every state.
+      if (legDay <= monthEnd) {
+        const clearedDay = clearedOn.get(r.matchedLegId);
+        if (clearedDay !== undefined && clearedDay <= monthEnd) continue;
+      }
     }
     const amt = Math.round(Number(r.amountSen) || 0);
     unbookedStmtSen += amt;

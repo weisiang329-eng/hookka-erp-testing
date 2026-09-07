@@ -14,6 +14,21 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-09-07 — ✅ 对账两升级：付款明细可见 + 组合配对（owner 挂图两问 →「做」）
+
+Owner：「1. 没有show payment detail 2. Bank Statement 可能是几笔，book ledger 可能一笔…没有办法
+match（你可以看 - HPV-2607-024）」——铁证：账面一笔 911.00（07/07），银行两笔 32.00+879.00
+（09/07，都写着 HPV-2607-024 HUGYP）= 911 分毫。① **付款明细**：`attachSupplierNames`（付款号→
+supplier_payments MIN(supplier_name)）挂在共享 loader + GET /bank-reco——book 行尾自动补供应商名，
+报表/封存/board pending 全沾光；新 GET /bank-reco/payment-detail?paymentNo= 回该付款勾的单
+（供应商/PI 号/opening 标/金额），UI book 行点描述展开。② **组合配对**：新 POST
+/bank-reco/match-group {legId, lineIds 2-20}——全查（同户口/未配/未 ignore/非开账前/月未封存/
+腿非 opening 源/BUG-175 先扫作废占用）+ **Σ行=腿分毫才写**（原子）；unmatch 任一块=整组解散；
+**walk 组感知**：clearedOn 改「组齐才算清、以最后一块日期为清日」（loader 聚合 sum+lastDate），
+行侧「组没齐或最后一块在月底后→照算 unbooked」——恒等式任意中间态成立（数值推演过）；board
+clearedByMatch 自动继承。UI：银行行勾选框 + 琥珀 combo 条（N lines · Σ → combine & match to…
+只列等额腿）。守卫 +3（22/22）；finalize 写路径守卫表 +match-group。
+
 ## 2026-09-04 — 🔵 Cash Flow template 调整（owner 下午回来这条线）
 
 Owner：「回来cash flow template那边」→ 对照完成：样板 `HOOKKA - Cash Flow Mar''26 (1).xlsx`

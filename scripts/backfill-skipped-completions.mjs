@@ -50,6 +50,12 @@ if (APPLY && !CONFIRMED) {
   process.exit(1);
 }
 
+// The code the audit table's CHECK actually accepts. `UPSTREAM_INCOMPLETE` —
+// the code the API refuses with — is NOT in it (migration 0022 allows only
+// PREREQUISITE_NOT_MET / UPSTREAM_LOCKED), and an insert with it throws. The
+// reason text says which kind of override this was, so nothing is lost.
+const AUDIT_CODE = "UPSTREAM_LOCKED";
+
 const DONE = new Set(["COMPLETED", "TRANSFERRED"]);
 const DEAD = new Set(["CANCELLED"]);
 
@@ -115,6 +121,20 @@ try {
     if (found === 0) break;
   }
 
+  // The audit table carries a CHECK on the override code. An apply run found
+  // that out the hard way — the insert threw after the first card had already
+  // been completed. Print the live constraint so the allowed vocabulary is
+  // MEASURED here rather than read off a migration file that may have been
+  // altered since.
+  const [chk] = await sql`
+    SELECT pg_get_constraintdef(oid) AS def
+      FROM pg_constraint
+     WHERE conrelid = 'scan_override_audit'::regclass
+       AND contype = 'c'
+     LIMIT 1`;
+  console.log(`  audit code constraint   : ${chk?.def ?? "none"}`);
+  console.log("");
+
   console.log("backfill of skipped completions — derived from the BOM sequence");
   console.log(`  job cards read          : ${jcs.length}`);
   console.log(`  production orders hit   : ${poHits.size}`);
@@ -159,7 +179,7 @@ try {
         (id, worker_id, worker_name, job_card_id, production_order_id,
          override_code, reason, created_at)
       VALUES (${"soa-bf" + Math.random().toString(16).slice(2, 8)}, 'backfill', 'backfill',
-              ${r.card.id}, ${r.card.productionOrderId}, 'UPSTREAM_INCOMPLETE',
+              ${r.card.id}, ${r.card.productionOrderId}, ${AUDIT_CODE},
               ${`${r.card.departmentCode ?? ""} completed by backfill — ${[...r.blockedFor].join(", ")} was already finished on ${r.date}`},
               ${new Date().toISOString()})`;
   }

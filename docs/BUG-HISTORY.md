@@ -34,6 +34,35 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-09-07-179 — the unlock audit wrote to a column that rejects its own code `production` `audit` 🟢
+
+🟢 Fixed. `scan_override_audit.override_code` carries a CHECK from migration
+0022 that allows exactly **`PREREQUISITE_NOT_MET`** and **`UPSTREAM_LOCKED`**.
+The sequence lock's `recordSequenceUnlock` inserts `'UPSTREAM_INCOMPLETE'` — the
+code it refuses clients with — so **every insert violates the constraint**. The
+write is wrapped in try/catch on purpose ("refusing a completion because a log
+line failed would stop the factory"), which means it would have failed
+**silently, forever**: the weekly review of who unlocked what would have been
+empty, and the emptiness would have read as "nobody unlocked anything".
+
+Found by running it, not by reading it: the completion backfill uses the same
+audit row, and its first apply run threw
+`violates check constraint "scan_override_audit_override_code_check"` — after
+the first card had already been completed, leaving a partial run to finish.
+
+**Fix**: write `UPSTREAM_LOCKED`, which is what the column has always meant, and
+let the reason text say which kind of override it was. No migration: a schema
+change here would have to reach prod through the runtime self-apply, and there
+is nothing to gain — the vocabulary already had the right word in it.
+
+The backfill script now PRINTS the live constraint (`pg_get_constraintdef`) in
+its plan output, so the allowed values are measured on the day rather than read
+off a migration file that may have been altered since.
+
+**The lesson is the try/catch, not the constant.** A non-fatal audit write is
+right; a non-fatal write that has never once succeeded is a silent hole. Any
+guarded write needs one real execution before it is believed.
+
 ## BUG-2026-09-06-178 — the cascade took upstream stock on one transition and could only give it back on another `production` `inventory` 🟢
 
 🟢 Fixed. Three defects, one shape, all found while proving

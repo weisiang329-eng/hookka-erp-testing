@@ -6,7 +6,12 @@
 // size added in Maintenance → Sizes (e.g. 20", and the long-standing 26")
 // could never be priced in the grid — the create-SO dropdown and the price
 // grid read different sources. The columns now derive from the SAME
-// Maintenance `sofaSizes` list (kv variants-config), numerically sorted.
+// Maintenance `sofaSizes` list (kv variants-config).
+//
+// Owner 2026-09-08: the price columns must follow the Sizes list VERBATIM —
+// a NAMED size (e.g. DEFAULT) gets a column too, not just numerics. So the
+// digits-only filter is gone (only blanks drop), the h-key regex is broadened
+// to match named keys (hDEFAULT), and the sort leads with numerics then names.
 // ---------------------------------------------------------------------------
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -36,12 +41,19 @@ test("SOFA price columns are built from the Maintenance sofaSizes list", () => {
   );
 });
 
-test("height list is cleaned, deduped, numerically sorted, with a fallback", () => {
+test("height list keeps every size, numerics-first sorted, with a fallback", () => {
   assert.match(src, /function sofaHeightsFromConfig\(/);
+  // Named sizes (DEFAULT) must NOT be filtered out — only blanks drop.
   assert.match(
     src,
-    /sort\(\(a, b\) => Number\(a\) - Number\(b\)\)/,
-    "sizes must sort numerically (20 before 24), not lexically",
+    /\.filter\(\(s\) => s\.length > 0\)/,
+    "sofaHeightsFromConfig must keep every non-blank size, not digits-only",
+  );
+  // Numeric sizes still sort ascending (20 before 24), named sizes trail.
+  assert.match(
+    src,
+    /if \(an && bn\) return Number\(a\) - Number\(b\);/,
+    "numeric sizes must sort numerically inside the combined sort",
   );
   assert.match(
     src,
@@ -53,8 +65,8 @@ test("height list is cleaned, deduped, numerically sorted, with a fallback", () 
 test("sort, filter, and price cells all follow the dynamic height keys", () => {
   assert.match(
     src,
-    /const H_COL_RE = \/\^h\(\\d\+\(\?:\\\.\\d\+\)\?\)\$\//,
-    "shared h-key regex must exist",
+    /const H_COL_RE = \/\^h\(\.\+\)\$\//,
+    "shared h-key regex must exist and match NAMED sizes (hDEFAULT), not digits-only",
   );
   // Sort + filter switches use the regex instead of per-height cases.
   assert.equal(

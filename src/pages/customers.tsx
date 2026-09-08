@@ -75,6 +75,7 @@ import {
 } from "./maintenance/SofaComboHistoryDialog";
 import { moneyFieldToSen } from "@/lib/money-field";
 import { useSofaSeatHeights } from "@/lib/use-sofa-seat-heights";
+import { sofaSeatLabel } from "@/lib/sofa-seat-heights";
 
 type CustomerMutationResponse =
   | { success: true; data: Customer }
@@ -2581,7 +2582,7 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
                     <th className="px-3 py-2 text-left font-semibold text-[#6B7280]">Tier</th>
                     {seatHeights.map((h) => (
                       <th key={h} className="px-3 py-2 text-right font-semibold text-[#6B7280]">
-                        {h}″
+                        {sofaSeatLabel(h)}
                       </th>
                     ))}
                     <th className="px-3 py-2 text-left font-semibold text-[#6B7280]">Effective</th>
@@ -2818,7 +2819,7 @@ function CustomerPriceHistoryDialog({
             if (!raw) continue;
             const num = Number(raw);
             if (!Number.isFinite(num) || num < 0) {
-              toast.error(`Invalid price for ${h}" ${t}: must be a non-negative number.`);
+              toast.error(`Invalid price for ${sofaSeatLabel(h)} ${t}: must be a non-negative number.`);
               setSaving(false);
               return;
             }
@@ -2980,7 +2981,7 @@ function CustomerPriceHistoryDialog({
                         {SOFA_HEIGHTS.map((h) => (
                           <tr key={h}>
                             <td className="px-2 py-1 text-[#1F1D1B] font-medium">
-                              {h}&quot;
+                              {sofaSeatLabel(h)}
                             </td>
                             {SOFA_TIERS.map((t) => (
                               <td key={t} className="px-1 py-1">
@@ -3125,7 +3126,7 @@ function CustomerPriceHistoryDialog({
                                       {SOFA_HEIGHTS.map((hh) => (
                                         <tr key={hh}>
                                           <td className="px-1 py-0 text-[#1F1D1B] font-medium">
-                                            {hh}&Prime;
+                                            {sofaSeatLabel(hh)}
                                           </td>
                                           {(
                                             [

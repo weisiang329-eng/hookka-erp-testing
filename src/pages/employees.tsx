@@ -1893,8 +1893,24 @@ function WorkingHoursTab({
                 // the daily total is flagged against.
                 const std = gWorker && gWorker.workingHoursPerDay > 0 ? gWorker.workingHoursPerDay : 9;
                 const gTotal = group.items.reduce((s, it) => s + (Number(it.row.hours) || 0), 0);
+                // "short" is an ATTENDANCE question — did the worker do a full day?
+                // — and the PUNCH answers it, NOT how the office split the hours
+                // across departments. When a clean in/out punch exists, judge the
+                // shortfall against its payable hours so a day whose department
+                // split sums under 9h (e.g. 0.66 + 7.79) does NOT show a false
+                // "short" when the punch proves a full day. No usable punch → fall
+                // back to the entered total. Owner 2026-09-08: 没有 short 却显示
+                // short,不可以有。 The box hours are untouched — this only moves the
+                // flag; OT still follows the logged total so a manual OT entry is
+                // not hidden.
+                const punchJudgeH = hoursFromPunch(
+                  first.row.clockIn,
+                  first.row.clockOut,
+                  attRulesFor(first.row.date),
+                );
+                const shortJudgeH = punchJudgeH !== null ? punchJudgeH : gTotal;
                 const over = gTotal > std + 0.01;
-                const short = !!gWorkerId && gTotal > 0.01 && gTotal < std - 0.01;
+                const short = !!gWorkerId && shortJudgeH > 0.01 && shortJudgeH < std - 0.01;
                 const totalCls = over
                   ? "bg-[#FAEFCB] text-[#9C6F1E]"
                   : short

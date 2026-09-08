@@ -52,15 +52,15 @@ Owns the whole workforce lifecycle: the **employee master** (workers + effective
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
 |---|---|---|
-| `EmployeesPage` (shell + tab switch) | `src/pages/employees.tsx:11599` | 9-tab admin host (default export, at file tail) |
+| `EmployeesPage` (shell + tab switch) | `src/pages/employees.tsx:11615` | 9-tab admin host (default export, at file tail) |
 | `WorkingHoursTab` | `src/pages/employees.tsx:1015` | Tab 1 — flat working-hours grid |
-| `EmployeeMasterTab` | `src/pages/employees.tsx:2391` | Tab 2 — worker master + salary |
-| `EfficiencyOverviewTab` | `src/pages/employees.tsx:3831` | Tab 3 — efficiency overview |
-| `DepartmentLaborTab` | `src/pages/employees.tsx:4396` | Dept labor cost breakdown |
-| `EmployeeDetailTab` | `src/pages/employees.tsx:5373` | Tab 4 — guard-unmounted detail |
-| `PayrollTab` | `src/pages/employees.tsx:6749` | Tab 5 — payroll drafts |
-| `LaborCostTab` | `src/pages/employees.tsx:8597` | Tab 5b — labor cost + DepartmentsManager |
-| `LeaveManagementTab` / `AttendanceTab` | `src/pages/employees.tsx:10240 / 11367` | Leave + attendance tabs |
+| `EmployeeMasterTab` | `src/pages/employees.tsx:2407` | Tab 2 — worker master + salary |
+| `EfficiencyOverviewTab` | `src/pages/employees.tsx:3847` | Tab 3 — efficiency overview |
+| `DepartmentLaborTab` | `src/pages/employees.tsx:4412` | Dept labor cost breakdown |
+| `EmployeeDetailTab` | `src/pages/employees.tsx:5389` | Tab 4 — guard-unmounted detail |
+| `PayrollTab` | `src/pages/employees.tsx:6765` | Tab 5 — payroll drafts |
+| `LaborCostTab` | `src/pages/employees.tsx:8613` | Tab 5b — labor cost + DepartmentsManager |
+| `LeaveManagementTab` / `AttendanceTab` | `src/pages/employees.tsx:10256 / 11383` | Leave + attendance tabs |
 | `computeMonthlyLabor` | `src/lib/labor-engine.ts:557` | THE payroll + cost engine (both divisors) |
 | `effectiveSalarySenForMonth` / `salaryAsOfSen` | `src/lib/labor-engine.ts:408 / 382` | Day-weighted effective salary |
 | `countElapsedWorkingDays` | `src/lib/labor-engine.ts:135` | Cost-side divisor (real Mon–Sat − holidays) |
@@ -84,11 +84,11 @@ Owns the whole workforce lifecycle: the **employee master** (workers + effective
 - **Migrations are inert** — `payroll_hour_deductions` (0152), `worker_salary_history` (0153) etc. reach prod only via runtime `ensurePendingMigrations` self-apply, not by replaying migration files on deploy.
 - **PINs are SHA-256, unsalted by design** (10^4–10^6 space; brute-force is throttled instead). A resigned/inactive worker is locked out of the ENTIRE app mid-session via `getWorker` (`worker.ts:160`), not just at login.
 - **camelCase DB columns fold to lowercase** and can silently return undefined (`clockinphoto ↛ clockInPhoto`); read at-risk cols dual-keyed `r.camelCase ?? r.snake_case`. New columns snake_case; a write to a camelCase col needs a `column-rename-map.json` entry.
-- **Employee Detail tab is intentionally guard-unmounted** (`{activeTab === "detail" && …}` inside `EmployeesPage`, `employees.tsx:11599`) — don't refactor to always-mounted.
+- **Employee Detail tab is intentionally guard-unmounted** (`{activeTab === "detail" && …}` inside `EmployeesPage`, `employees.tsx:11615`) — don't refactor to always-mounted.
 - **UI is 100% English** — no Chinese strings/comments. Add a new tab to BOTH the tab array and the `activeTab` switch inside `EmployeesPage`.
 
 ## Common tasks (mini-playbook)
-- **Add a field to the worker master** → snake_case column self-applied via `ensurePendingMigrations`; persist in `workers.ts POST /` (:279) and `PUT /:id` (:455); surface in `rowToWorker` (:192); render in `EmployeeMasterTab` (`employees.tsx:2391`). camelCase col → `column-rename-map.json` entry.
+- **Add a field to the worker master** → snake_case column self-applied via `ensurePendingMigrations`; persist in `workers.ts POST /` (:279) and `PUT /:id` (:455); surface in `rowToWorker` (:192); render in `EmployeeMasterTab` (`employees.tsx:2407`). camelCase col → `column-rename-map.json` entry.
 - **Change payroll math** → edit `computeMonthlyLabor` (`labor-engine.ts:557`) ONLY; both `payslips.ts` (generate :1246, projected :855) call it. Verify with `tests/labor-engine.test.mjs`; keep weekday-only OT byte-identical.
 - **Adjust a statutory rate** → `calcStatutory` (`payslips.ts:295`); toggles live per-worker in the master.
 - **Touch the worker app** → gate every new endpoint with `getWorker` (`worker.ts:160`); add the route to `worker.ts` and the screen under `src/pages/worker/`.

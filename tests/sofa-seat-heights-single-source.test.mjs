@@ -42,27 +42,29 @@ test('duplicates collapse', () => {
   assert.deepEqual(sofaSeatHeights({ sofaSizes: ['24', '24', '24"'] }), ['24']);
 });
 
-test('a non-measurement is dropped from the heights', () => {
-  // The owner added "DEFAULT" and nothing happened. It is dropped here because
-  // the price columns are keyed h<number> — but see the next test: it must be
-  // REPORTABLE, not merely swallowed.
-  assert.deepEqual(sofaSeatHeights({ sofaSizes: ['24', 'DEFAULT', '28'] }), ['24', '28']);
+test('a NAMED size is KEPT (owner 2026-09-08), sorted after the numerics', () => {
+  // The owner added "DEFAULT" and wants it to become a priceable column like any
+  // other size. It is no longer dropped — numerics lead, named sizes trail.
+  assert.deepEqual(
+    sofaSeatHeights({ sofaSizes: ['24', 'DEFAULT', '28'] }),
+    ['24', '28', 'DEFAULT'],
+  );
 });
 
-test('and it can be NAMED, so a screen can say what it ignored', () => {
-  assert.deepEqual(unusableSofaSizes({ sofaSizes: ['24', 'DEFAULT', '28"', 'N/A'] }), [
-    'DEFAULT',
-    'N/A',
-  ]);
+test('nothing is "unusable" any more — every non-blank size is a valid column', () => {
+  assert.deepEqual(unusableSofaSizes({ sofaSizes: ['24', 'DEFAULT', '28"', 'N/A'] }), []);
   assert.deepEqual(unusableSofaSizes({ sofaSizes: ['24', '28'] }), []);
 });
 
 test('an empty or missing config degrades to the usual set, never to nothing', () => {
   // A screen with no columns reads as "this product has no prices", which is a
   // different and worse lie than showing the usual six.
-  for (const cfg of [null, undefined, {}, { sofaSizes: [] }, { sofaSizes: ['DEFAULT'] }]) {
+  for (const cfg of [null, undefined, {}, { sofaSizes: [] }]) {
     assert.deepEqual(sofaSeatHeights(cfg), FALLBACK_SOFA_SEAT_HEIGHTS, JSON.stringify(cfg));
   }
+  // A list of only a named size IS that list — a non-empty config never falls
+  // back (owner 2026-09-08: named sizes are real, priceable columns).
+  assert.deepEqual(sofaSeatHeights({ sofaSizes: ['DEFAULT'] }), ['DEFAULT']);
 });
 
 test('a junk config does not throw', () => {

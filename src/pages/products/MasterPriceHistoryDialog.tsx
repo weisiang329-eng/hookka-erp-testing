@@ -20,6 +20,7 @@ import { AlertTriangle, Loader2, Plus, Trash2, X } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 import { OLD_SO_SAFE_BANNER } from "./MaintenanceConfigHistoryDialog";
 import { useSofaSeatHeights } from "@/lib/use-sofa-seat-heights";
+import { sofaSeatLabel } from "@/lib/sofa-seat-heights";
 
 type SeatHeightTier = {
   height: string;
@@ -192,7 +193,7 @@ export function MasterPriceHistoryDialog({
             if (!raw) continue;
             const num = Number(raw);
             if (!Number.isFinite(num) || num < 0) {
-              alert(`Invalid price for ${h}" ${t}: must be a non-negative number.`);
+              alert(`Invalid price for ${sofaSeatLabel(h)} ${t}: must be a non-negative number.`);
               return;
             }
             rows.push({ height: h, priceSen: Math.round(num * 100), tier: t });
@@ -377,7 +378,7 @@ export function MasterPriceHistoryDialog({
                         {SOFA_HEIGHTS.map((h) => (
                           <tr key={h}>
                             <td className="px-2 py-1 text-[#1F1D1B] font-medium">
-                              {h}&quot;
+                              {sofaSeatLabel(h)}
                             </td>
                             {SOFA_TIERS.map((t) => (
                               <td key={t} className="px-1 py-1">
@@ -517,7 +518,7 @@ export function MasterPriceHistoryDialog({
                                     {SOFA_HEIGHTS.map((hh) => (
                                       <tr key={hh}>
                                         <td className="px-1 py-0 text-[#1F1D1B] font-medium">
-                                          {hh}&Prime;
+                                          {sofaSeatLabel(hh)}
                                         </td>
                                         {(
                                           [

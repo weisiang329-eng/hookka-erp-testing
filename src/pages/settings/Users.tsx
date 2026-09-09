@@ -67,7 +67,7 @@ import {
   Layers,
   ChevronDown,
   ChevronRight,
-  
+  ShieldOff,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { copyText } from "@/lib/copy-text";
@@ -913,6 +913,42 @@ export default function UsersPage() {
     }
   };
 
+  // Clear a user's two-factor enrolment (SUPER_ADMIN only, server-side).
+  //
+  // The last resort when someone has lost both their authenticator and their
+  // recovery codes. Confirmed rather than one-click: this removes a second
+  // factor, which is precisely what an attacker on a stolen admin session
+  // would want to do, so it should never happen by a mis-click.
+  const reset2fa = async (u: UserRow) => {
+    const ok = await confirm({
+      title: "Reset two-factor sign-in?",
+      message:
+        `This turns off two-factor sign-in for ${u.email} and signs them out ` +
+        "everywhere.\n\nThey will sign in with just their password until they " +
+        "enrol again, so only do this once you are sure it is really them " +
+        "asking.",
+      confirmLabel: "Reset two-factor",
+      cancelLabel: "Cancel",
+    });
+    if (!ok) return;
+    try {
+      const res = await fetch(`/api/users/${u.id}/reset-2fa`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const json = (await res.json()) as ApiEnvelope;
+      if (json.success) {
+        showFlash("ok", `Two-factor reset for ${u.email}`);
+        fetchUsers();
+      } else {
+        showFlash("err", json.error ?? "Failed to reset two-factor");
+      }
+    } catch {
+      showFlash("err", "Network error resetting two-factor");
+    }
+  };
+
   const submitReset = async () => {
     if (!resetForUser) return;
     setResetError(null);
@@ -1680,6 +1716,17 @@ export default function UsersPage() {
               title="Reset password"
             >
               <KeyRound className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                void reset2fa(u);
+              }}
+              title="Reset two-factor sign-in"
+            >
+              <ShieldOff className="h-3.5 w-3.5" />
             </Button>
             <Button
               variant="ghost"

@@ -39,6 +39,11 @@ export default function Verify2FAPage() {
   const state = (location.state ?? {}) as HandoffState;
 
   const [code, setCode] = useState("");
+  // "totp" = 6-digit app code, "recovery" = one of the single-use codes issued
+  // at enrolment. The server decides by shape, so this only changes what the
+  // screen asks for — but a prompt that only mentions an authenticator is, to
+  // someone who has lost their phone, a dead end with no visible way out.
+  const [mode, setMode] = useState<"totp" | "recovery">("totp");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -59,7 +64,11 @@ export default function Verify2FAPage() {
     e.preventDefault();
     const trimmed = code.trim();
     if (!trimmed) {
-      setError("Enter the 6-digit code from your authenticator app.");
+      setError(
+        mode === "totp"
+          ? "Enter the 6-digit code from your authenticator app."
+          : "Enter one of your recovery codes.",
+      );
       return;
     }
     setLoading(true);
@@ -104,26 +113,31 @@ export default function Verify2FAPage() {
       <form style={styles.card} onSubmit={onSubmit}>
         <h1 style={styles.title}>Two-factor sign-in</h1>
         <p style={styles.sub}>
-          Enter the 6-digit code from your authenticator app. You can also use
-          one of your recovery codes.
+          {mode === "totp"
+            ? "Enter the 6-digit code from your authenticator app."
+            : "Enter one of the recovery codes you saved when you set up two-factor sign-in. Each code works once."}
         </p>
 
         <label style={styles.label} htmlFor="totp-code">
-          Authentication code
+          {mode === "totp" ? "Authentication code" : "Recovery code"}
         </label>
         <input
           id="totp-code"
           ref={inputRef}
-          style={styles.input}
           value={code}
           onChange={(e) => setCode(e.target.value)}
           // Not type="number": recovery codes are alphanumeric, and a number
           // input strips leading zeros from a code like "004821".
-          inputMode="numeric"
-          autoComplete="one-time-code"
+          inputMode={mode === "totp" ? "numeric" : "text"}
+          autoComplete={mode === "totp" ? "one-time-code" : "off"}
           autoFocus
           disabled={loading}
-          placeholder="000000"
+          placeholder={mode === "totp" ? "000000" : "XXXX-XXXX"}
+          style={
+            mode === "totp"
+              ? styles.input
+              : { ...styles.input, letterSpacing: "0.12em", fontSize: 16 }
+          }
         />
 
         {error ? <div style={styles.error}>{error}</div> : null}
@@ -131,6 +145,29 @@ export default function Verify2FAPage() {
         <button type="submit" style={styles.button} disabled={loading}>
           {loading ? "Verifying…" : "Verify"}
         </button>
+
+        <button
+          type="button"
+          style={styles.link}
+          onClick={() => {
+            setMode(mode === "totp" ? "recovery" : "totp");
+            setCode("");
+            setError(null);
+            inputRef.current?.focus();
+          }}
+          disabled={loading}
+        >
+          {mode === "totp"
+            ? "Lost your phone? Use a recovery code"
+            : "Use my authenticator app instead"}
+        </button>
+
+        {mode === "recovery" && (
+          <p style={styles.help}>
+            No recovery codes either? An administrator has to reset two-factor
+            sign-in on your account before you can get back in.
+          </p>
+        )}
 
         <button
           type="button"
@@ -209,6 +246,13 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 16,
     fontWeight: 600,
     padding: "14px 16px",
+  },
+  help: {
+    color: "#8C857C",
+    fontSize: 13,
+    lineHeight: 1.5,
+    margin: "4px 0 0",
+    textAlign: "center",
   },
   link: {
     background: "none",

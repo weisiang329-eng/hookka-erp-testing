@@ -31,6 +31,7 @@ import {
   clearLoginRateLimit,
   clientIp,
 } from "../lib/rate-limit";
+import { sessionInsert } from "../lib/session-registry";
 import { emitAudit } from "../lib/audit";
 import { issuePendingTotpToken } from "../lib/totp-pending";
 import {
@@ -299,9 +300,12 @@ app.post("/login", async (c) => {
 
   // Atomic: write session + update lastLoginAt in one batch.
   await c.var.DB.batch([
-    c.var.DB.prepare(
-      "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
-    ).bind(token, user.id, now.toISOString(), expires.toISOString()),
+    await sessionInsert(c.var.DB, c, {
+      token,
+      userId: user.id,
+      createdAt: now.toISOString(),
+      expiresAt: expires.toISOString(),
+    }),
     c.var.DB.prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?").bind(
       now.toISOString(),
       user.id,
@@ -1255,9 +1259,12 @@ app.post("/accept-invite", async (c) => {
     c.var.DB.prepare(
       "UPDATE user_invites SET acceptedAt = ? WHERE token = ?",
     ).bind(nowIso, token),
-    c.var.DB.prepare(
-      "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
-    ).bind(sessionToken, userId, nowIso, sessionExpires),
+    await sessionInsert(c.var.DB, c, {
+      token: sessionToken,
+      userId,
+      createdAt: nowIso,
+      expiresAt: sessionExpires,
+    }),
   ]);
 
   // Sprint 7: set both auth cookies; body returns user + csrfToken only.

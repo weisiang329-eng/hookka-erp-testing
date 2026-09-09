@@ -624,6 +624,79 @@ app.delete("/:id", async (c) => {
 
 // POST /api/users/:id/reset-password — admin resets another user's password
 // Body: { newPassword }
+// ---------------------------------------------------------------------------
+// POST /api/users/:id/reset-2fa — clear a user's two-factor enrolment.
+//
+// WHY THIS EXISTS
+// The sign-in screen tells a locked-out user to "ask an admin to reset your
+// 2FA". Until now no administrator could: there was no endpoint and no screen,
+// so the only way back in was hand-edited SQL against production. Recovery
+// codes cover the common case; this covers the one where those are gone too.
+//
+// Nulling all three columns returns the account to "never enrolled": the next
+// sign-in is password-only and the user can enrol again from /setup-2fa. The
+// secret is NOT reused — a fresh one is generated at setup-start — so a stolen
+// old authenticator entry is dead the moment this runs.
+//
+// Sessions are purged for the same reason the password reset purges them: if
+// the lockout was caused by someone else holding the account, leaving their
+// session alive would hand it straight back.
+//
+// SUPER_ADMIN only, and audited. Removing someone's second factor is exactly
+// the move an attacker with a stolen admin session would make, so it must
+// leave a trace with a name on it.
+// ---------------------------------------------------------------------------
+app.post("/:id/reset-2fa", async (c) => {
+  const denied = await requirePermission(c, "users", "update");
+  if (denied) return denied;
+  const su = requireSuperAdmin(c);
+  if (su) return su;
+
+  const id = c.req.param("id");
+  const existing = await c.var.DB.prepare(
+    "SELECT id, email, totpEnrolledAt FROM users WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; email: string; totpEnrolledAt: string | null }>();
+  if (!existing) {
+    return c.json({ success: false, error: "User not found" }, 404);
+  }
+
+  try {
+    await c.var.DB.prepare(
+      "UPDATE users SET totpSecret = NULL, totpEnrolledAt = NULL, totpRecoveryHashes = NULL WHERE id = ?",
+    )
+      .bind(id)
+      .run();
+  } catch (err) {
+    // Surface it. A silent failure here would tell the admin the user can sign
+    // in again when they still cannot.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[users.reset-2fa] failed for ${id}: ${msg}`, err);
+    return c.json(
+      { success: false, error: `Could not reset two-factor: ${msg}` },
+      500,
+    );
+  }
+
+  const { purgeUserSessions } = await import("../lib/auth-middleware");
+  await purgeUserSessions(c.var.DB, c.env.SESSION_CACHE, id);
+
+  try {
+    await emitAudit(c, {
+      resource: "auth-totp",
+      resourceId: id,
+      action: "totp-reset",
+      before: { enrolled: existing.totpEnrolledAt !== null },
+      after: { enrolled: false, email: existing.email },
+    });
+  } catch {
+    /* audit must not block the reset — the user is locked out right now */
+  }
+
+  return c.json({ success: true });
+});
+
 app.post("/:id/reset-password", async (c) => {
   // RBAC gate (P3.3-followup) — admin password reset is a users:update.
   const denied = await requirePermission(c, "users", "update");

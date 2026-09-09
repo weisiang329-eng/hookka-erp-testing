@@ -15,9 +15,10 @@
 // location.state.severity === "hard" (the FE only sends hard severity for
 // newly-minted super admins per the soft-enforcement policy).
 //
-// Recovery codes are deferred to a future enhancement — the spec says ship
-// without them now, prompt user to use /api/auth/totp/disable + /enroll later
-// if they want recovery codes.
+// Recovery codes (2026-09-09). setup-confirm now returns eight single-use
+// codes. They are shown ONCE, here, and the user must tick "I've saved these"
+// before continuing — without them a lost authenticator means a lockout with
+// no admin-side reset to fall back on.
 // ---------------------------------------------------------------------------
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -32,7 +33,7 @@ type StartResponse =
   | { success: false; error?: string };
 
 type ConfirmResponse =
-  | { success: true; enabledAt: string }
+  | { success: true; enabledAt: string; recoveryCodes?: string[] }
   | { success: false; error?: string };
 
 export default function Setup2FAPage() {
@@ -53,6 +54,13 @@ export default function Setup2FAPage() {
   const [code, setCode] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [codeError, setCodeError] = useState<string | null>(null);
+
+  // Set once setup-confirm succeeds. While non-null the page shows the codes
+  // instead of the QR step — 2FA is already ON at this point, so there is no
+  // "cancel"; the only way forward is to acknowledge them.
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
+  const [acked, setAcked] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   // Step 1: kick off setup as soon as the page mounts. We fire-and-forget
   // the request — if it fails the user sees the error and can refresh.
@@ -114,6 +122,12 @@ export default function Setup2FAPage() {
         );
         return;
       }
+      // Codes are in this response and nowhere else. Show them rather than
+      // navigating away — leaving now loses them permanently.
+      if (json.recoveryCodes?.length) {
+        setRecoveryCodes(json.recoveryCodes);
+        return;
+      }
       navigate("/dashboard", { replace: true });
     } catch {
       setCodeError("Network error. Try again in a moment.");
@@ -151,6 +165,139 @@ export default function Setup2FAPage() {
           border: "1px solid rgba(139, 122, 78, 0.2)",
         }}
       >
+        {/* ---------------------------------------------------------------
+            Recovery codes. Rendered INSTEAD of the setup flow once
+            setup-confirm has returned them: 2FA is already enabled by this
+            point, so there is nothing left to cancel, and navigating away
+            without saving them is the failure we are trying to prevent.
+            --------------------------------------------------------------- */}
+        {recoveryCodes && (
+          <div>
+            <h1
+              className="text-2xl font-semibold mb-2"
+              style={{ color: "#F4EFE3" }}
+            >
+              Save your recovery codes
+            </h1>
+            <p
+              className="text-sm mb-4"
+              style={{ color: "rgba(244,239,227,0.65)" }}
+            >
+              Two-factor sign-in is now on. If you ever lose your phone, one of
+              these codes gets you back in. Each works <strong>once</strong>.
+            </p>
+            <p
+              className="text-sm mb-5 rounded p-3"
+              style={{
+                background: "rgba(220,38,38,0.12)",
+                border: "1px solid rgba(220,38,38,0.35)",
+                color: "#FCA5A5",
+              }}
+            >
+              This is the only time they are shown. They are stored hashed —
+              nobody, including an administrator, can retrieve them later.
+            </p>
+
+            <div
+              className="grid grid-cols-2 gap-2 rounded p-4 mb-4"
+              style={{
+                background: "rgba(244,239,227,0.06)",
+                border: "1px solid rgba(139,122,78,0.25)",
+              }}
+            >
+              {recoveryCodes.map((rc) => (
+                <code
+                  key={rc}
+                  className="text-sm tracking-wider select-all"
+                  style={{ color: "#F4EFE3" }}
+                >
+                  {rc}
+                </code>
+              ))}
+            </div>
+
+            <div className="flex gap-3 mb-5">
+              <button
+                type="button"
+                className="text-sm px-3 py-2 rounded"
+                style={{
+                  background: "rgba(244,239,227,0.08)",
+                  color: "#F4EFE3",
+                }}
+                onClick={() => {
+                  void navigator.clipboard
+                    .writeText(recoveryCodes.join("\n"))
+                    .then(() => setCopied(true))
+                    .catch(() => setCopied(false));
+                }}
+              >
+                {copied ? "Copied" : "Copy all"}
+              </button>
+              <button
+                type="button"
+                className="text-sm px-3 py-2 rounded"
+                style={{
+                  background: "rgba(244,239,227,0.08)",
+                  color: "#F4EFE3",
+                }}
+                onClick={() => {
+                  // Blob + object URL rather than a data: URI so the file name
+                  // is ours and the content is not size-capped by the URL.
+                  const blob = new Blob(
+                    [
+                      "Hookka ERP — two-factor recovery codes\n" +
+                        "Each code works once. Keep them somewhere safe and private.\n\n" +
+                        recoveryCodes.join("\n") +
+                        "\n",
+                    ],
+                    { type: "text/plain" },
+                  );
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = "hookka-recovery-codes.txt";
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+              >
+                Download
+              </button>
+            </div>
+
+            <label
+              className="flex items-start gap-2 text-sm mb-5 cursor-pointer"
+              style={{ color: "rgba(244,239,227,0.75)" }}
+            >
+              <input
+                type="checkbox"
+                checked={acked}
+                onChange={(e) => setAcked(e.target.checked)}
+                className="mt-1"
+              />
+              <span>
+                I have saved these codes somewhere I can get to without my
+                phone.
+              </span>
+            </label>
+
+            <button
+              type="button"
+              disabled={!acked}
+              onClick={() => navigate("/dashboard", { replace: true })}
+              className="w-full py-3 rounded font-medium"
+              style={{
+                background: acked ? "#8B7A4E" : "rgba(139,122,78,0.3)",
+                color: acked ? "#0F0E0C" : "rgba(244,239,227,0.4)",
+                cursor: acked ? "pointer" : "not-allowed",
+              }}
+            >
+              Continue to dashboard
+            </button>
+          </div>
+        )}
+
+        {!recoveryCodes && (
+        <>
         <h1
           className="text-2xl font-semibold mb-2"
           style={{ color: "#F4EFE3" }}
@@ -272,6 +419,8 @@ export default function Setup2FAPage() {
             </button>
           )}
         </form>
+        </>
+        )}
       </div>
     </div>
   );

@@ -14,7 +14,9 @@ import {
   Clock,
   Calendar,
   DollarSign,
+  ShieldCheck,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 // ---- Types ----
 
@@ -232,6 +234,7 @@ const tabs = [
   { id: "numbering", label: "Numbering", icon: Hash },
   { id: "production", label: "Production", icon: Factory },
   { id: "system", label: "System", icon: Monitor },
+  { id: "security", label: "Security", icon: ShieldCheck },
 ] as const;
 
 type TabId = (typeof tabs)[number]["id"];
@@ -278,6 +281,39 @@ type LoadState = "loading" | "uninitialized" | "ready";
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabId>("company");
+
+  // Own two-factor status for the Security tab. null = still loading.
+  const navigate = useNavigate();
+  const [totpStatus, setTotpStatus] = useState<"on" | "off" | null>(null);
+
+  // Re-read whenever the Security tab is opened rather than once on mount:
+  // the user may have gone to /setup-2fa, enrolled, and come back, and a
+  // stale "not set up" here would invite them to enrol twice.
+  useEffect(() => {
+    if (activeTab !== "security") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/totp/status", {
+          credentials: "include",
+        });
+        const json = (await res.json()) as {
+          success?: boolean;
+          data?: { enrolled?: boolean };
+        };
+        if (cancelled) return;
+        // On a failed lookup show "off" rather than hanging on "Checking…" —
+        // the worst case is offering setup to someone already enrolled, and
+        // /setup-start refuses that with a clear message.
+        setTotpStatus(json.success && json.data?.enrolled ? "on" : "off");
+      } catch {
+        if (!cancelled) setTotpStatus("off");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab]);
   const [toastState, setToastState] = useState<"success" | "error" | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
 
@@ -825,6 +861,70 @@ export default function SettingsPage() {
     </div>
   );
 
+  // ---------------------------------------------------------------------
+  // Security tab — the account holder's own two-factor status.
+  //
+  // POLICY (owner, 2026-09-09): a user may turn two-factor sign-in ON for
+  // themselves, but only an administrator may turn it OFF. That asymmetry is
+  // the point — "let me disable my own 2FA" is the first thing an attacker
+  // does with a stolen session, and it undoes the protection silently. Making
+  // removal an admin action means it leaves an audit row with a name on it.
+  //
+  // So there is no disable button here by design. Someone who has genuinely
+  // lost their authenticator uses a recovery code, and failing that asks an
+  // admin, who has the reset button in Settings → Users.
+  // ---------------------------------------------------------------------
+  const renderSecurityTab = () => (
+    <Card>
+      <CardHeader>
+        <CardTitle>Two-factor sign-in</CardTitle>
+        <CardDescription>
+          An extra step at sign-in: after your password, your phone shows a
+          6-digit code that changes every 30 seconds. A stolen password is not
+          enough on its own.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {totpStatus === null && (
+          <p className="text-sm text-muted-foreground">Checking…</p>
+        )}
+
+        {totpStatus === "on" && (
+          <>
+            <p className="text-sm">
+              <span className="font-medium text-green-700">
+                Two-factor sign-in is on
+              </span>{" "}
+              for your account.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              If you lose your phone, use one of the recovery codes you saved
+              when you set it up — each works once. If those are gone too, ask
+              an administrator to reset it for you. You cannot turn it off
+              yourself.
+            </p>
+          </>
+        )}
+
+        {totpStatus === "off" && (
+          <>
+            <p className="text-sm text-muted-foreground">
+              Two-factor sign-in is not set up on your account.
+            </p>
+            <Button onClick={() => navigate("/setup-2fa")}>
+              <ShieldCheck className="h-4 w-4 mr-2" />
+              Enable two-factor sign-in
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              You will scan a QR code with an authenticator app, then be shown
+              eight recovery codes. Save those — they are shown once.
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+
   const renderSystemTab = () => {
     const MONTHS = [
       "January", "February", "March", "April", "May", "June",
@@ -1064,6 +1164,7 @@ export default function SettingsPage() {
       {activeTab === "numbering" && renderNumberingTab()}
       {activeTab === "production" && renderProductionTab()}
       {activeTab === "system" && renderSystemTab()}
+      {activeTab === "security" && renderSecurityTab()}
     </div>
   );
 }

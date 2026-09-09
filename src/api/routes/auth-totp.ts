@@ -46,6 +46,7 @@ import {
   checkLoginRateLimit,
   clearLoginRateLimit,
 } from "../lib/rate-limit";
+import { requireSuperAdmin } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 import {
   sessionCookieHeader,
@@ -501,11 +502,32 @@ app.post("/setup-confirm", async (c) => {
   }
 
   const nowIso = new Date().toISOString();
+
+  // 2026-09-09 — recovery codes are issued HERE, not at setup-start.
+  //
+  // The soft-enforcement flow originally shipped without them ("deferred to a
+  // future enhancement"), which left every user who enrolled through this
+  // screen with no way back in if they lost their authenticator — and no
+  // admin-side reset exists either. The login screen's advice to "ask an admin
+  // to reset your 2FA" pointed at a door that was never built.
+  //
+  // Issuing at CONFIRM rather than START is deliberate: the user has just
+  // proved they can produce a code, so the codes go to someone who actually
+  // completed enrolment. An abandoned setup leaves nothing behind.
+  //
+  // Only hashes are stored. The plaintext is returned in this response and
+  // never again — /login-verify burns each hash as it is used, so a code works
+  // exactly once.
+  const { plaintext: recoveryCodes, hashes } = await generateRecoveryCodes(
+    userId,
+    8,
+  );
+
   try {
     await c.var.DB.prepare(
-      "UPDATE users SET totpEnrolledAt = ? WHERE id = ?",
+      "UPDATE users SET totpEnrolledAt = ?, totpRecoveryHashes = ? WHERE id = ?",
     )
-      .bind(nowIso, userId)
+      .bind(nowIso, JSON.stringify(hashes), userId)
       .run();
   } catch (err) {
     console.warn(
@@ -532,7 +554,8 @@ app.post("/setup-confirm", async (c) => {
     /* swallow */
   }
 
-  return c.json({ success: true, enabledAt: nowIso });
+  // ⚠️ recoveryCodes is the ONLY time the plaintext leaves the server.
+  return c.json({ success: true, enabledAt: nowIso, recoveryCodes });
 });
 
 // ----- POST /api/auth/totp/dismiss-prompt ----------------------------------
@@ -540,6 +563,30 @@ app.post("/setup-confirm", async (c) => {
 // login check sees that the user just dismissed and skips the prompt for the
 // 24h cool-off window. Returns 200 even if the audit write fails — the user
 // shouldn't be stuck in a modal because of a journal hiccup.
+// ----- GET /api/auth/totp/status -------------------------------------------
+// Auth-required. Returns whether the CALLING user has two-factor enrolled.
+// Deliberately says nothing about anyone else — this answers "am I protected?",
+// not "who isn't". Settings → Security renders from it.
+app.get("/status", async (c) => {
+  const userId = ctxUserId(c);
+  if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
+
+  const row = await c.var.DB.prepare(
+    "SELECT totpEnrolledAt FROM users WHERE id = ?",
+  )
+    .bind(userId)
+    .first<{ totpEnrolledAt: string | null }>();
+  if (!row) return c.json({ success: false, error: "User not found" }, 404);
+
+  return c.json({
+    success: true,
+    data: {
+      enrolled: row.totpEnrolledAt !== null,
+      enrolledAt: row.totpEnrolledAt,
+    },
+  });
+});
+
 app.post("/dismiss-prompt", async (c) => {
   const userId = ctxUserId(c);
   if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
@@ -562,9 +609,40 @@ app.post("/dismiss-prompt", async (c) => {
 
 // ----- POST /api/auth/totp/disable -----------------------------------------
 // Auth-required + re-auth: body { password }. Nulls out the TOTP columns.
+//
+// 2026-09-09 POLICY CHANGE (owner). Self-service disable is CLOSED. A user may
+// switch two-factor on for their own account but may not switch it off.
+//
+// The reason is the threat this feature exists for: someone holding a stolen
+// session. Self-disable hands them a one-click way to strip the second factor
+// off the account and keep it — quietly, with the victim's own credentials.
+// Making removal an administrator action means it always leaves a `totp-reset`
+// audit row naming who did it.
+//
+// A user who has genuinely lost their authenticator uses a recovery code; if
+// those are gone too, an admin resets them from Settings → Users, which calls
+// POST /api/users/:id/reset-2fa.
+//
+// The endpoint is kept (rather than deleted) so an admin can still rotate their
+// own enrolment, and so an old client calling it gets an explanation instead of
+// a 404.
 app.post("/disable", async (c) => {
   const userId = ctxUserId(c);
   if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
+
+  // Same helper the rest of the codebase uses, so the role casing and the
+  // 403 shape stay consistent. Applies to the caller's own account too.
+  const su = requireSuperAdmin(c);
+  if (su) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Two-factor sign-in can only be turned off by an administrator. If you have lost your authenticator, use a recovery code, or ask an admin to reset it.",
+      },
+      403,
+    );
+  }
 
   const body = (await c.req.json().catch(() => ({}))) as {
     password?: string;

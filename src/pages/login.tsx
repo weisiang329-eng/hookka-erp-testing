@@ -342,15 +342,29 @@ export default function LoginPage() {
         );
         return;
       }
-      // 2FA hard-gate response ({ success:true, totpRequired, userId }) carries
-      // no `data`. The login-verify step isn't built (BUG-2026-08-04-006), so
-      // handle it explicitly instead of crashing on json.data.user. The server
-      // gate is currently disabled, but a stale worker / future re-enable must
-      // never white-screen the login page again.
-      if ("totpRequired" in json || !("data" in json) || !json.data?.user) {
-        setError(
-          "Two-factor sign-in isn't available yet. Ask an admin to reset your 2FA, then sign in with your password.",
-        );
+      // 2FA hard-gate response ({ success:true, totpRequired, userId,
+      // pendingToken }) carries no `data` — the session is issued by the
+      // login-verify step, not by /login.
+      if ("totpRequired" in json) {
+        // Hand off to the code-entry step. `pendingToken` is the server's
+        // proof that the password step passed — /api/auth/totp/login-verify
+        // refuses without it (BUG-2026-08-13-101), so it must ride along.
+        // `replace: true` keeps the password screen out of history, so Back
+        // from the code screen doesn't resubmit credentials.
+        navigate("/verify-2fa", {
+          replace: true,
+          state: {
+            userId: json.userId,
+            pendingToken: json.pendingToken,
+            rememberMe,
+          },
+        });
+        return;
+      }
+      if (!("data" in json) || !json.data?.user) {
+        // Success with no user blob and no 2FA gate — shouldn't happen, but
+        // handle it rather than white-screening on json.data.user.
+        setError("Sign-in failed unexpectedly. Please try again.");
         return;
       }
       // Sprint 7: only the user blob lands in client storage; the session

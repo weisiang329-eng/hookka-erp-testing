@@ -381,7 +381,7 @@ app.post("/login", async (c) => {
 // (reading 'user')"). A SUPER_ADMIN (nico) locked himself out exactly this way.
 // Until the verify flow ships, disable BOTH the hard gate AND the soft prompt
 // that lures admins into enrolling. Flip back to true when login-verify exists.
-const TOTP_LOGIN_ENFORCEMENT_ENABLED = false;
+const TOTP_LOGIN_ENFORCEMENT_ENABLED = true;
 const TOTP_HARD_ENFORCE_CUTOFF_MS = Date.parse("2026-05-28T00:00:00.000Z");
 const TOTP_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
 const TOTP_DISMISS_COOLOFF_MS = 24 * 60 * 60 * 1000;

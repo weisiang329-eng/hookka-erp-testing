@@ -42,6 +42,10 @@ const InviteAccept = lazy(() => import('./pages/InviteAccept'))
 // credential needed for /reset-password.
 const ForgotPassword = lazy(() => import('./pages/forgot-password'))
 const ResetPassword = lazy(() => import('./pages/reset-password'))
+// Two-factor sign-in step 2 — PUBLIC. Reached from /login when the password
+// verified but the account has TOTP enrolled; the handoff state carries the
+// pendingToken that /api/auth/totp/login-verify requires.
+const Verify2FA = lazy(() => import('./pages/verify-2fa'))
 
 // Mobile (phone) app — NEW additive UI shell mounted at /m. Reuses the SAME
 // cookie session as the dashboard (gated by RequireAuth below); renders its own
@@ -93,6 +97,8 @@ export const router = createBrowserRouter([
   // Self-service password reset — PUBLIC (no session required, token is in URL)
   { path: '/forgot-password', element: <S><ForgotPassword /></S> },
   { path: '/reset-password', element: <S><ResetPassword /></S> },
+  // Two-factor sign-in step 2 — PUBLIC (no session yet; the pendingToken is the credential)
+  { path: '/verify-2fa', element: <S><Verify2FA /></S> },
 
   // Invite acceptance (standalone, no auth — the token IS the credential)
   { path: '/invite/:token', element: <S><InviteAccept /></S> },

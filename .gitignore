@@ -61,3 +61,9 @@ scripts/verify-*.ts
 # Scratch space for one-off audit / backfill scripts. Never part of the app —
 # these carry DB connection strings and get swept into unrelated commits.
 tmp/
+
+# Local dev helpers — machine-specific, never part of the app.
+# dev.ps1 sets the Hyperdrive local connection strings from .dev.vars and
+# starts wrangler; scripts/_dbcheck.mjs is a throwaway connectivity test.
+dev.ps1
+scripts/_dbcheck.mjs

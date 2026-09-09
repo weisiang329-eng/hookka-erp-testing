@@ -15,7 +15,7 @@
     "lint:scripts": "eslint scripts",
     "lint:fix": "eslint . --fix",
     "preview": "vite preview",
-    "dev:worker": "wrangler pages dev --compatibility-date=2026-04-01 --port 8787 -- vite",
+    "dev:worker": "npm run build && wrangler pages dev --compatibility-date=2026-04-01 --port 8787",
     "deploy": "npm run build && wrangler pages deploy dist",
     "db:migrate:supabase": "node scripts/apply-postgres-migrations-incremental.mjs",
     "db:migrate:supabase:dry": "node scripts/apply-postgres-migrations-incremental.mjs --dry-run",

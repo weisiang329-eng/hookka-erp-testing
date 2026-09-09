@@ -34,6 +34,7 @@ import {
 import { checkLoginRateLimit, clientIp } from "../lib/rate-limit";
 import { emitAudit } from "../lib/audit";
 import { CSRF_COOKIE } from "../lib/auth-middleware";
+import { sessionInsert } from "../lib/session-registry";
 
 const app = new Hono<Env>();
 
@@ -176,11 +177,12 @@ app.get("/google/callback", async (c) => {
   const now = new Date();
   const expires = new Date(now.getTime() + SESSION_TTL_MS);
   await c.var.DB.batch([
-    c.var.DB
-      .prepare(
-        "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
-      )
-      .bind(sessionToken, linked.userId, now.toISOString(), expires.toISOString()),
+    await sessionInsert(c.var.DB, c, {
+      token: sessionToken,
+      userId: linked.userId,
+      createdAt: now.toISOString(),
+      expiresAt: expires.toISOString(),
+    }),
     c.var.DB
       .prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?")
       .bind(now.toISOString(), linked.userId),

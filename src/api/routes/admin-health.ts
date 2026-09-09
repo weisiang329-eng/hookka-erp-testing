@@ -1294,7 +1294,7 @@ app.get("/audit-feed", async (c) => {
            resource, resourceId, action, source, ts
       FROM audit_events
      WHERE orgId = ?
-       AND ts > NOW() - INTERVAL '${pgInterval}'
+       AND ts::timestamptz > NOW() - INTERVAL '${pgInterval}'
   `;
   if (resourceFilter) {
     sql += " AND resource = ?";
@@ -1453,7 +1453,7 @@ app.get("/security-events", async (c) => {
              resource, resourceId, action, source, ipAddress, ts
         FROM audit_events
        WHERE orgId = ?
-         AND ts > NOW() - INTERVAL '${pgInterval}'
+         AND ts::timestamptz > NOW() - INTERVAL '${pgInterval}'
          AND ${inScope}
        ORDER BY ts DESC
        LIMIT 2000

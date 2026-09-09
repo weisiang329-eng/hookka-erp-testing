@@ -1049,6 +1049,7 @@ import auth from "./routes/auth";
 import authOauth from "./routes/auth-oauth";
 // Phase C.6 — TOTP 2FA enrollment + verify.
 import authTotp from "./routes/auth-totp";
+import sessions from "./routes/sessions";
 import users from "./routes/users";
 import presence from "./routes/presence";
 import bomMasterTemplates from "./routes/bom-master-templates";
@@ -1277,6 +1278,9 @@ app.route("/api/price-history", priceHistory);
 // 404 the OAuth/TOTP paths.
 app.route("/api/auth/oauth", authOauth);
 app.route("/api/auth/totp", authTotp);
+// Session visibility + revocation (see routes/sessions.ts). Authenticated;
+// the /all sub-routes gate themselves on SUPER_ADMIN.
+app.route("/api/sessions", sessions);
 app.route("/api/auth", auth);
 app.route("/api/users", users);
 app.route("/api/presence", presence);

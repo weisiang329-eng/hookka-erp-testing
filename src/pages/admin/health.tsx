@@ -12,7 +12,7 @@
 // before the data fetch even starts. The endpoint enforces the same
 // role check server-side (defense-in-depth).
 // ---------------------------------------------------------------------------
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -1683,6 +1683,11 @@ export default function AdminHealthPage() {
             </CardContent>
           </Card>
 
+          {/* Sits directly under the security events on purpose: that panel is
+              "who signed in", this is "who is still in". The gap between them
+              is where a sliding Remember-me session hides. */}
+          <LiveSessionsPanel />
+
           {/* ────────── AUTOMATION (CI) ────────── */}
           <SectionHeader
             title="Automation — GitHub Actions"
@@ -1971,6 +1976,184 @@ export default function AdminHealthPage() {
             </CardContent>
           </Card>
         </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Live sessions — who is signed in right now, across every account.
+//
+// The Security panel above answers "who authenticated, and when". This answers
+// "who is IN, right now, and from where" — and with sliding "Remember me"
+// sessions those are different questions weeks apart. A single login grants
+// days of access with no further login events, so the panel above can look
+// quiet while accounts are actively in use.
+//
+// What this surfaces that nothing else does:
+//   · a shared account with several concurrent sessions from different IPs
+//   · a departed employee whose account was never disabled, still being used
+//   · a session last active at an hour nobody works
+// ---------------------------------------------------------------------------
+type LiveSession = {
+  id: string | null;
+  device: string;
+  ipAddress: string | null;
+  createdAt: string;
+  lastSeenAt: string | null;
+  expiresAt: string;
+  current: boolean;
+  email?: string | null;
+  displayName?: string | null;
+  role?: string | null;
+};
+
+function sessionAgo(iso: string | null): string {
+  if (!iso) return "unknown";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return "unknown";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return m + " min ago";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h ago";
+  return Math.floor(h / 24) + "d ago";
+}
+
+function LiveSessionsPanel() {
+  const [rows, setRows] = useState<LiveSession[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  // Bumped after a successful revoke to re-run the fetch. Cheaper than a
+  // useCallback the effect depends on — and that shape trips
+  // react-hooks/set-state-in-effect, since the callback sets state and the
+  // effect calls it directly.
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    // `cancelled` guards against a response landing after this panel has
+    // unmounted (navigate away mid-flight) or after a newer fetch started.
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/sessions/all", {
+          credentials: "include",
+        });
+        const json = (await res.json()) as {
+          success?: boolean;
+          data?: LiveSession[];
+        };
+        if (cancelled) return;
+        if (!res.ok || !json.success) {
+          setErr("Could not load sessions.");
+          return;
+        }
+        setErr(null);
+        setRows(json.data ?? []);
+      } catch {
+        if (!cancelled) setErr("Network error.");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadKey]);
+
+  async function revoke(id: string) {
+    setBusy(id);
+    try {
+      const res = await fetch("/api/sessions/all/" + encodeURIComponent(id), {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (res.ok) setReloadKey((k) => k + 1);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Several live sessions on one account is the pattern worth eyeballing:
+  // normal for a person with a phone and a desktop, a flag on a shared login.
+  const perAccount = new Map<string, number>();
+  for (const r of rows ?? []) {
+    const k = r.email ?? "?";
+    perAccount.set(k, (perAccount.get(k) ?? 0) + 1);
+  }
+
+  return (
+    <div className="rounded-lg border border-[#E2DDD8] bg-white p-5 mt-6">
+      <h3 className="text-base font-semibold text-[#1F1D1B]">
+        Live sessions — who is signed in right now
+      </h3>
+      <p className="text-xs text-[#6B7280] mt-1 mb-4">
+        A login log shows who signed in. This shows who is still in. With
+        &ldquo;Remember me&rdquo; those are weeks apart.
+      </p>
+
+      {err && <p className="text-sm text-red-600">{err}</p>}
+      {!rows && !err && <p className="text-sm text-[#6B7280]">Loading…</p>}
+      {rows && rows.length === 0 && (
+        <p className="text-sm text-[#6B7280]">No active sessions.</p>
+      )}
+
+      {rows && rows.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-[#6B7280] border-b border-[#E2DDD8]">
+                <th className="py-2 pr-3">Account</th>
+                <th className="py-2 pr-3">Device</th>
+                <th className="py-2 pr-3">IP</th>
+                <th className="py-2 pr-3">Last used</th>
+                <th className="py-2 pr-3">Signed in</th>
+                <th className="py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const many = (perAccount.get(r.email ?? "?") ?? 0) > 1;
+                return (
+                  <tr
+                    key={r.id ?? r.createdAt}
+                    className="border-b border-[#F2EFEA]"
+                  >
+                    <td className="py-2 pr-3">
+                      <div className="font-medium">{r.email}</div>
+                      <div className="text-xs text-[#6B7280]">
+                        {r.role}
+                        {many && (
+                          <span className="ml-2 text-amber-700">
+                            multiple sessions
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-2 pr-3">{r.device}</td>
+                    <td className="py-2 pr-3">{r.ipAddress ?? "—"}</td>
+                    <td className="py-2 pr-3">{sessionAgo(r.lastSeenAt)}</td>
+                    <td className="py-2 pr-3">{sessionAgo(r.createdAt)}</td>
+                    <td className="py-2 text-right">
+                      {!r.current && r.id && (
+                        <button
+                          type="button"
+                          disabled={busy === r.id}
+                          onClick={() => void revoke(r.id as string)}
+                          className="text-xs text-red-700 hover:underline disabled:opacity-40"
+                        >
+                          {busy === r.id ? "Ending…" : "End session"}
+                        </button>
+                      )}
+                      {r.current && (
+                        <span className="text-xs text-green-700">You</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

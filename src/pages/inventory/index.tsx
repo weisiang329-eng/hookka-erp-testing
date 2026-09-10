@@ -3377,7 +3377,7 @@ export default function InventoryPage() {
         title="Batch Import Finished Products"
         description="Upload an Excel or CSV file to create or update multiple products at once. Rows are matched by Product Code."
         templateFilename="fg-import-template.xlsx"
-        exportFilename="fg-export.xlsx"
+        exportFilename={`fg-${new Date().toISOString().slice(0, 10)}.xlsx`}
         columns={fgImportColumns}
         keyColumn="code"
         onImport={handleImportFG}
@@ -3400,7 +3400,7 @@ export default function InventoryPage() {
         title="Batch Import Raw Materials"
         description="Upload an Excel or CSV file to create or update multiple raw materials at once. Rows are matched by Item Code."
         templateFilename="rm-import-template.xlsx"
-        exportFilename="rm-export.xlsx"
+        exportFilename={`rm-${new Date().toISOString().slice(0, 10)}.xlsx`}
         columns={rmImportColumns}
         keyColumn="itemCode"
         onImport={handleImportRM}

@@ -5125,7 +5125,7 @@ export default function ProductsPage() {
         title="Batch Import / Export Products"
         description="Upload an Excel or CSV file to create or update multiple products at once. Rows are matched by Product Code."
         templateFilename="products-import-template.xlsx"
-        exportFilename="products-export.xlsx"
+        exportFilename={`products-${new Date().toISOString().slice(0, 10)}.xlsx`}
         columns={productImportColumns}
         keyColumn="code"
         onImport={handleProductBulkImport}

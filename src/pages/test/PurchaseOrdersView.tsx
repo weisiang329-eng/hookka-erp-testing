@@ -5,7 +5,8 @@ import { formatCurrency } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ClipboardList, PackageOpen, Ban, AlertTriangle } from "lucide-react";
-import { TAUPE, GREEN, AMBER, RED, MUTED, BORDER, fmtN, Kpi, LiveBadge, MissingNote } from "./dashboard-shared";
+import { TAUPE, GREEN, AMBER, RED, MUTED, BORDER, fmtN } from "./dashboard-shared-lib";
+import { Kpi, LiveBadge, MissingNote } from "./dashboard-shared";
 
 // Real data from GET /api/dashboard/prototype — the `purchase` +
 // `availability.purchase` slices (purchase_orders + purchase_order_items,

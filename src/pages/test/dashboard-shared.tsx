@@ -3,20 +3,11 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { LucideIcon } from "lucide-react";
 
-// Shared bits for the dashboard-prototype tabs (SalesOrdersView + the ones
-// ported from it) — one Kpi card, one number formatter, one palette, so the
+// Shared components for the dashboard-prototype tabs (SalesOrdersView + the
+// ones ported from it) — one Kpi card, one badge, one "missing" note, so the
 // six tabs read as one dashboard instead of six independently-styled pages.
-export const TAUPE = "#6B5C32";
-export const TEAL = "#3E6570";
-export const MUTED = "#6B7280";
-export const BORDER = "#E2DDD8";
-export const GREEN = "#4F7C3A";
-export const AMBER = "#9C6F1E";
-export const RED = "#9A3A2D";
-
-export function fmtN(n: number): string {
-  return n.toLocaleString("en-MY");
-}
+// Constants/formatters live in ./dashboard-shared-lib (kept out of this file
+// so Fast Refresh keeps working — see that file's header comment).
 
 export function LiveBadge({ live }: { live: boolean }) {
   return (

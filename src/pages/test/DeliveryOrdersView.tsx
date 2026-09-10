@@ -12,7 +12,8 @@ import { useCachedJson } from "@/lib/cached-fetch";
 import { formatCurrency } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Truck, PackageCheck, Split, Clock } from "lucide-react";
-import { TEAL, GREEN, RED, MUTED, BORDER, fmtN, Kpi, LiveBadge, MissingNote } from "./dashboard-shared";
+import { TEAL, GREEN, RED, MUTED, BORDER, fmtN } from "./dashboard-shared-lib";
+import { Kpi, LiveBadge, MissingNote } from "./dashboard-shared";
 
 // Real data from GET /api/dashboard/prototype — the `delivery` +
 // `availability.delivery`/`deliveryStatus` slices (src/api/routes/

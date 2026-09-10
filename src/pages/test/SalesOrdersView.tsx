@@ -18,7 +18,8 @@ import {
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { ShoppingCart, DollarSign, Truck, CheckCircle } from "lucide-react";
-import { TAUPE, TEAL, MUTED, BORDER, fmtN, Kpi, LiveBadge } from "./dashboard-shared";
+import { TAUPE, TEAL, MUTED, BORDER, fmtN } from "./dashboard-shared-lib";
+import { Kpi, LiveBadge } from "./dashboard-shared";
 
 // Real data from GET /api/dashboard/prototype (src/api/routes/dashboard-
 // prototype.ts) — the SAME route + SQL the original HTML prototype read.

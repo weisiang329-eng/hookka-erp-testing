@@ -4,7 +4,8 @@ import { useCachedJson } from "@/lib/cached-fetch";
 import { formatCurrency } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Boxes, PackageCheck, Layers, Wallet } from "lucide-react";
-import { TAUPE, MUTED, BORDER, fmtN, Kpi, LiveBadge, MissingNote } from "./dashboard-shared";
+import { TAUPE, MUTED, BORDER, fmtN } from "./dashboard-shared-lib";
+import { Kpi, LiveBadge, MissingNote } from "./dashboard-shared";
 
 // Real data from GET /api/dashboard/prototype — the `inventory` +
 // `availability.inventory` slices (raw_materials + rm_batches, src/api/

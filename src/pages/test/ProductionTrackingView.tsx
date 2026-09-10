@@ -3,7 +3,8 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 
 import { useCachedJson } from "@/lib/cached-fetch";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Factory, AlertOctagon, AlertTriangle, CheckCircle2 } from "lucide-react";
-import { TAUPE, GREEN, AMBER, RED, MUTED, BORDER, fmtN, Kpi, LiveBadge } from "./dashboard-shared";
+import { TAUPE, RED, MUTED, BORDER, fmtN } from "./dashboard-shared-lib";
+import { Kpi, LiveBadge } from "./dashboard-shared";
 
 // Real data from GET /api/dashboard/prototype — the `production` +
 // `availability.production` slices (production_orders + job_cards,

@@ -753,12 +753,14 @@ app.post("/bulk-import", async (c) => {
     code: string;
     name: string;
     category: string;
+    description: string | null;
     baseModel: string | null;
     sizeCode: string | null;
     sizeLabel: string | null;
     basePriceSen: number | null;
     costPriceSen: number;
     fabricUsage: number;
+    unitM3: number;
     status: string;
   };
 
@@ -771,12 +773,14 @@ app.post("/bulk-import", async (c) => {
       code: r.code,
       name: r.name,
       category: r.category,
+      description: r.description,
       baseModel: r.baseModel,
       sizeCode: r.sizeCode,
       sizeLabel: r.sizeLabel,
       basePriceSen: r.basePriceSen,
       costPriceSen: r.costPriceSen,
       fabricUsage: r.fabricUsage,
+      unitM3: r.unitM3,
       status: r.status,
     };
     codeToState.set(r.code, state);
@@ -818,30 +822,34 @@ app.post("/bulk-import", async (c) => {
         code: r.code,
         name: r.name ?? prior.name,
         category: r.category ?? prior.category,
+        description: r.description ?? prior.description,
         baseModel: r.baseModel ?? prior.baseModel ?? r.code,
         sizeCode: r.sizeCode ?? prior.sizeCode ?? "",
         sizeLabel: r.sizeLabel ?? prior.sizeLabel ?? "",
         basePriceSen: r.basePriceSen ?? prior.basePriceSen,
         costPriceSen: r.costPriceSen ?? prior.costPriceSen,
         fabricUsage: r.fabricUsage ?? prior.fabricUsage,
+        unitM3: r.unitM3 ?? prior.unitM3,
         status: r.status ?? prior.status,
       };
       statements.push(
         c.var.DB.prepare(
           `UPDATE products SET
-             code = ?, name = ?, category = ?, baseModel = ?, sizeCode = ?, sizeLabel = ?,
-             basePriceSen = ?, costPriceSen = ?, fabricUsage = ?, status = ?
+             code = ?, name = ?, category = ?, description = ?, baseModel = ?, sizeCode = ?, sizeLabel = ?,
+             basePriceSen = ?, costPriceSen = ?, fabricUsage = ?, unitM3 = ?, status = ?
            WHERE id = ?`,
         ).bind(
           merged.code,
           merged.name,
           merged.category,
+          merged.description,
           merged.baseModel,
           merged.sizeCode,
           merged.sizeLabel,
           merged.basePriceSen,
           merged.costPriceSen,
           merged.fabricUsage,
+          merged.unitM3,
           merged.status,
           merged.id,
         ),
@@ -864,12 +872,14 @@ app.post("/bulk-import", async (c) => {
         code: r.code,
         name: r.name,
         category: r.category,
+        description: r.description ?? "",
         baseModel: r.baseModel ?? r.code,
         sizeCode: r.sizeCode ?? "",
         sizeLabel: r.sizeLabel ?? "",
         basePriceSen: r.basePriceSen ?? null,
         costPriceSen: r.costPriceSen ?? 0,
         fabricUsage: r.fabricUsage ?? 0,
+        unitM3: r.unitM3 ?? 0,
         status: r.status ?? "ACTIVE",
       };
       statements.push(
@@ -884,12 +894,12 @@ app.post("/bulk-import", async (c) => {
           r.code,
           fresh.name,
           fresh.category,
-          "",
+          fresh.description,
           fresh.baseModel,
           fresh.sizeCode,
           fresh.sizeLabel,
           fresh.fabricUsage,
-          0,
+          fresh.unitM3,
           fresh.status,
           fresh.costPriceSen,
           fresh.basePriceSen,

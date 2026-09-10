@@ -9,13 +9,11 @@ import { Link, useSearchParams } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
 import { isSetupField, SETUP_FIELD_LABEL, type SetupField } from "@/lib/kpi-drill";
 import { Plus, Trash2, Check, Calendar, History, Pencil, FileDown, Loader2, X as XIcon } from "lucide-react";
-import { fetchJson } from "@/lib/fetch-json";
-import { mutationWithData } from "@/lib/schemas/common";
-import { ProductSchema } from "@/lib/schemas/product";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { useNavGuard } from "@/lib/use-nav-guard";
 import { familyOf } from "@/lib/product-family";
 import { MasterPriceHistoryDialog } from "./MasterPriceHistoryDialog";
+import { BatchImportDialog, type ImportColumn } from "@/components/ui/batch-import-dialog";
 import {
   EffectiveDateConfirmModal,
   MaintenanceConfigHistoryDialog,
@@ -54,7 +52,6 @@ const PRICED_ITEM_KEYS: readonly PricedItemKey[] = [
 const isPricedItemKey = (k: string): k is PricedItemKey =>
   (PRICED_ITEM_KEYS as readonly string[]).includes(k);
 
-const ProductMutationSchema = mutationWithData(ProductSchema);
 import {
   fetchVariantsConfig,
   getVariantsConfigSync,
@@ -2129,7 +2126,7 @@ export default function ProductsPage() {
   const [fabricUsageInput, setFabricUsageInput] = useState("");
   const [editingPrice1, setEditingPrice1] = useState<string | null>(null);
   const [price1Input, setPrice1Input] = useState("");
-  const [importing, setImporting] = useState(false);
+  const [showBatchImport, setShowBatchImport] = useState(false);
 
   // ── Catalogue PDF export state ──────────────────────────────────────────
   const [exportingCatalogue, setExportingCatalogue] = useState(false);
@@ -2813,43 +2810,44 @@ export default function ProductsPage() {
     if (pData?.success) setProducts((pData.data as Product[]) ?? []);
   };
 
-  // ---------- CSV helpers ----------
-  function csvEscape(val: string | number | undefined | null): string {
-    const s = val == null ? "" : String(val);
-    if (/[",\n\r]/.test(s)) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return s;
-  }
+  // Batch Import/Export SKUs — shared BatchImportDialog (same component +
+  // bulk-import endpoint as Inventory's Batch Import): preview with
+  // new/update/renamed, before/after diff, blank-never-overwrites, no-op
+  // rows dropped. Replaces the old per-row-PUT CSV import, which had no
+  // cap/preview/transaction and could look "stuck" for a large catalogue.
+  const productImportColumns: ImportColumn[] = [
+    { key: "id", label: "ID", hidden: true },
+    { key: "code", label: "Product Code", required: true, example: "2050(A)-(K)" },
+    { key: "name", label: "Product Name", required: true, example: "ROMA BEDFRAME (6FT)" },
+    { key: "category", label: "Category", required: true, enum: ["BEDFRAME", "SOFA", "ACCESSORY"], example: "BEDFRAME" },
+    { key: "description", label: "Description", example: "" },
+    { key: "baseModel", label: "Base Model", example: "2050(A)" },
+    { key: "sizeCode", label: "Size Code", example: "K", help: "K / Q / S / SS / SK / SP" },
+    { key: "sizeLabel", label: "Size Label", example: "6FT" },
+    { key: "fabricUsage", label: "Fabric Usage (m)", type: "number", example: 8 },
+    { key: "unitM3", label: "Unit m³", type: "number", example: 0 },
+    { key: "status", label: "Status", enum: ["ACTIVE", "INACTIVE"], example: "ACTIVE" },
+    { key: "costPriceSen", label: "Cost Price (RM)", type: "money", example: 1500 },
+    { key: "basePriceSen", label: "Base Price (RM)", type: "money", example: 2500 },
+  ];
 
-  function parseCsvLine(line: string): string[] {
-    const out: string[] = [];
-    let cur = "";
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (inQuotes) {
-        if (ch === '"') {
-          if (line[i + 1] === '"') { cur += '"'; i++; }
-          else { inQuotes = false; }
-        } else {
-          cur += ch;
-        }
-      } else {
-        if (ch === ",") { out.push(cur); cur = ""; }
-        else if (ch === '"') { inQuotes = true; }
-        else { cur += ch; }
-      }
+  async function handleProductBulkImport(rows: Record<string, unknown>[]) {
+    const res = await fetch("/api/products/bulk-import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    const json = (await res.json()) as {
+      success?: boolean;
+      data?: { created: number; updated: number; rejected?: { row: number; reason: string }[] };
+      error?: string;
+    };
+    if (!res.ok || !json.success || !json.data) {
+      throw new Error(json.error || `Import failed (HTTP ${res.status})`);
     }
-    out.push(cur);
-    return out;
+    await reloadProductsAfterSchedule();
+    return json.data;
   }
-
-  const EXPORT_COLUMNS = [
-    "code", "name", "category", "description", "baseModel",
-    "sizeCode", "sizeLabel", "fabricUsage", "unitM3", "status",
-    "costPriceSen", "basePriceSen", "productionTimeMinutes",
-  ] as const;
 
   // ── Catalogue PDF helpers ──────────────────────────────────────────────
 
@@ -3051,103 +3049,6 @@ export default function ProductsPage() {
     }
   }
 
-  function handleExportCsv() {
-    const header = EXPORT_COLUMNS.join(",");
-    const rows = products.map((p) =>
-      EXPORT_COLUMNS.map((k) => csvEscape((p as unknown as Record<string, string | number | undefined>)[k])).join(",")
-    );
-    const csv = [header, ...rows].join("\r\n");
-    const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    const ts = new Date().toISOString().slice(0, 10);
-    a.download = `products-${ts}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }
-
-  async function handleImportCsv(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = ""; // reset so same file can be re-picked
-    if (!file) return;
-
-    setImporting(true);
-    try {
-      const text = await file.text();
-      const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter((l) => l.length > 0);
-      if (lines.length < 2) {
-        toast.warning("CSV is empty or only has headers.");
-        return;
-      }
-      const headers = parseCsvLine(lines[0]).map((h) => h.trim());
-      const codeIdx = headers.indexOf("code");
-      if (codeIdx === -1) {
-        toast.warning("CSV must include a 'code' column.");
-        return;
-      }
-
-      const numericFields = new Set([
-        "fabricUsage", "unitM3", "costPriceSen", "basePriceSen", "productionTimeMinutes",
-      ]);
-
-      const codeToProduct = new Map(products.map((p) => [p.code, p]));
-      let updated = 0;
-      let skipped = 0;
-      const updatedProducts = [...products];
-
-      for (let li = 1; li < lines.length; li++) {
-        const cols = parseCsvLine(lines[li]);
-        const code = (cols[codeIdx] || "").trim();
-        if (!code) continue;
-        const existing = codeToProduct.get(code);
-        if (!existing) { skipped++; continue; }
-
-        const patch: Record<string, string | number> = {};
-        headers.forEach((h, i) => {
-          if (h === "code" || h === "id") return;
-          const raw = cols[i];
-          if (raw === undefined) return;
-          const trimmed = raw.trim();
-          if (numericFields.has(h)) {
-            if (trimmed === "") return;
-            const n = Number(trimmed);
-            if (!Number.isNaN(n)) patch[h] = n;
-          } else {
-            patch[h] = trimmed;
-          }
-        });
-
-        try {
-          const data = await fetchJson(`/api/products/${existing.id}`, ProductMutationSchema, {
-            method: "PUT",
-            body: patch,
-          });
-          if (data.success && data.data) {
-            const idx = updatedProducts.findIndex((p) => p.id === existing.id);
-            if (idx !== -1) updatedProducts[idx] = data.data as Product;
-            updated++;
-          } else {
-            skipped++;
-          }
-        } catch {
-          skipped++;
-        }
-      }
-
-      invalidateCachePrefix("/api/products");
-      invalidateCachePrefix("/api/bom");
-      invalidateCachePrefix("/api/bom-master-templates");
-      setProducts(updatedProducts);
-      toast.success(`Updated ${updated} products, skipped ${skipped} unknown codes.`);
-    } catch (err) {
-      toast.error(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setImporting(false);
-    }
-  }
 
   useEffect(() => {
     async function load() {
@@ -3712,27 +3613,11 @@ export default function ProductsPage() {
           </div>
           <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
           <button
-            onClick={handleExportCsv}
+            onClick={() => setShowBatchImport(true)}
             className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] transition-colors"
           >
-            Export SKUs
+            Batch Import / Export
           </button>
-          <label
-            className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
-              importing
-                ? "bg-[#F3F4F6] text-[#9CA3AF] border-[#E5E7EB] cursor-wait"
-                : "bg-white text-[#6B7280] border-[#E5E7EB] hover:bg-[#F3F4F6]"
-            }`}
-          >
-            {importing ? "Importing..." : "Import SKUs"}
-            <input
-              type="file"
-              accept=".csv"
-              className="hidden"
-              onChange={handleImportCsv}
-              disabled={importing}
-            />
-          </label>
           <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
           {/* Edit / Save / Cancel — every inline edit on this page goes
               through this gate now (prices AND Fabric (m)). Cells are
@@ -5232,6 +5117,33 @@ export default function ProductsPage() {
         product={scheduleProduct}
         onClose={() => setScheduleProductId(null)}
         onSaved={reloadProductsAfterSchedule}
+      />
+
+      <BatchImportDialog
+        open={showBatchImport}
+        onClose={() => setShowBatchImport(false)}
+        title="Batch Import / Export Products"
+        description="Upload an Excel or CSV file to create or update multiple products at once. Rows are matched by Product Code."
+        templateFilename="products-import-template.xlsx"
+        exportFilename="products-export.xlsx"
+        columns={productImportColumns}
+        keyColumn="code"
+        onImport={handleProductBulkImport}
+        currentRows={products.map((p) => ({
+          id: p.id,
+          code: p.code,
+          name: p.name,
+          category: p.category,
+          description: p.description,
+          baseModel: p.baseModel,
+          sizeCode: p.sizeCode,
+          sizeLabel: p.sizeLabel,
+          fabricUsage: p.fabricUsage,
+          unitM3: p.unitM3,
+          status: p.status,
+          costPriceSen: (p.costPriceSen ?? 0) / 100,
+          basePriceSen: (p.basePriceSen ?? 0) / 100,
+        }))}
       />
 
       {/* Bulk save dialog — surfaces when the user clicks "Save N changes"

@@ -9,12 +9,14 @@ export type ProductBulkImportInput = {
   code?: unknown;
   name?: unknown;
   category?: unknown;
+  description?: unknown;
   baseModel?: unknown;
   sizeCode?: unknown;
   sizeLabel?: unknown;
   basePriceSen?: unknown; // RM, not sen — matches sheet column, converted below
   costPriceSen?: unknown; // RM, not sen
   fabricUsage?: unknown;
+  unitM3?: unknown;
   status?: unknown;
 };
 
@@ -23,12 +25,14 @@ export type ShapedProductBulkRow = {
   code: string;
   name?: string;
   category?: string;
+  description?: string;
   baseModel?: string;
   sizeCode?: string;
   sizeLabel?: string;
   basePriceSen?: number;
   costPriceSen?: number;
   fabricUsage?: number;
+  unitM3?: number;
   status?: string;
 };
 
@@ -83,6 +87,8 @@ export function shapeProductBulkRow(
   if (name !== undefined) out.name = name;
   if (categoryUpper !== undefined) out.category = categoryUpper;
   if (statusUpper !== undefined) out.status = statusUpper;
+  const description = bulkStr(row.description);
+  if (description !== undefined) out.description = description;
   const baseModel = bulkStr(row.baseModel);
   if (baseModel !== undefined) out.baseModel = baseModel;
   const sizeCode = bulkStr(row.sizeCode);
@@ -95,6 +101,8 @@ export function shapeProductBulkRow(
   if (costPriceRm !== undefined) out.costPriceSen = Math.round(costPriceRm * 100);
   const fabricUsage = bulkNum(row.fabricUsage);
   if (fabricUsage !== undefined) out.fabricUsage = fabricUsage;
+  const unitM3 = bulkNum(row.unitM3);
+  if (unitM3 !== undefined) out.unitM3 = unitM3;
 
   // Mirrors POST / and PUT /:id (BUG-2026-06-22-008).
   if (categoryUpper === "BEDFRAME" && !sizeCode) {

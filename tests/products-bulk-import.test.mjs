@@ -72,6 +72,18 @@ test('code and other string fields are trimmed', () => {
   assert.equal(r.row.name, 'Roma Bedframe');
 });
 
+test('description and unitM3 are shaped the same blank-omitted way as every other field', () => {
+  const withValues = shapeProductBulkRow({ code: 'SF-004', description: 'Cream leather', unitM3: '1.25' });
+  assert.equal(withValues.ok, true);
+  assert.equal(withValues.row.description, 'Cream leather');
+  assert.equal(withValues.row.unitM3, 1.25);
+
+  const blank = shapeProductBulkRow({ code: 'SF-005', description: '', unitM3: '' });
+  assert.equal(blank.ok, true);
+  assert.equal('description' in blank.row, false);
+  assert.equal('unitM3' in blank.row, false);
+});
+
 // --- the route itself (static — no live D1 in CI) -------------------------
 
 test('POST /api/products/bulk-import exists, is transactional, and audits the whole sheet', () => {
@@ -224,4 +236,27 @@ test('the id column on FG/RM import is marked hidden, not shown as a regular fie
   const src = readFileSync('src/pages/inventory/index.tsx', 'utf8');
   const idCols = src.match(/\{ key: "id", label: "ID", hidden: true \}/g) ?? [];
   assert.equal(idCols.length, 2, 'both fgImportColumns and rmImportColumns must hide their id column');
+});
+
+// --- Products page migrated onto the shared BatchImportDialog ------------
+
+test('Products page uses BatchImportDialog, not a hand-rolled CSV parser', () => {
+  const src = readFileSync('src/pages/products/index.tsx', 'utf8');
+  assert.match(src, /import \{ BatchImportDialog, type ImportColumn \} from "@\/components\/ui\/batch-import-dialog";/);
+  assert.match(src, /<BatchImportDialog/, 'the dialog must actually be rendered');
+  assert.match(src, /onImport=\{handleProductBulkImport\}/);
+  assert.doesNotMatch(src, /function parseCsvLine/, 'the hand-rolled CSV line parser must be gone');
+  assert.doesNotMatch(src, /function csvEscape/, 'the hand-rolled CSV escaper must be gone');
+  assert.doesNotMatch(src, /PUT `\/api\/products\/\$\{existing\.id\}`/, 'the per-row PUT loop must be gone');
+});
+
+test('Products page bulk import posts to the real endpoint and refreshes state', () => {
+  const src = readFileSync('src/pages/products/index.tsx', 'utf8');
+  assert.match(src, /fetch\("\/api\/products\/bulk-import"/);
+  assert.match(src, /await reloadProductsAfterSchedule\(\);/);
+});
+
+test('Products page id column is hidden, like Inventory', () => {
+  const src = readFileSync('src/pages/products/index.tsx', 'utf8');
+  assert.match(src, /\{ key: "id", label: "ID", hidden: true \}/);
 });

@@ -1,12 +1,25 @@
 # Products & MDM — Module Guide
 
+> **Last verified: 2026-09-10 (evening)** — Products page's own "Import SKUs" (hand-rolled
+> CSV, one PUT per row, no preview) migrated onto `BatchImportDialog` + the same
+> `POST /api/products/bulk-import` Inventory uses; `description`/`unitM3` added to the
+> endpoint to cover the two fields the old CSV import had that the endpoint didn't yet.
+> Shifted `app.put("/:id")` `:943`, `resolveProductPriceAsOf` `:1211`,
+> `app.post("/:productId/prices")` `:1300`, `app.get("/:productId/price-history")` `:1274` —
+> all restamped below.
+>
+> **Last verified: 2026-09-10 (later same day)** — unrelated drift on `main` since the
+> 2026-08-19 pass moved `src/pages/products/index.tsx`'s `ProductsPage` `:2007`→`:2025`
+> and `MaintenanceView` `:1112`→`:1130`. Restamped here; nothing else in the page-side
+> section re-verified this pass.
+>
 > **Last verified: 2026-09-10** — T-004 added `POST /api/products/bulk-import`
 > (`products.ts:726`, shaping in new `src/api/lib/product-bulk-import.ts`), which shifted
 > every anchor below it in `products.ts`. Rename-support (id-based match, R3
 > follow-up) added ~16 more lines to bulk-import, shifting again. Current:
-> `app.put("/:id")` `:730`→`:933`,
-> `resolveProductPriceAsOf` `:998`→`:1201`, `app.post("/:productId/prices")` `:1087`→`:1290`,
-> `app.get("/:productId/price-history")` `:1061`→`:1264`. Earlier anchors shifted +5 lines
+> `app.put("/:id")` `:730`→`:943`,
+> `resolveProductPriceAsOf` `:998`→`:1211`, `app.post("/:productId/prices")` `:1087`→`:1300`,
+> `app.get("/:productId/price-history")` `:1061`→`:1274`. Earlier anchors shifted +5 lines
 > (`ensureProductCreatedAtColumn` `:28`→`:33`, `rowToProduct` `:161`→`:166`, `app.post("/")`
 > `:584`→`:589`) from the same edit. Everything below this line is otherwise unchanged from
 > the 2026-08-19 pass.
@@ -39,7 +52,7 @@ Money is integer sen; many product columns are legacy camelCase.
 
 ## Entry points
 - **Pages** (all under `/products`, one page hosts three views)
-  - `/products` → `src/pages/products/index.tsx:2007` (`ProductsPage`; `viewMode` = `skuMaster|catalog|maintenance`)
+  - `/products` → `src/pages/products/index.tsx:2025` (`ProductsPage`; `viewMode` = `skuMaster|catalog|maintenance`)
   - `/products/:id/bom` → `src/pages/products/bom.tsx:462` (`BOMPage` — Master BOM Templates editor; also reached via `?sku=` from sales/consignment)
   - `/products/:id/documents` → `src/pages/products/documents.tsx:92` (`ProductDocumentsPage` — production docs per variant)
   - Catalog is NOT a route — `ProductCatalog` (`src/pages/products/catalog.tsx:138`) renders inline as `viewMode==="catalog"`
@@ -66,8 +79,8 @@ Money is integer sen; many product columns are legacy camelCase.
 - Relationships: `customer_products` inherit `products` pricing unless overridden; `bom_components` feed BOM-explosion minutes (shared with production).
 
 ## Core flows
-1. **Create/edit product** — `app.post("/")` `products.ts:589`, `app.put("/:id")` `products.ts:933`. Both replace-in-full the nested `bomComponents` and `deptWorkingTimes` sets when provided; `rowToProduct` (`:166`) re-nests children + parses JSON columns on read. Column self-apply via `ensureProductCreatedAtColumn` (`:33`). Bulk import: `app.post("/bulk-import")` `:726` upserts by `code` in one D1 transaction (rows + audit row together); shaping/validation is `shapeProductBulkRow` in `src/api/lib/product-bulk-import.ts` — a blank sheet cell never overwrites an existing value.
-2. **Master price change** — `app.post("/:productId/prices")` `products.ts:1290` appends an effective-dated row; `resolveProductPriceAsOf` (`:1201`) picks the newest `<= asOf`; history read at `app.get("/:productId/price-history")` `:1264`. Surfaced in `MasterPriceHistoryDialog`.
+1. **Create/edit product** — `app.post("/")` `products.ts:589`, `app.put("/:id")` `products.ts:943`. Both replace-in-full the nested `bomComponents` and `deptWorkingTimes` sets when provided; `rowToProduct` (`:166`) re-nests children + parses JSON columns on read. Column self-apply via `ensureProductCreatedAtColumn` (`:33`). Bulk import: `app.post("/bulk-import")` `:726` upserts by `code` in one D1 transaction (rows + audit row together); shaping/validation is `shapeProductBulkRow` in `src/api/lib/product-bulk-import.ts` — a blank sheet cell never overwrites an existing value.
+2. **Master price change** — `app.post("/:productId/prices")` `products.ts:1300` appends an effective-dated row; `resolveProductPriceAsOf` (`:1211`) picks the newest `<= asOf`; history read at `app.get("/:productId/price-history")` `:1274`. Surfaced in `MasterPriceHistoryDialog`.
 3. **Per-customer price (inherit-or-override)** — `customer-products.ts` `resolvePrices` (`:95`) returns master price when the override column is NULL, override value when non-null. List GET (`:113`) also surfaces a future master change to inherited customers as `masterPendingEffectiveFrom` (built into `masterPendingByProduct` at `:184-206`, emitted at `:262`). Append price via `app.post("/:customerProductId/prices")` `:434`.
 4. **BOM templates (bulk replace)** — `app.put("/templates")` `bom.ts:377` does DELETE-ALL + INSERT-ALL in one D1 batch; single-row upsert at `app.put("/templates/:id")` `:484`. Master presets: `bom-master-templates.ts` upsert `app.put("/:id")` `:101`, bulk replace `app.put("/")` `:190` (clears sibling `isDefault` per category).
 5. **Maintenance config (effective-dated)** — `app.post("/changes")` `maintenance-config.ts:174` appends a new full-config row; `resolveMaintenanceConfigAsOf` (`:66`) resolves newest `<= today` and reports the next pending effective date. `GET /resolved` `:120`, `GET /history` `:141`.
@@ -76,17 +89,17 @@ Money is integer sen; many product columns are legacy camelCase.
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
 |---|---|---|
-| `ProductsPage` (default export) | `src/pages/products/index.tsx:2007` | 3-way view host; `viewMode` state just below |
+| `ProductsPage` (default export) | `src/pages/products/index.tsx:2025` | 3-way view host; `viewMode` state just below |
 | `VariantEditorDialog` | `src/pages/products/index.tsx:654` | Add/edit a product variant |
-| `MaintenanceView` | `src/pages/products/index.tsx:1112` | Maintenance-config view (Edit/Save/Cancel) |
+| `MaintenanceView` | `src/pages/products/index.tsx:1130` | Maintenance-config view (Edit/Save/Cancel) |
 | `CustomerAssignmentsSection` | `src/pages/products/index.tsx:472` | Per-customer SKU assignment (expand row) |
 | `ProductionConfig` / `CategoryBadge` | `src/pages/products/index.tsx:379 / 366` | Per-dept config display helpers |
 | `ProductCatalog` | `src/pages/products/catalog.tsx:138` | Model-based photo grid (inline catalog view) |
 | `rowToProduct` | `src/api/routes/products.ts:166` | Re-nests children + parses JSON columns on read |
 | `app.post("/")` / `app.put("/:id")` | `src/api/routes/products.ts:589 / 933` | Product create / edit (full-replace children) |
 | `app.post("/bulk-import")` | `src/api/routes/products.ts:726` | Batch create/update by `code`, one D1 transaction, blank-safe merge |
-| `resolveProductPriceAsOf` | `src/api/routes/products.ts:1201` | Master price effective-dated resolver |
-| `app.post("/:productId/prices")` | `src/api/routes/products.ts:1290` | Append master price history row |
+| `resolveProductPriceAsOf` | `src/api/routes/products.ts:1211` | Master price effective-dated resolver |
+| `app.post("/:productId/prices")` | `src/api/routes/products.ts:1300` | Append master price history row |
 | `resolvePrices` | `src/api/routes/customer-products.ts:95` | Inherit-or-override price resolution |
 | `app.put("/templates")` | `src/api/routes/bom.ts:377` | Bulk-replace `bom_templates` (DELETE-ALL + INSERT-ALL) |
 | `app.put("/templates/:id")` | `src/api/routes/bom.ts:484` | Single-template upsert |
@@ -104,11 +117,11 @@ Money is integer sen; many product columns are legacy camelCase.
 - **Catalog tiles are AUTO-DERIVED** from each distinct `baseModel` in `products` (no dedicated table); `baseProductCode` splits on the first dash (`index.tsx:36`). Modular photos go through `/api/files?resourceType=modular` (`index.tsx:2901`, `catalog.tsx:29`), not a products column. Note the read path: `GET /api/files/:id/download` **302-redirects** to a signed Supabase URL (`files.ts:446`); only the `/stream` proxy fallback (`:485`) sets `Content-Disposition: attachment` itself (`:503`). `<img>` renders either way — browsers ignore the disposition on subresource loads — so don't "fix" it.
 - **MDM is DETECTION-ONLY.** `merge`/`dismiss` just close the flag (set `status`); the real record merge happens in the existing customer/supplier UI. Detection-run is admin-gated to stop non-admins flooding the queue.
 - **camelCase columns need a `column-rename-map.json` entry** (`basePriceSen`, `seatHeightPrices`, `effectiveFrom`, …) or the write 400s "Invalid request body". Prefer snake_case for NEW columns; read dual-keyed `r.camelCase ?? r.snake_case`.
-- **`index.tsx` is a 5,316-line single page** — three views share one `ProductsPage` (`:2007`); `MaintenanceView` (`:1112`) and `VariantEditorDialog` (`:654`) are large sub-components ABOVE the default export, not separate files.
+- **`index.tsx` is a 5,316-line single page** — three views share one `ProductsPage` (`:2025`); `MaintenanceView` (`:1130`) and `VariantEditorDialog` (`:654`) are large sub-components ABOVE the default export, not separate files.
 
 ## Common tasks (mini-playbook)
-- **Add a field to a product** → column self-apply near `ensureProductCreatedAtColumn` (`products.ts:33`); persist in `app.post("/")` (`:589`) + `app.put("/:id")` (`:933`) + `app.post("/bulk-import")` (`:726` — also update `shapeProductBulkRow` in `product-bulk-import.ts`); surface in `rowToProduct` (`:166`); render in `VariantEditorDialog` (`index.tsx:654`). New column = snake_case (+ rename-map if camelCase). Verify BOM math with `tests/bom-explosion.test.mjs`.
-- **Change master or per-customer pricing** → master history in `products.ts` (`resolveProductPriceAsOf:1201`, POST `:1290`); per-customer in `customer-products.ts` (`resolvePrices:95`, POST `:434`). Append, never update; reconcile both tables.
+- **Add a field to a product** → column self-apply near `ensureProductCreatedAtColumn` (`products.ts:33`); persist in `app.post("/")` (`:589`) + `app.put("/:id")` (`:943`) + `app.post("/bulk-import")` (`:726` — also update `shapeProductBulkRow` in `product-bulk-import.ts`); surface in `rowToProduct` (`:166`); render in `VariantEditorDialog` (`index.tsx:654`). New column = snake_case (+ rename-map if camelCase). Verify BOM math with `tests/bom-explosion.test.mjs`.
+- **Change master or per-customer pricing** → master history in `products.ts` (`resolveProductPriceAsOf:1211`, POST `:1300`); per-customer in `customer-products.ts` (`resolvePrices:95`, POST `:434`). Append, never update; reconcile both tables.
 - **Edit BOM templates** → `bom.ts` templates block (bulk `:377`, single upsert `:484`); presets in `bom-master-templates.ts` (`:101`/`:190`). Keep `/templates` (GET `:231`) before `/:id` (GET `:1336`).
 - **Change maintenance defaults** → append via `maintenance-config.ts` POST `/changes` (`:174`); resolver `:66`. Never mutate old rows (old-SO safety banner lives in `MaintenanceConfigHistoryDialog.tsx`).
 - **Tune MDM detection** → logic lives in `src/api/lib/mdm-detect.ts` (`runMdmDetectionPass`), not the route; the route only queues + resolves flags.

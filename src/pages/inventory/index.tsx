@@ -1954,7 +1954,8 @@ export default function InventoryPage() {
   // template. The `code` / `itemCode` column is the match key — existing
   // rows with the same key get updated in-place, new keys get created.
   const fgImportColumns: ImportColumn[] = [
-    { key: "code", label: "Product Code", required: true, example: "2050(A)-(K)", help: "Unique product code (cannot be changed via import)" },
+    { key: "id", label: "ID", hidden: true },
+    { key: "code", label: "Product Code", required: true, example: "2050(A)-(K)", help: "Unique product code" },
     { key: "name", label: "Product Name", required: true, example: "ROMA BEDFRAME (6FT)" },
     { key: "category", label: "Category", required: true, enum: ["BEDFRAME", "SOFA", "ACCESSORY"], example: "BEDFRAME" },
     { key: "baseModel", label: "Base Model", example: "2050(A)", help: "Optional family name grouping" },
@@ -1967,7 +1968,8 @@ export default function InventoryPage() {
   ];
 
   const rmImportColumns: ImportColumn[] = [
-    { key: "itemCode", label: "Item Code", required: true, example: "PC151-01", help: "Unique item code (cannot be changed via import)" },
+    { key: "id", label: "ID", hidden: true },
+    { key: "itemCode", label: "Item Code", required: true, example: "PC151-01", help: "Unique item code" },
     { key: "description", label: "Description", required: true, example: "Fabric PC151-01 Grey" },
     { key: "baseUOM", label: "Base UOM", required: true, example: "M", help: "M / PCS / KG / ROLL etc." },
     { key: "itemGroup", label: "Item Group", required: true, example: "FABRIC", help: "FABRIC / PLYWOOD / FOAM etc." },
@@ -1975,99 +1977,58 @@ export default function InventoryPage() {
     { key: "isActive", label: "Active", type: "boolean", example: "TRUE" },
   ];
 
-  // Import handlers — previously mutated mock-data module globals. Now
-  // they update component state so the grids refresh immediately. NOTE:
-  // these are still local-only; they do not POST to D1. A separate task
-  // can wire this to /api/products and /api/inventory/raw-materials.
-  const handleImportFG = (rows: Record<string, unknown>[]) => {
-    let created = 0, updated = 0;
-    const next = [...products];
-    for (const row of rows) {
-      const code = String(row.code || "").trim();
-      if (!code) continue;
-      const basePriceSen = Math.round(Number(row.basePriceSen || 0) * 100);
-      const costPriceSen = Math.round(Number(row.costPriceSen || 0) * 100);
-
-      const idx = next.findIndex(p => p.code === code);
-      if (idx >= 0) {
-        const existing = { ...next[idx] };
-        existing.name = String(row.name || existing.name);
-        existing.category = String(row.category || existing.category) as Product["category"];
-        existing.baseModel = String(row.baseModel || existing.baseModel);
-        existing.sizeCode = String(row.sizeCode || existing.sizeCode);
-        existing.sizeLabel = String(row.sizeLabel || existing.sizeLabel);
-        if (row.basePriceSen) existing.basePriceSen = basePriceSen;
-        if (row.costPriceSen) existing.costPriceSen = costPriceSen;
-        if (row.fabricUsage) existing.fabricUsage = Number(row.fabricUsage);
-        next[idx] = existing;
-        updated++;
-      } else {
-        const newProduct: Product = {
-          id: `p-imp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          code,
-          name: String(row.name || ""),
-          category: String(row.category || "BEDFRAME") as Product["category"],
-          description: "",
-          baseModel: String(row.baseModel || ""),
-          sizeCode: String(row.sizeCode || ""),
-          sizeLabel: String(row.sizeLabel || ""),
-          fabricUsage: Number(row.fabricUsage) || 0,
-          unitM3: 0,
-          status: "ACTIVE",
-          costPriceSen,
-          basePriceSen,
-          productionTimeMinutes: 0,
-          subAssemblies: [],
-          bomComponents: [],
-          deptWorkingTimes: [],
-        };
-        next.push(newProduct);
-        created++;
-      }
+  const handleImportFG = async (rows: Record<string, unknown>[]) => {
+    const res = await fetch("/api/products/bulk-import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    const json = (await res.json()) as {
+      success?: boolean;
+      data?: { created: number; updated: number; rejected?: { row: number; reason: string }[] };
+      error?: string;
+    };
+    if (!res.ok || !json.success || !json.data) {
+      throw new Error(json.error || `Import failed (HTTP ${res.status})`);
     }
-    setProducts(next);
-    toast.success(`Imported: ${created} created, ${updated} updated`);
-    return { created, updated };
+    const listRes = await fetch("/api/products");
+    const listJson = (await listRes.json()) as { success?: boolean; data?: Product[] };
+    if (listJson.success && Array.isArray(listJson.data)) {
+      setProducts(listJson.data);
+    }
+    const { created, updated, rejected } = json.data;
+    toast.success(
+      `Imported: ${created} created, ${updated} updated` +
+        (rejected && rejected.length > 0 ? `, ${rejected.length} rejected` : ""),
+    );
+    return { created, updated, rejected };
   };
 
-  const handleImportRM = (rows: Record<string, unknown>[]) => {
-    let created = 0, updated = 0;
-    const next = [...liveRawMaterials];
-    for (const row of rows) {
-      const itemCode = String(row.itemCode || "").trim();
-      if (!itemCode) continue;
-
-      const idx = next.findIndex(r => r.itemCode === itemCode);
-      if (idx >= 0) {
-        const existing = { ...next[idx] };
-        existing.description = String(row.description || existing.description);
-        existing.baseUOM = String(row.baseUOM || existing.baseUOM);
-        existing.itemGroup = String(row.itemGroup || existing.itemGroup);
-        if (row.balanceQty !== undefined && row.balanceQty !== "") {
-          existing.balanceQty = Number(row.balanceQty);
-        }
-        if (row.isActive !== undefined && row.isActive !== "") {
-          existing.isActive = Boolean(row.isActive);
-        }
-        next[idx] = existing;
-        updated++;
-      } else {
-        const newRM: RawMaterial = {
-          id: `rm-imp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          itemCode,
-          description: String(row.description || ""),
-          baseUOM: String(row.baseUOM || "PCS"),
-          itemGroup: String(row.itemGroup || "OTHERS"),
-          isActive: row.isActive === undefined ? true : Boolean(row.isActive),
-          balanceQty: Number(row.balanceQty) || 0,
-        };
-        next.push(newRM);
-        created++;
-      }
+  const handleImportRM = async (rows: Record<string, unknown>[]) => {
+    const res = await fetch("/api/raw-materials/bulk-import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    const json = (await res.json()) as {
+      success?: boolean;
+      data?: { created: number; updated: number; rejected?: { row: number; reason: string }[] };
+      error?: string;
+    };
+    if (!res.ok || !json.success || !json.data) {
+      throw new Error(json.error || `Import failed (HTTP ${res.status})`);
     }
-    setLiveRawMaterials(next);
-    toast.success(`Imported: ${created} created, ${updated} updated`);
-    return { created, updated };
+    const listRes = await fetch("/api/raw-materials");
+    const listJson = (await listRes.json()) as { success?: boolean; data?: RawMaterial[] };
+    if (listJson.success && Array.isArray(listJson.data)) {
+      setLiveRawMaterials(listJson.data);
+    }
+    const { created, updated, rejected } = json.data;
+    toast.success(
+      `Imported: ${created} created, ${updated} updated` +
+        (rejected && rejected.length > 0 ? `, ${rejected.length} rejected` : ""),
+    );
+    return { created, updated, rejected };
   };
 
   if (loading) {
@@ -3419,9 +3380,9 @@ export default function InventoryPage() {
         exportFilename="fg-export.xlsx"
         columns={fgImportColumns}
         keyColumn="code"
-        isExistingKey={(key) => products.some((p) => p.code === key)}
         onImport={handleImportFG}
         currentRows={products.map((p) => ({
+          id: p.id,
           code: p.code,
           name: p.name,
           category: p.category,
@@ -3442,9 +3403,9 @@ export default function InventoryPage() {
         exportFilename="rm-export.xlsx"
         columns={rmImportColumns}
         keyColumn="itemCode"
-        isExistingKey={(key) => liveRawMaterials.some((r) => r.itemCode === key)}
         onImport={handleImportRM}
         currentRows={liveRawMaterials.map((r) => ({
+          id: r.id,
           itemCode: r.itemCode,
           description: r.description,
           baseUOM: r.baseUOM,

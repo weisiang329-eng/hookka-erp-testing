@@ -93,6 +93,7 @@ type RawMaterialRow = {
 };
 
 type RawMaterialBody = {
+  id?: string; // present on a bulk-import row → itemCode change is a rename, not a new row
   sheetLengthIn?: number | null;
   sheetWidthIn?: number | null;
   itemCode?: string;
@@ -628,7 +629,7 @@ app.post("/bulk-import", async (c) => {
   }
   const rows = Array.isArray(body.rows) ? body.rows : [];
   if (rows.length === 0) {
-    return c.json({ success: true, data: { created: 0, updated: 0 } });
+    return c.json({ success: true, data: { created: 0, updated: 0, rejected: [] } });
   }
 
   // Fetch existing itemCodes in one shot for the match test.
@@ -639,20 +640,43 @@ app.post("/bulk-import", async (c) => {
   ).all<{ id: string; itemCode: string; itemGroup: string | null }>();
   const codeToId = new Map<string, string>();
   const codeToGroup = new Map<string, string>();
+  const idToCode = new Map<string, string>();
   for (const r of existingRes.results ?? []) {
     codeToId.set(r.itemCode, r.id);
     codeToGroup.set(r.itemCode, r.itemGroup ?? "");
+    idToCode.set(r.id, r.itemCode);
   }
   const regrouped: { itemCode: string; from: string; to: string }[] = [];
+  const rejected: { row: number; reason: string }[] = [];
 
   const nowIso = new Date().toISOString();
   const statements: D1PreparedStatement[] = [];
   let created = 0;
   let updated = 0;
 
-  for (const r of rows) {
+  for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+    const r = rows[rowIdx];
     const itemCode = (r.itemCode ?? "").trim();
     if (!itemCode) continue;
+
+    const bodyId = typeof r.id === "string" ? r.id.trim() : "";
+    const priorCode = bodyId ? idToCode.get(bodyId) : undefined;
+    let renamedFromGroup: string | undefined;
+    if (priorCode && priorCode !== itemCode) {
+      const collisionId = codeToId.get(itemCode);
+      if (collisionId && collisionId !== bodyId) {
+        rejected.push({
+          row: rowIdx + 1,
+          reason: `itemCode "${itemCode}" is already used by another record`,
+        });
+        continue;
+      }
+      // Rename — re-key the maps so the rest of this loop, and any later
+      // duplicate row in the same sheet, sees the material under its new code.
+      renamedFromGroup = codeToGroup.get(priorCode);
+      codeToId.delete(priorCode);
+      codeToGroup.delete(priorCode);
+    }
     const description = (r.description ?? "").trim() || itemCode;
     const baseUOM = pickUnit(r);
     const itemGroup = (r.itemGroup ?? "OTHERS").trim() || "OTHERS";
@@ -672,9 +696,9 @@ app.post("/bulk-import", async (c) => {
       ? r.mainSupplierCode.trim()
       : null;
 
-    const existingId = codeToId.get(itemCode);
+    const existingId = priorCode ? bodyId : codeToId.get(itemCode);
     if (existingId) {
-      const priorGroup = codeToGroup.get(itemCode) ?? "";
+      const priorGroup = renamedFromGroup ?? codeToGroup.get(itemCode) ?? "";
       if (priorGroup !== itemGroup) {
         regrouped.push({ itemCode, from: priorGroup, to: itemGroup });
       }
@@ -682,12 +706,13 @@ app.post("/bulk-import", async (c) => {
       statements.push(
         c.var.DB.prepare(
           `UPDATE raw_materials SET
-             description = ?, baseUOM = ?, itemGroup = ?, isActive = ?,
+             itemCode = ?, description = ?, baseUOM = ?, itemGroup = ?, isActive = ?,
              minStock = ?, maxStock = ?, status = ?,
              notes = ?, updated_at = ?,
              uomCount = ?, itemType = ?, stockControl = ?, mainSupplierCode = ?
            WHERE id = ?`,
         ).bind(
+          itemCode,
           description,
           baseUOM,
           itemGroup,
@@ -704,6 +729,9 @@ app.post("/bulk-import", async (c) => {
           existingId,
         ),
       );
+      codeToId.set(itemCode, existingId);
+      codeToGroup.set(itemCode, itemGroup);
+      idToCode.set(existingId, itemCode);
       updated++;
     } else {
       // INSERT — balanceQty defaults to 0; the sheet's Total Bal. Qty is ignored.
@@ -737,6 +765,8 @@ app.post("/bulk-import", async (c) => {
         ),
       );
       codeToId.set(itemCode, id);
+      codeToGroup.set(itemCode, itemGroup);
+      idToCode.set(id, itemCode);
       created++;
     }
 
@@ -777,7 +807,7 @@ app.post("/bulk-import", async (c) => {
     });
   }
 
-  return c.json({ success: true, data: { created, updated } });
+  return c.json({ success: true, data: { created, updated, rejected } });
 });
 
 // ---------------------------------------------------------------------------

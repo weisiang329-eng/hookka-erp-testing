@@ -51,11 +51,25 @@ export type ImportColumn = {
   example?: string | number;
   /** Free-text help shown below the field in the legend. */
   help?: string;
+  /** Still written/read on export/import for matching, but never shown in
+   *  the template legend, the preview table, or Excel (hidden column) —
+   *  for system-managed fields like `id` users shouldn't see or edit. */
+  hidden?: boolean;
 };
 
 export type ImportRow = Record<string, unknown>;
 
-type RowCategory = "new" | "update" | "error";
+// A blank/omitted incoming cell asserts nothing, so it never counts as a
+// change — matches the "blank never overwrites" merge semantics used
+// server-side (see shapeProductBulkRow and its raw-materials equivalent).
+function fieldChanged(col: ImportColumn, incoming: unknown, current: unknown): boolean {
+  if (incoming === undefined) return false;
+  if (col.type === "money" || col.type === "number") return Number(incoming) !== Number(current ?? 0);
+  if (col.type === "boolean") return Boolean(incoming) !== Boolean(current);
+  return String(incoming).trim() !== String(current ?? "").trim();
+}
+
+type RowCategory = "new" | "update" | "renamed" | "error";
 
 type ParsedRow = {
   idx: number;             // original row number in the file (1-indexed)
@@ -63,6 +77,7 @@ type ParsedRow = {
   errors: string[];        // validation messages
   keyValue: string;        // value of the key column
   category: RowCategory;
+  existing?: ImportRow;    // matched record's current values, for update/renamed diff display
 };
 
 export interface BatchImportDialogProps {
@@ -78,15 +93,19 @@ export interface BatchImportDialogProps {
   columns: ImportColumn[];
   /** Which column is the matching key (e.g. "code" for FG, "itemCode" for RM). */
   keyColumn: string;
-  /** Given a key value from a row, return true if a record with that key
-   *  already exists (row becomes UPDATE) or false (row becomes NEW). */
-  isExistingKey: (key: string) => boolean;
-  /** Called with the full set of valid rows when user confirms. Should
-   *  return a summary message (or throw for aborted imports). */
-  onImport: (rows: ImportRow[]) => Promise<{ created: number; updated: number }> | { created: number; updated: number };
-  /** Optional: current rows to enable "Export Current Data" round-trip.
-   *  Each row should have the same keys as `columns`. Users export, edit
-   *  in Excel, re-upload — matched rows become UPDATE, new keys become NEW. */
+  /** Called with the full set of valid rows when user confirms. `rejected`
+   *  is for server-side rejections, shown on the done screen. */
+  onImport: (
+    rows: ImportRow[],
+  ) =>
+    | Promise<{ created: number; updated: number; rejected?: { row: number; reason: string }[] }>
+    | { created: number; updated: number; rejected?: { row: number; reason: string }[] };
+  /** Current rows, each including `id`, to enable "Export Current Data"
+   *  round-trip and new/update/renamed/unchanged detection. A row whose
+   *  `id` matches an existing row but whose `keyColumn` value differs is a
+   *  RENAME, not a new row; a row identical to its match is dropped from
+   *  the preview entirely (nothing to import). Without `id` on the rows,
+   *  matching falls back to `keyColumn` only and renames can't be detected. */
   currentRows?: ImportRow[];
   /** Filename for the exported data file. Defaults to
    *  templateFilename with "-template" replaced by "-export". */
@@ -103,7 +122,6 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
   templateFilename,
   columns,
   keyColumn,
-  isExistingKey,
   onImport,
   currentRows,
   exportFilename,
@@ -112,7 +130,11 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
   const [parsed, setParsed] = React.useState<ParsedRow[]>([]);
   const [uploadErr, setUploadErr] = React.useState<string | null>(null);
   const [importing, setImporting] = React.useState(false);
-  const [result, setResult] = React.useState<{ created: number; updated: number } | null>(null);
+  const [result, setResult] = React.useState<{
+    created: number;
+    updated: number;
+    rejected?: { row: number; reason: string }[];
+  } | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
   // Reset state whenever the dialog is reopened. Each field is user-mutated
@@ -144,6 +166,7 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
     // Auto-size columns based on header length + some padding
     ws["!cols"] = columns.map((c) => ({
       wch: Math.max(c.label.length + 4, String(c.example ?? "").length + 2, 12),
+      hidden: c.hidden || undefined,
     }));
 
     const wb = XLSX.utils.book_new();
@@ -187,7 +210,7 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
         const len = String(cell ?? "").length;
         if (len > maxLen) maxLen = len;
       }
-      return { wch: Math.min(Math.max(maxLen, 12), 50) };
+      return { wch: Math.min(Math.max(maxLen, 12), 50), hidden: c.hidden || undefined };
     });
 
     const wb = XLSX.utils.book_new();
@@ -228,7 +251,21 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
         headerToKey.set(`${col.label} *`.toLowerCase(), col.key);
       }
 
-      const rows: ParsedRow[] = rawRows.map((row, i) => {
+      const byKey = new Map<string, ImportRow>();
+      const byId = new Map<string, ImportRow>();
+      for (const r of currentRows ?? []) {
+        const k = String(r[keyColumn] ?? "").trim();
+        if (k) byKey.set(k, r);
+        const id = String(r.id ?? "").trim();
+        if (id) byId.set(id, r);
+      }
+
+      // A blank/omitted cell asserts nothing, so it can't make a row look
+      // "changed" — matches the merge semantics on the backend.
+      const fieldsEqual = (a: ImportRow, b: ImportRow): boolean =>
+        columns.every((c) => c.key === "id" || c.key === keyColumn || !fieldChanged(c, a[c.key], b[c.key]));
+
+      const rows: (ParsedRow & { unchanged: boolean })[] = rawRows.map((row, i) => {
         const values: ImportRow = {};
         const errors: string[] = [];
 
@@ -251,7 +288,9 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
           }
 
           if (!str) {
-            values[col.key] = col.type === "number" ? 0 : col.type === "boolean" ? false : "";
+            // Blank optional cell stays absent (not defaulted to 0/"") so
+            // JSON.stringify omits it and a server merge doesn't overwrite.
+            values[col.key] = col.type === "boolean" ? false : undefined;
             continue;
           }
 
@@ -311,24 +350,53 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
         }
 
         const keyValue = String(values[keyColumn] ?? "").trim();
+        const idValue = String(values.id ?? "").trim();
         let category: RowCategory = "new";
+        let unchanged = false;
+        let existing: ImportRow | undefined;
+
         if (errors.length > 0) {
           category = "error";
-        } else if (keyValue && isExistingKey(keyValue)) {
-          category = "update";
+        } else {
+          const byIdMatch = idValue ? byId.get(idValue) : undefined;
+          existing = byIdMatch ?? (keyValue ? byKey.get(keyValue) : undefined);
+
+          if (byIdMatch) {
+            const priorKey = String(byIdMatch[keyColumn] ?? "").trim();
+            if (keyValue && priorKey && keyValue !== priorKey) {
+              const collision = byKey.get(keyValue);
+              if (collision && collision !== byIdMatch) {
+                errors.push(`${keyColumn} "${keyValue}" is already used by another record`);
+                category = "error";
+              } else {
+                category = "renamed";
+              }
+            } else {
+              category = "update";
+              unchanged = fieldsEqual(values, byIdMatch);
+            }
+          } else if (existing) {
+            category = "update";
+            unchanged = fieldsEqual(values, existing);
+          }
         }
 
-        return { idx: i + 2, values, errors, keyValue, category };
+        return { idx: i + 2, values, errors, keyValue, category, unchanged, existing };
       });
 
-      // Filter out obviously empty rows (no key, no other filled fields)
-      const nonEmpty = rows.filter((r) => {
-        const any = Object.values(r.values).some((v) => v !== "" && v !== 0 && v !== false);
-        return any;
-      });
-
-      if (nonEmpty.length === 0) {
+      const withData = rows.filter((r) =>
+        Object.values(r.values).some((v) => v !== "" && v !== 0 && v !== false && v !== undefined),
+      );
+      if (withData.length === 0) {
         setUploadErr("No data rows found. Did you fill in the template?");
+        return;
+      }
+
+      // Rows that match an existing record with every field identical —
+      // nothing to preview or import.
+      const nonEmpty = withData.filter((r) => !r.unchanged);
+      if (nonEmpty.length === 0) {
+        setUploadErr("Every row matches existing data exactly — nothing to import.");
         return;
       }
 
@@ -354,9 +422,34 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
     }
   };
 
+  const renderCell = (r: ParsedRow, c: ImportColumn) => {
+    const incoming = r.values[c.key];
+    const showDiff =
+      (r.category === "update" || r.category === "renamed") &&
+      r.existing &&
+      c.key !== "id" &&
+      fieldChanged(c, incoming, r.existing[c.key]);
+
+    if (!showDiff) return String(incoming ?? "");
+
+    const currentVal = r.existing?.[c.key];
+    return (
+      <span className="inline-flex items-center gap-1 flex-wrap">
+        <span className="text-[#9CA3AF] line-through text-xs">
+          {String(currentVal ?? "") || "(blank)"}
+        </span>
+        <span className="text-[#9CA3AF]">→</span>
+        <span className="bg-[#FEF9C3] text-[#713F12] font-medium px-1 rounded">
+          {String(incoming ?? "")}
+        </span>
+      </span>
+    );
+  };
+
   const counts = {
     new: parsed.filter((r) => r.category === "new").length,
     update: parsed.filter((r) => r.category === "update").length,
+    renamed: parsed.filter((r) => r.category === "renamed").length,
     error: parsed.filter((r) => r.category === "error").length,
   };
 
@@ -402,8 +495,11 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
                   <li>
                     The <code className="px-1 rounded bg-white border border-[#E2DDD8] text-xs">{columns.find(c => c.key === keyColumn)?.label || keyColumn}</code> column is the matching key —
                     existing rows get <span className="font-semibold">updated</span>, new keys get <span className="font-semibold">created</span>.
+                    {columns.some((c) => c.key === "id") && (
+                      <> Changing it on a row from an exported file is treated as a <span className="font-semibold">rename</span>, not a new record.</>
+                    )}
                   </li>
-                  <li>Upload the filled file. You'll see a preview before anything is saved.</li>
+                  <li>Upload the filled file. You'll see a preview before anything is saved. Rows identical to existing data are skipped automatically.</li>
                 </ol>
               </div>
 
@@ -412,7 +508,7 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
                   Template columns
                 </h3>
                 <div className="rounded-md border border-[#E2DDD8] divide-y divide-[#E2DDD8]">
-                  {columns.map((c) => (
+                  {columns.filter((c) => !c.hidden).map((c) => (
                     <div key={c.key} className="px-3 py-2 flex items-start gap-3 text-sm">
                       <span className={cn(
                         "font-mono text-xs px-2 py-0.5 rounded flex-shrink-0",
@@ -476,7 +572,7 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
 
           {step === "preview" && (
             <div className="space-y-4">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <button
                   onClick={() => setStep("intro")}
                   className="text-[#6B7280] hover:text-[#1F1D1B] flex items-center gap-1 text-sm"
@@ -491,12 +587,23 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
                   <span className="px-2 py-1 rounded bg-[#DBEAFE] text-[#1E40AF] text-xs font-medium">
                     {counts.update} update
                   </span>
+                  {counts.renamed > 0 && (
+                    <span className="px-2 py-1 rounded bg-[#FAE8FF] text-[#86198F] text-xs font-medium">
+                      {counts.renamed} renamed
+                    </span>
+                  )}
                   {counts.error > 0 && (
                     <span className="px-2 py-1 rounded bg-[#FEE2E2] text-[#991B1B] text-xs font-medium">
                       {counts.error} error
                     </span>
                   )}
                 </div>
+                {(counts.update > 0 || counts.renamed > 0) && (
+                  <span className="text-xs text-[#6B7280]">
+                    <span className="line-through text-[#9CA3AF]">old</span> →{" "}
+                    <span className="bg-[#FEF9C3] text-[#713F12] px-1 rounded">new</span> = changed field
+                  </span>
+                )}
               </div>
 
               <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
@@ -506,7 +613,7 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
                       <tr>
                         <th className="px-3 py-2 text-left font-medium w-16">Row</th>
                         <th className="px-3 py-2 text-left font-medium w-24">Status</th>
-                        {columns.map((c) => (
+                        {columns.filter((c) => !c.hidden).map((c) => (
                           <th key={c.key} className="px-3 py-2 text-left font-medium">
                             {c.label}
                           </th>
@@ -521,6 +628,7 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
                             r.category === "error" && "bg-[#FEF2F2]",
                             r.category === "new" && "bg-white",
                             r.category === "update" && "bg-[#F0F9FF]",
+                            r.category === "renamed" && "bg-[#FDF4FF]",
                           )}
                         >
                           <td className="px-3 py-2 text-[#9CA3AF] font-mono text-xs">
@@ -542,10 +650,15 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
                                 ↻ Update
                               </span>
                             )}
+                            {r.category === "renamed" && (
+                              <span className="text-[#86198F] text-xs font-semibold">
+                                ✎ Renamed
+                              </span>
+                            )}
                           </td>
-                          {columns.map((c) => (
+                          {columns.filter((c) => !c.hidden).map((c) => (
                             <td key={c.key} className="px-3 py-2 text-[#1F1D1B]">
-                              {String(r.values[c.key] ?? "")}
+                              {renderCell(r, c)}
                             </td>
                           ))}
                         </tr>
@@ -586,12 +699,12 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
                 <Button
                   variant="primary"
                   onClick={handleConfirm}
-                  disabled={importing || counts.new + counts.update === 0}
+                  disabled={importing || counts.new + counts.update + counts.renamed === 0}
                 >
                   <Check className="h-4 w-4" />
                   {importing
                     ? "Importing..."
-                    : `Import ${counts.new + counts.update} row${counts.new + counts.update !== 1 ? "s" : ""}`}
+                    : `Import ${counts.new + counts.update + counts.renamed} row${counts.new + counts.update + counts.renamed !== 1 ? "s" : ""}`}
                 </Button>
               </div>
             </div>
@@ -608,8 +721,22 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
                 </h3>
                 <p className="text-sm text-[#6B7280] mt-1">
                   {result.created} created · {result.updated} updated
+                  {result.rejected && result.rejected.length > 0 &&
+                    ` · ${result.rejected.length} rejected`}
                 </p>
               </div>
+              {result.rejected && result.rejected.length > 0 && (
+                <details className="text-left rounded-md bg-[#FEF2F2] border border-[#FECACA] p-3 text-sm max-w-md mx-auto">
+                  <summary className="text-[#9A3A2D] font-medium cursor-pointer">
+                    {result.rejected.length} row{result.rejected.length !== 1 ? "s" : ""} rejected by the server
+                  </summary>
+                  <ul className="mt-2 text-[#7F1D1D] list-disc pl-5 space-y-1">
+                    {result.rejected.map((r, i) => (
+                      <li key={i}>Row {r.row}: {r.reason}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
               <Button variant="primary" onClick={onClose}>
                 Done
               </Button>

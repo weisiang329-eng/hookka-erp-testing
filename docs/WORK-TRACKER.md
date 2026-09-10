@@ -14,64 +14,70 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
-## 2026-09-07 — ✅ 对账两升级：付款明细可见 + 组合配对（owner 挂图两问 →「做」）
+## 2026-09-10 — 🔵 PRD T-004 · Import / Export across the whole system (P0/R3-R5 done, rest open)
 
-Owner：「1. 没有show payment detail 2. Bank Statement 可能是几笔，book ledger 可能一笔…没有办法
-match（你可以看 - HPV-2607-024）」——铁证：账面一笔 911.00（07/07），银行两笔 32.00+879.00
-（09/07，都写着 HPV-2607-024 HUGYP）= 911 分毫。① **付款明细**：`attachSupplierNames`（付款号→
-supplier_payments MIN(supplier_name)）挂在共享 loader + GET /bank-reco——book 行尾自动补供应商名，
-报表/封存/board pending 全沾光；新 GET /bank-reco/payment-detail?paymentNo= 回该付款勾的单
-（供应商/PI 号/opening 标/金额），UI book 行点描述展开。② **组合配对**：新 POST
-/bank-reco/match-group {legId, lineIds 2-20}——全查（同户口/未配/未 ignore/非开账前/月未封存/
-腿非 opening 源/BUG-175 先扫作废占用）+ **Σ行=腿分毫才写**（原子）；unmatch 任一块=整组解散；
-**walk 组感知**：clearedOn 改「组齐才算清、以最后一块日期为清日」（loader 聚合 sum+lastDate），
-行侧「组没齐或最后一块在月底后→照算 unbooked」——恒等式任意中间态成立（数值推演过）；board
-clearedByMatch 自动继承。UI：银行行勾选框 + 琥珀 combo 条（N lines · Σ → combine & match to…
-只列等额腿）。守卫 +3（22/22）；finalize 写路径守卫表 +match-group。
+Requested by Mr Lim, PRD dated 2026-09-07, priority **Low (to be raised later)**. Full PRD:
+`T-004-Hookka-import-export - wei siang.pdf` (not in repo — user's local Downloads). Branch
+`fix/batch-import-export-sync` (also carries unrelated prior dashboard-prototype commits —
+flagged to the user, not cleaned up).
 
-## 2026-09-04 — 🔵 Cash Flow template 调整（owner 下午回来这条线）
+**Done (R3, R4, R5 — the P0):** `POST /api/products/bulk-import` (`products.ts:729`) — upserts by
+`code`, one D1 transaction (rows + audit row together via `buildAuditStatement`), ≤5,000 rows,
+`{created, updated, rejected:[{row,reason}]}`. Blank-safe shaping lives in new
+`src/api/lib/product-bulk-import.ts` (`shapeProductBulkRow`, pure/unit-tested) — a blank optional
+cell is OMITTED from the shaped row, never coerced to `""`/`0`, so `shaped.field !== undefined ?
+... : existing` never overwrites with a blank (this is R7's fix too, done early since the new
+endpoint needed it correctly from the start). `handleImportFG`/`handleImportRM`
+(`inventory/index.tsx`) now actually POST to `/api/products/bulk-import` and the existing
+`/api/raw-materials/bulk-import` respectively, then re-fetch the lists — no more "toasts Imported,
+saves nothing." `BatchImportDialog` (`batch-import-dialog.tsx`) fixed at the shared-component level:
+an empty optional cell now becomes `undefined` (omitted from the JSON body), not `0`, fixing R5 for
+every current and future importer built on it in one place; its "done" screen now shows server-side
+`rejected` reasons too, not just created/updated counts.
+14 new tests in `tests/products-bulk-import.test.mjs`. `docs/modules/products.md` anchors restamped
+(the new endpoint shifted every line below it in `products.ts`). Full `npm test` (4560 tests, 0 fail) and `build:strict` both pass.
 
-Owner：「回来cash flow template那边」→ 对照完成：样板 `HOOKKA - Cash Flow Mar''26 (1).xlsx`
-（Monthly Cshflw 明细 + Cshflw Summary 汇总两视图）vs 系统 /cashflow-statement——段落语言已同款
-（11 段引擎全有，Taxation/Finance Cost/Deposit 空则隐）；差距=RM 四大类卷叠、Loan 段 related-party
-子分组、Summary 汇总视图。① 「cash flow 能自由拖来吗？」＝能（Edit 模式科目行拖 11 段任意，
-料组/供应商拆行/部门人工行除外）；② 「可以自动分一下父子account吗？」＝可做——**prod 实测 COA
-197 科目 148 个有 parentCode**（701/702/703/704 PURCHASE 父级 = 样板四大类、900-S001 SALARIES &
-CONTRIBUTION ×6、440-0000 related parties ×3），父子嵌套即样板样子——owner 拍「做」→ **✅ 已做**：
-`buildStatement.emitSection` 按 COA 直接父级聚簇（parent 行 kind=group、groupId=`SEC>父码` 层级式、
-父行=子行合计；孤儿子行不嵌套防噪音；RM 料组行经 rawMaterialLineFor 四类并入 701/702/703/704
-购买父级，样板五行即现）；route COA 查询补 parentCode（resolveAcct 别名归一）；UI 折叠改层级
-前缀判定+零行过滤 alive 按前缀爬祖先；L2 天然=父级小计视图。引擎测试 +2（25/25）。
-③ ✅「没有amount 的account 可以不显示吗？」＝已做：cleanRows 过滤全零 line/group（组零且组内
-行全零才隐），显示+CSV/Excel/PDF 同步干净，Edit 模式保留全行可拖。④ owner 消息「2.」＝误打，已裁「别理」。
-⑤ Unallocated 病因逐笔查清（AMAZON 4,740=装修服务用 PI 录、行无 account 栏可选；WF LEATHER
-401.40=pi-87f586ea 行没选料号；ADD WOOD 700=同类）→ owner 问「不能根据account 分类？」＝有
-account 的（OCB 路）早已按 account 分；PI 行无 account 概念。⑥ ✅「supplier 性质归类」owner
-拍「做」：新 kv `cashflow_supplier_category_map`（supplier→四类之一，""=钉平铺）+
-`computeSupplierCategoryGuess`（按该供应商 PI 行料组 sen 主导类自动猜，override 压猜）；引擎
-`supplierCategory` opts——Opening/Unallocated — X 行**保留供应商标签**、嵌进对应购买父级；
-GET/PUT /cashflow/map 带 supplierCategoryMap（+guess）；Edit 模式新「Supplier categories」卡
-（Auto—猜值/四类/Keep flat 下拉，改即存即刷）。引擎测试 26/26（+1）。⑦ Cshflw Summary 汇总
-视图＝owner 裁「不需要，毕竟我有level了」，关闭。⑧ ✅ Cash Position 板 TO RECEIVE 默认改
-「上个月之前、按发票月全部欠款（totalSen）」（owner 09-03 提、09-05 拍「对」）：recvRows 按
-`month < curMonth` 过滤（⇄ 切全部）、金额恒 totalSen（dueSen 退役）、按钮文案 Before this
-month；与 supplier 侧同规则，CASH AFTER 净额卡自动跟随。
+**Not started:** R6/R8-R10 (Products page's own "Import SKUs" still hand-rolls CSV + per-row PUT +
+the `??`-blank-overwrite bug at `products.ts` PUT `:917` merge block — NOT fixed, only the new bulk
+endpoint avoids it), R9 export fields (`price1`, sofa tier prices, `skuCode`, pricing-permission
+banner), R11-R13 (grid "export all" / invoice 200 cap / mobile placeholder), R1/R2 (shared
+`src/lib/import-export/` client lib — the two BatchImportDialog-based importers work today without
+it, but Products page migrating onto R3's endpoint per R8 would want it), R15 doc updates beyond
+products.md.
 
-## 2026-09-04 — ✅ 六月 Out by 600 精查 + 修（BUG-176：跨月配对不按月底切）
+**P0** — Inventory → Batch Import Finished Products / Raw Materials never writes to the DB; only
+updates local React state and toasts "Imported: N created" (`inventory/index.tsx:1978-2081`). RM
+endpoint `POST /api/rawmaterials/bulk-import` exists with no caller (`raw-materials.ts:619`); no FG
+bulk endpoint exists at all.
 
-Owner（挂图）：「可以帮我检查这个600.00是什么？只检查」→ prod 全量核查（配对差=0、无重复行、
-两条 ignore 是他裁过的且有 opening 抵消）→ 唯一来源：**HPV-2606-003（RM 600 付 TIOW WAI KEONG）
-单 29/06、银行 02/07 过账**——配对本身正确，但报表 walk 把「任何日期配上」当「本月已清」，
-6 月就少列一条在途 → Out by +600。他的账分毫没错。裁决「修」→ `computeBankRecoReport` 两侧
-按月底切：书侧 `clearedOn.get(id) <= monthEnd` 才算清；账单侧改抓 matchedLegId，腿在月底后的
-配对行仍算 unbooked（腿缺失=沿旧口径当已入账）。board `/cash-position` 本来就按日期切，只有
-报表瞎。守卫 +1 测试（month-scopes both sides）。BUG-2026-09-04-176。**追加（owner：「这会让人混乱，
-我想要一眼就看得出tally 没有」）**：徽章改三态——红 NOT TALLY — out by X（对不上=有错）／黄
-Tally ✓ · N bank lines to record（数对了但银行有账里没录）／绿 Tally ✓ · all recorded（全清）；
-finalised 版同逻辑带 🔒 前缀；Finalise 按钮只在全绿时 primary。**再追加（owner：「就不能显示
-difference 多少吗？」）**：报表卡重排——银行数、账面数相邻 + **Difference — book above/below
-bank 一行**（|gl−closing|），下缩进两条 not-yet 行，末行绿「= explained to the sen ✓」或红
-「NOT fully explained — unexplained part X」（=Out by）；「Book balance should be」行退役。
+**P1** — Products import sends `""` for empty text cells; backend merges with `??` instead of
+`=== undefined`, so blanks overwrite existing values (`products/index.tsx:3089`,
+`products.ts:773-812`) — an empty `status` cell makes the SKU disappear. Also: case-sensitive
+headers, quoted-newline CSV rows break, server 400s surface as "unknown codes", one `PUT` per row
+with no cap/transaction/preview (`products/index.tsx:3062-3125`). Products export omits `price1`
+and sofa size/tier prices, writes money in sen not RM, hand-rolls its own CSV escaper
+(`products/index.tsx:2800-2831`).
+
+**P2/P3** — pricing-permission-less users get silently blanked price columns instead of a banner
+(`products.ts:449-457`); Products import accepts `.csv` only vs Inventory's `.xlsx`/`.csv`; grid
+exports are current-tab-only, invoice Detail Listing caps at 200 rows with no warning, mobile bulk
+export is a placeholder; `products.md`/`inventory.md` don't document any of this; zero tests for
+the products CSV path, `BatchImportDialog` parsing, or the PUT empty-string behaviour.
+
+**Scope (15 reqs, R1-R15):** one shared client import/export lib (`src/lib/import-export/`); new
+`POST /api/products/bulk-import` mirroring the RM one, ≤5,000 rows, one transaction, preview
+(created/updated/rejected), audit row; blank-never-overwrites on the backend; export/import format
+parity (RM not sen, blank = unchanged, .csv + .xlsx both sides); "export all" on every DataGrid;
+`docs/modules/import-export.md` + updated `products.md`/`inventory.md`/`API.md`; tests (R14).
+Out of scope: Google Sheets sync, CNC template import, bank-reco import.
+
+**Acceptance criteria (A1-A6):** RM batch import of 50 rows survives a refresh with an audit row;
+empty `description` cell leaves value unchanged while empty `status` is rejected with a reason;
+export→import round-trip only changes prices that actually differ in the file, sofa tier prices
+survive; pricing-permission-less export shows a banner with no price columns (not empty ones);
+"Export all" on a 400-row filtered list returns all 400; `npm test` includes R14 and passes.
+
+---
 
 ## 2026-09-02 — ✅ 每月银行对账：上传 HLBB PDF 自动对账 + Cash Book 视图重整（bank reco v1）
 

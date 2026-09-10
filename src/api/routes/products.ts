@@ -17,6 +17,11 @@ import {
   SETUP_FIELDS,
 } from "../lib/kpi-metrics";
 import { getOrgId } from "../lib/tenant";
+import { buildAuditStatement } from "../lib/audit";
+import {
+  shapeProductBulkRow,
+  type ProductBulkImportInput,
+} from "../lib/product-bulk-import";
 
 const app = new Hono<Env>();
 
@@ -715,6 +720,204 @@ app.post("/", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// POST /api/products/bulk-import — upserts by `code`, one D1 transaction.
+app.post("/bulk-import", async (c) => {
+  const denied = await requirePermission(c, "products", "create");
+  if (denied) return denied;
+  let body: { rows?: ProductBulkImportInput[] };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON" }, 400);
+  }
+  const rows = Array.isArray(body.rows) ? body.rows : [];
+  if (rows.length === 0) {
+    return c.json({ success: true, data: { created: 0, updated: 0, rejected: [] } });
+  }
+  if (rows.length > 5000) {
+    return c.json(
+      {
+        success: false,
+        error: `Too many rows (${rows.length}) — the limit is 5,000 per import`,
+      },
+      400,
+    );
+  }
+
+  await ensureProductCreatedAtColumn(c.var.DB);
+
+  type BulkState = {
+    id: string;
+    code: string;
+    name: string;
+    category: string;
+    baseModel: string | null;
+    sizeCode: string | null;
+    sizeLabel: string | null;
+    basePriceSen: number | null;
+    costPriceSen: number;
+    fabricUsage: number;
+    status: string;
+  };
+
+  const existingRes = await c.var.DB.prepare("SELECT * FROM products").all<ProductRow>();
+  const codeToState = new Map<string, BulkState>();
+  const idToState = new Map<string, BulkState>();
+  for (const r of existingRes.results ?? []) {
+    const state: BulkState = {
+      id: r.id,
+      code: r.code,
+      name: r.name,
+      category: r.category,
+      baseModel: r.baseModel,
+      sizeCode: r.sizeCode,
+      sizeLabel: r.sizeLabel,
+      basePriceSen: r.basePriceSen,
+      costPriceSen: r.costPriceSen,
+      fabricUsage: r.fabricUsage,
+      status: r.status,
+    };
+    codeToState.set(r.code, state);
+    idToState.set(r.id, state);
+  }
+
+  const nowIso = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+  const rejected: { row: number; reason: string }[] = [];
+  let created = 0;
+  let updated = 0;
+
+  rows.forEach((raw, i) => {
+    const shaped = shapeProductBulkRow(raw ?? {});
+    if (!shaped.ok) {
+      rejected.push({ row: i + 1, reason: shaped.reason });
+      return;
+    }
+    const r = shaped.row;
+    // `prior` may be a row this same sheet already created/updated above —
+    // a duplicate id/code within one file merges against that, not stale
+    // DB data. id takes priority so a code edit is a rename, not a new row.
+    const prior = (r.id && idToState.get(r.id)) || codeToState.get(r.code);
+
+    if (prior) {
+      const renaming = prior.code !== r.code;
+      if (renaming) {
+        const collision = codeToState.get(r.code);
+        if (collision && collision.id !== prior.id) {
+          rejected.push({
+            row: i + 1,
+            reason: `code "${r.code}" is already used by another product`,
+          });
+          return;
+        }
+      }
+      const merged: BulkState = {
+        id: prior.id,
+        code: r.code,
+        name: r.name ?? prior.name,
+        category: r.category ?? prior.category,
+        baseModel: r.baseModel ?? prior.baseModel ?? r.code,
+        sizeCode: r.sizeCode ?? prior.sizeCode ?? "",
+        sizeLabel: r.sizeLabel ?? prior.sizeLabel ?? "",
+        basePriceSen: r.basePriceSen ?? prior.basePriceSen,
+        costPriceSen: r.costPriceSen ?? prior.costPriceSen,
+        fabricUsage: r.fabricUsage ?? prior.fabricUsage,
+        status: r.status ?? prior.status,
+      };
+      statements.push(
+        c.var.DB.prepare(
+          `UPDATE products SET
+             code = ?, name = ?, category = ?, baseModel = ?, sizeCode = ?, sizeLabel = ?,
+             basePriceSen = ?, costPriceSen = ?, fabricUsage = ?, status = ?
+           WHERE id = ?`,
+        ).bind(
+          merged.code,
+          merged.name,
+          merged.category,
+          merged.baseModel,
+          merged.sizeCode,
+          merged.sizeLabel,
+          merged.basePriceSen,
+          merged.costPriceSen,
+          merged.fabricUsage,
+          merged.status,
+          merged.id,
+        ),
+      );
+      if (renaming) codeToState.delete(prior.code);
+      codeToState.set(r.code, merged);
+      idToState.set(merged.id, merged);
+      updated++;
+    } else {
+      if (!r.name || !r.category) {
+        rejected.push({
+          row: i + 1,
+          reason: "name and category are required for a new product",
+        });
+        return;
+      }
+      const id = genProductId();
+      const fresh: BulkState = {
+        id,
+        code: r.code,
+        name: r.name,
+        category: r.category,
+        baseModel: r.baseModel ?? r.code,
+        sizeCode: r.sizeCode ?? "",
+        sizeLabel: r.sizeLabel ?? "",
+        basePriceSen: r.basePriceSen ?? null,
+        costPriceSen: r.costPriceSen ?? 0,
+        fabricUsage: r.fabricUsage ?? 0,
+        status: r.status ?? "ACTIVE",
+      };
+      statements.push(
+        c.var.DB.prepare(
+          `INSERT INTO products
+             (id, code, name, category, description, baseModel, sizeCode, sizeLabel,
+              fabricUsage, unitM3, status, costPriceSen, basePriceSen,
+              productionTimeMinutes, subAssemblies, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          id,
+          r.code,
+          fresh.name,
+          fresh.category,
+          "",
+          fresh.baseModel,
+          fresh.sizeCode,
+          fresh.sizeLabel,
+          fresh.fabricUsage,
+          0,
+          fresh.status,
+          fresh.costPriceSen,
+          fresh.basePriceSen,
+          0,
+          "[]",
+          nowIso,
+        ),
+      );
+      codeToState.set(r.code, fresh);
+      idToState.set(id, fresh);
+      created++;
+    }
+  });
+
+  const auditStmt = await buildAuditStatement(c, {
+    resource: "products",
+    resourceId: "bulk-import",
+    action: "update",
+    source: "api",
+    after: { created, updated, rejectedCount: rejected.length },
+  });
+  if (auditStmt) statements.push(auditStmt);
+
+  if (statements.length > 0) {
+    await c.var.DB.batch(statements);
+  }
+
+  return c.json({ success: true, data: { created, updated, rejected } });
 });
 
 // GET /api/products/:id — single product + BOM + dept times

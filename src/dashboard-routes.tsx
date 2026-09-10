@@ -19,9 +19,8 @@ import { PageSkeleton } from './components/ui/skeleton'
 // is now the one and only dashboard, served at /dashboard.
 const DashboardB = lazy(() => import('./pages/dashboard-b'))
 
-// Test — design prototypes. Sales Orders and Employees read the live
-// database via /api/dashboard/prototype; Delivery, Inventory and Purchase
-// Orders still render generated sample data (see the page's own header note).
+// Test — design prototypes. Native React, reads the same real endpoints
+// the Command Center uses (no dedicated backend route of its own).
 const DashboardPrototype = lazy(() => import('./pages/test/dashboard-prototype'))
 
 // Sales
@@ -237,8 +236,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   },
   { path: '/dashboard-b', element: <Navigate to="/dashboard" replace /> },
 
-  // Test — design prototypes. Not permission-gated: partly-live but
-  // read-only, nothing here can be written through.
+  // Test — design prototypes.
   { path: '/test/dashboard-prototype', element: <S><DashboardPrototype /></S> },
 
   // Sales

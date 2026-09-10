@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --open",
     "test": "node --import tsx/esm --test tests/*.test.mjs",
     "build": "vite build",
     "build:strict": "npm run typecheck:app && npm run build",

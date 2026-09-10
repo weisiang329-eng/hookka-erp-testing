@@ -79,9 +79,6 @@ const navigationGroups: NavGroup[] = [
   {
     label: "OVERVIEW",
     items: [
-      // Sales Orders + Employees read live via /api/dashboard/prototype;
-      // Delivery, Inventory and Purchase Orders are still sample data (the
-      // page itself labels which is which).
       { name: "Dashboard Prototype", href: "/test/dashboard-prototype", icon: FlaskConical },
       { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
       { name: "Hookka Report", href: "/daily-report", icon: ClipboardCheck },

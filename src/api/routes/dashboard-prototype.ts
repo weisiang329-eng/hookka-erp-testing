@@ -53,6 +53,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
+import { requirePermission, hasPermission } from "../lib/rbac";
 import { collectOnTimeDelivery, EMPTY_ON_TIME } from "../lib/on-time-delivery";
 import { poInPlanning, poReadyForDelivery, type PipelinePO } from "../../lib/delivery-pipeline";
 import { loadPoValueMap, loadDoValueMap } from "../lib/do-value";
@@ -270,6 +271,25 @@ const dayKey = (v: unknown): string | null => {
 };
 
 app.get("/", async (c) => {
+  // sales-orders:read remains the front-door gate — Sales Orders is the tab
+  // that opens by default and every viewer of this dashboard needs it. Now
+  // that the other five tabs are wired up in the frontend (2026-09-10), a
+  // caller who lacks a SECTION's own permission (delivery-orders / purchase-
+  // orders / inventory / workers / production-orders) must not receive that
+  // section's data just because they can see Sales — see the redaction pass
+  // right before the response is built, same "drop it, don't refuse the
+  // whole page" doctrine hasPermission's own doc describes.
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+
+  const [canDelivery, canPurchase, canInventory, canWorkers, canProduction] = await Promise.all([
+    hasPermission(c, "delivery-orders", "read"),
+    hasPermission(c, "purchase-orders", "read"),
+    hasPermission(c, "inventory", "read"),
+    hasPermission(c, "workers", "read"),
+    hasPermission(c, "production-orders", "read"),
+  ]);
+
   const orgId = getOrgId(c);
 
   // ---- Sales ------------------------------------------------------------
@@ -1366,7 +1386,7 @@ app.get("/", async (c) => {
     workingHoursPerDay: modeOf(workerRows.map((w) => num(w.working_hours_per_day)), 9),
   };
 
-  return c.json({
+  const rawPayload = {
     success: true,
     meta: {
       orgId,
@@ -1590,7 +1610,47 @@ app.get("/", async (c) => {
         measuredCards: perfMeasuredCards,
       },
     },
-  });
+  };
+
+  // Redact at the response boundary, not by skipping the queries above — the
+  // sections cross-reference each other too much to gate mid-computation
+  // (e.g. the delivery status strip reads production_orders), and this is
+  // the same "drop it, don't refuse the whole page" doctrine hasPermission's
+  // own doc describes for a column a caller may not see. A denied section
+  // reports `live: false` with a reason, same shape a genuine query failure
+  // already uses, so the frontend needs no special case for "no permission"
+  // vs "query broke."
+  const payload = {
+    ...rawPayload,
+    delivery: canDelivery ? rawPayload.delivery : null,
+    purchase: canPurchase ? rawPayload.purchase : null,
+    inventory: canInventory ? rawPayload.inventory : null,
+    employee: canWorkers ? rawPayload.employee : null,
+    production: canProduction ? rawPayload.production : null,
+    availability: {
+      ...rawPayload.availability,
+      delivery: canDelivery
+        ? rawPayload.availability.delivery
+        : { live: false, rows: 0, reason: "insufficient permission: delivery-orders:read" },
+      deliveryStatus: canDelivery
+        ? rawPayload.availability.deliveryStatus
+        : { live: false, reason: "insufficient permission: delivery-orders:read" },
+      purchase: canPurchase
+        ? rawPayload.availability.purchase
+        : { live: false, rows: 0, reason: "insufficient permission: purchase-orders:read" },
+      inventory: canInventory
+        ? rawPayload.availability.inventory
+        : { live: false, rows: 0, reason: "insufficient permission: inventory:read" },
+      employee: canWorkers
+        ? rawPayload.availability.employee
+        : { live: false, workers: 0, attendanceRows: 0, reason: "insufficient permission: workers:read" },
+      production: canProduction
+        ? rawPayload.availability.production
+        : { live: false, rows: 0, reason: "insufficient permission: production-orders:read" },
+    },
+  };
+
+  return c.json(payload);
 });
 
 export default app;

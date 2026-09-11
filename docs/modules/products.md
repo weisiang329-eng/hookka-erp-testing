@@ -28,7 +28,7 @@ Money is integer sen; many product columns are legacy camelCase.
 
 ## Entry points
 - **Pages** (all under `/products`, one page hosts three views)
-  - `/products` → `src/pages/products/index.tsx:2007` (`ProductsPage`; `viewMode` = `skuMaster|catalog|maintenance`)
+  - `/products` → `src/pages/products/index.tsx:2025` (`ProductsPage`; `viewMode` = `skuMaster|catalog|maintenance`)
   - `/products/:id/bom` → `src/pages/products/bom.tsx:462` (`BOMPage` — Master BOM Templates editor; also reached via `?sku=` from sales/consignment)
   - `/products/:id/documents` → `src/pages/products/documents.tsx:92` (`ProductDocumentsPage` — production docs per variant)
   - Catalog is NOT a route — `ProductCatalog` (`src/pages/products/catalog.tsx:138`) renders inline as `viewMode==="catalog"`
@@ -65,11 +65,11 @@ Money is integer sen; many product columns are legacy camelCase.
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
 |---|---|---|
-| `ProductsPage` (default export) | `src/pages/products/index.tsx:2007` | 3-way view host; `viewMode` state just below |
-| `VariantEditorDialog` | `src/pages/products/index.tsx:654` | Add/edit a product variant |
-| `MaintenanceView` | `src/pages/products/index.tsx:1112` | Maintenance-config view (Edit/Save/Cancel) |
-| `CustomerAssignmentsSection` | `src/pages/products/index.tsx:472` | Per-customer SKU assignment (expand row) |
-| `ProductionConfig` / `CategoryBadge` | `src/pages/products/index.tsx:379 / 366` | Per-dept config display helpers |
+| `ProductsPage` (default export) | `src/pages/products/index.tsx:2025` | 3-way view host; `viewMode` state just below |
+| `VariantEditorDialog` | `src/pages/products/index.tsx:661` | Add/edit a product variant |
+| `MaintenanceView` | `src/pages/products/index.tsx:1130` | Maintenance-config view (Edit/Save/Cancel) |
+| `CustomerAssignmentsSection` | `src/pages/products/index.tsx:479` | Per-customer SKU assignment (expand row) |
+| `ProductionConfig` / `CategoryBadge` | `src/pages/products/index.tsx:386 / 373` | Per-dept config display helpers |
 | `ProductCatalog` | `src/pages/products/catalog.tsx:138` | Model-based photo grid (inline catalog view) |
 | `rowToProduct` | `src/api/routes/products.ts:161` | Re-nests children + parses JSON columns on read |
 | `app.post("/")` / `app.put("/:id")` | `src/api/routes/products.ts:584 / 730` | Product create / edit (full-replace children) |

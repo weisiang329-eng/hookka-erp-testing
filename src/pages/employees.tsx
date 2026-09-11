@@ -1122,18 +1122,45 @@ function WorkingHoursTab({
         /* attendance unavailable — grid works without the punch pre-fill */
       }
 
+      // Segments per worker-day. A day the office SPLIT across departments has
+      // >1 segment; a plain day has exactly one. Owner 2026-09-08 (单段日自动跟
+      // 打卡): a single-segment day should mirror its punch, so a stale / imported
+      // / Copy-yesterday value that sits a few minutes under 9 h stops showing a
+      // false "short". A split day is left untouched — the punch is one daily
+      // total and cannot know how the office divided it between departments.
+      const segCount = new Map<string, number>();
+      for (const e of entries) {
+        const k = `${e.workerId}|${e.date}`;
+        segCount.set(k, (segCount.get(k) ?? 0) + 1);
+      }
+
       const drafts: EntryDraft[] = entries.map((e) => {
-        const punch = punchByKey.get(`${e.workerId}|${e.date}`);
+        const key = `${e.workerId}|${e.date}`;
+        const punch = punchByKey.get(key);
+        // Single-segment day + a clean in/out punch → take the punch's payable
+        // hours (regular + OT, lunch already deducted). hoursFromPunch returns
+        // null on a missing/invalid punch, so a day with no usable punch keeps
+        // its saved hours. Only flip `saved` to false when the value actually
+        // changes, so it joins the dirty set and Save all commits it (saveRow
+        // then re-docks any real shortfall from the same punch, server-side).
+        const single = (segCount.get(key) ?? 0) === 1;
+        const punchHours = single
+          ? hoursFromPunch(punch?.clockIn, punch?.clockOut, attRulesFor(e.date))
+          : null;
+        const usePunch =
+          punchHours !== null &&
+          Math.abs(punchHours - (Number(e.hours) || 0)) > 0.001;
         return {
           id: e.id,
           workerId: e.workerId,
           date: e.date,
           departmentCode: e.departmentCode,
           category: e.category,
-          hours: e.hours, // keep the saved hours — do NOT overwrite a split from a punch
+          // Single-segment days follow the punch; split days keep their hand-keyed hours.
+          hours: usePunch ? punchHours : e.hours,
           notes: e.notes,
           saving: false,
-          saved: true,
+          saved: !usePunch,
           clockIn: punch?.clockIn,
           clockOut: punch?.clockOut,
         };
@@ -1866,8 +1893,24 @@ function WorkingHoursTab({
                 // the daily total is flagged against.
                 const std = gWorker && gWorker.workingHoursPerDay > 0 ? gWorker.workingHoursPerDay : 9;
                 const gTotal = group.items.reduce((s, it) => s + (Number(it.row.hours) || 0), 0);
+                // "short" is an ATTENDANCE question — did the worker do a full day?
+                // — and the PUNCH answers it, NOT how the office split the hours
+                // across departments. When a clean in/out punch exists, judge the
+                // shortfall against its payable hours so a day whose department
+                // split sums under 9h (e.g. 0.66 + 7.79) does NOT show a false
+                // "short" when the punch proves a full day. No usable punch → fall
+                // back to the entered total. Owner 2026-09-08: 没有 short 却显示
+                // short,不可以有。 The box hours are untouched — this only moves the
+                // flag; OT still follows the logged total so a manual OT entry is
+                // not hidden.
+                const punchJudgeH = hoursFromPunch(
+                  first.row.clockIn,
+                  first.row.clockOut,
+                  attRulesFor(first.row.date),
+                );
+                const shortJudgeH = punchJudgeH !== null ? punchJudgeH : gTotal;
                 const over = gTotal > std + 0.01;
-                const short = !!gWorkerId && gTotal > 0.01 && gTotal < std - 0.01;
+                const short = !!gWorkerId && shortJudgeH > 0.01 && shortJudgeH < std - 0.01;
                 const totalCls = over
                   ? "bg-[#FAEFCB] text-[#9C6F1E]"
                   : short

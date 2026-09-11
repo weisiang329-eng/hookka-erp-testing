@@ -24,7 +24,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
 import { fmtRM, fmtDate, drawLetterhead } from "@/lib/pdf-utils";
-import { sofaSeatHeights } from "./sofa-seat-heights";
+import { sofaSeatHeights, sofaSeatLabel } from "./sofa-seat-heights";
 import { getVariantsConfigSync } from "./kv-config";
 
 // ---------------------------------------------------------------------------
@@ -494,7 +494,7 @@ export default function generateCustomerQuotationPdfV2(
           ]);
           const matrixHead = [
             "Description", "Tier",
-            ...visibleHeights.map((h) => `${h}"`),
+            ...visibleHeights.map(sofaSeatLabel),
           ];
 
           // Sub-header for this model + a small gap before the table.
@@ -623,14 +623,21 @@ export default function generateCustomerQuotationPdfV2(
           if (typeof v === "number" && v > 0) heightsSet.add(h);
         }
       }
-      const heights = Array.from(heightsSet).sort((a, b) => Number(a) - Number(b));
+      const heights = Array.from(heightsSet).sort((a, b) => {
+        const an = /^\d+(?:\.\d+)?$/.test(a);
+        const bn = /^\d+(?:\.\d+)?$/.test(b);
+        if (an && bn) return Number(a) - Number(b);
+        if (an) return -1;
+        if (bn) return 1;
+        return a.localeCompare(b);
+      });
       if (heights.length === 0) continue;
 
       const head: string[] = [
         "Components",
         "Tier",
         "Scope",
-        ...heights.map((h) => `${h}"`),
+        ...heights.map(sofaSeatLabel),
       ];
       const body: string[][] = modelCombos.map((c) => {
         const row: string[] = [

@@ -208,13 +208,19 @@ type BaseCol = {
 // reads), numerically sorted. A size added in Maintenance (e.g. 20") gets its
 // price column here without a code change (BUG-2026-07-27-001 follow-up).
 // BEDFRAME / ACCESSORY column sets stay static.
+// A Sizes entry is EITHER a numeric seat height (24, 26 …) or a named size the
+// owner adds (e.g. DEFAULT). Numeric ones carry the inch mark in their label.
+const IS_NUMERIC_SIZE = (s: string) => /^\d+(?:\.\d+)?$/.test(s);
 const SOFA_HEIGHT_COL = (n: string): BaseCol => ({
   key: `h${n}`,
-  label: `${n}"`,
+  label: IS_NUMERIC_SIZE(n) ? `${n}"` : n,
   width: "minmax(95px,0.95fr)",
   align: "right",
 });
-const H_COL_RE = /^h(\d+(?:\.\d+)?)$/;
+// Matches a seat-size price column key (`h` + the size). Broadened from the old
+// digits-only form so a NAMED size (e.g. hDEFAULT) is recognised too — no other
+// base-column key starts with "h", so this stays unambiguous.
+const H_COL_RE = /^h(.+)$/;
 function buildBaseCols(sofaHeights: string[]): Record<ProdCat, BaseCol[]> {
   return {
     BEDFRAME: [
@@ -268,7 +274,7 @@ const BASE_COL_CHOOSER_LABEL: Record<string, string> = {
 // aren't in the static map — derive their "Seat N"" label from the key.
 function baseColChooserLabel(col: { key: string; label: string }): string {
   const m = H_COL_RE.exec(col.key);
-  if (m) return `Seat ${m[1]}"`;
+  if (m) return IS_NUMERIC_SIZE(m[1]) ? `Seat ${m[1]}"` : m[1];
   return BASE_COL_CHOOSER_LABEL[col.key] ?? col.label;
 }
 
@@ -1021,12 +1027,23 @@ const DEFAULT_MAINTENANCE_CONFIG: MaintenanceConfig = {
 // default list when the config is empty/malformed so the grid never loses
 // its price columns.
 function sofaHeightsFromConfig(cfg: MaintenanceConfig): string[] {
+  // Keep EVERY size the owner put in the Sizes list — numeric (24, 26 …) OR a
+  // named size (e.g. DEFAULT). Owner 2026-09-08: the price columns must follow
+  // the list verbatim, whatever is in it; only blanks drop. Numeric sizes sort
+  // ascending and lead; named sizes follow, alphabetically.
   const cleaned = (cfg.sofaSizes ?? [])
     .map((s) => String(s).replace(/"/g, "").trim())
-    .filter((s) => /^\d+(?:\.\d+)?$/.test(s));
+    .filter((s) => s.length > 0);
   const uniq = [...new Set(cleaned)];
   const base = uniq.length > 0 ? uniq : DEFAULT_MAINTENANCE_CONFIG.sofaSizes;
-  return [...base].sort((a, b) => Number(a) - Number(b));
+  return [...base].sort((a, b) => {
+    const an = IS_NUMERIC_SIZE(a);
+    const bn = IS_NUMERIC_SIZE(b);
+    if (an && bn) return Number(a) - Number(b);
+    if (an) return -1;
+    if (bn) return 1;
+    return a.localeCompare(b);
+  });
 }
 
 type MaintenanceTab = MaintenanceListKey | "fabrics";

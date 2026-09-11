@@ -23,6 +23,7 @@ import { humanizeError } from "@/lib/humanize-error";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 import { useSofaSeatHeights } from "@/lib/use-sofa-seat-heights";
+import { sofaSeatLabel } from "@/lib/sofa-seat-heights";
 
 export type SofaComboHistoryFabricTier = "ANY" | "PRICE_1" | "PRICE_2" | "PRICE_3";
 export type SofaComboHistorySizes = string[] | string[][];
@@ -277,7 +278,7 @@ export function SofaComboHistoryDialog({
                   {SEAT_HEIGHTS.map((h) => (
                     <div key={h} className="space-y-1">
                       <div className="text-[10px] uppercase tracking-wide text-center text-[#9CA3AF]">
-                        {h}&Prime;
+                        {sofaSeatLabel(h)}
                       </div>
                       <Input
                         type="number" onFocus={(e) => e.currentTarget.select()}
@@ -362,7 +363,7 @@ export function SofaComboHistoryDialog({
                                 return (
                                   <tr key={hh}>
                                     <td className="px-1 py-0 text-[#1F1D1B] font-medium">
-                                      {hh}&Prime;
+                                      {sofaSeatLabel(hh)}
                                     </td>
                                     <td className="px-1 py-0 text-right">
                                       {typeof v === "number" ? (

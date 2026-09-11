@@ -2338,6 +2338,24 @@ export async function createDeliveryOrderForPOs(
 
     const salesOrderId: string | undefined = resolvedSalesOrderId;
 
+    // T-006 R1 — server-side backstop. An SO-linked DO with NO
+    // productionOrderIds is exactly the Sales-page "Transfer to Delivery
+    // Order" bug that bypassed validateDoComposition's once-only-delivery
+    // guard (BUG-2026-05-16: 13 duplicate DOs, RM 24,647 double-consumed) —
+    // it built `items` by hand instead of going through a production order,
+    // so the guard above never ran because productionOrderIds was empty.
+    // Refuse outright rather than silently accepting hand-built items again.
+    if (salesOrderId && productionOrderIds.length === 0) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          success: false,
+          error: "A delivery order for a sales order must be created from its production orders (productionOrderIds), not hand-built items — this is what makes the once-only-delivery guard run.",
+        },
+      };
+    }
+
     // Validate customer (salesOrder link optional at this phase).
     let salesOrderRow: {
       id: string;

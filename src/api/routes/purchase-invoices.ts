@@ -65,6 +65,18 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // for lines invoiced straight off a PO with no receipt in between.
       "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS po_id TEXT",
       "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS invoiced_qty NUMERIC DEFAULT 0",
+      // T-006 R5 — DB backstop mirroring the sales-side chk_doi_invoiced_qty:
+      // two concurrent PI creates against the same GRN line can no longer
+      // both commit even if the app-level checkPoRemaining/checkConvertAvailability
+      // race. "already exists" on retry is benign (runSelfApply treats it so).
+      // NOT VALID — this repo has already measured real over-invoicing
+      // history (that's WHY this constraint exists), so a validating ADD
+      // CONSTRAINT could hit an existing bad row and fail to install, which
+      // would then throw here and block every PI create/edit, not just
+      // future races. NOT VALID enforces the rule for every write from now
+      // on without checking history first. Nobody has queried whether
+      // existing rows are clean — this does not claim they are.
+      "ALTER TABLE grn_items ADD CONSTRAINT chk_grn_items_invoiced_qty CHECK (invoiced_qty >= 0 AND invoiced_qty <= accepted_qty) NOT VALID",
       // Sub-cent unit prices are NOT here. They used to be — one ALTER in each
       // of three route files, each awaited on WRITES only, so the column stayed
       // INTEGER until somebody happened to save a document. It is one
@@ -1633,6 +1645,24 @@ app.post("/", async (c) => {
     const firstErr = e instanceof Error ? e.message : String(e);
     console.error(`[pi] ${id} first insert attempt failed:`, firstErr);
 
+    // T-006 R5 — the chk_grn_items_invoiced_qty CHECK constraint (Postgres
+    // code 23514) is the DB-level backstop for a raced ceiling check: two
+    // concurrent creates against the same GRN line, the app-level guard
+    // above let both through, the constraint catches the second commit. This
+    // is the intended, expected outcome of that race — return the SAME 409
+    // the app-level check itself would give, and stop here. Falling through
+    // to the legacy-column retry below would re-run the identical statements
+    // and hit the same violation again, or worse: some retry paths drop the
+    // grn_items increment, which would let the PI finish WITHOUT ever
+    // consuming the line it billed against.
+    const errCode = (e as { code?: string } | null)?.code ?? "";
+    if (errCode === "23514" || /chk_grn_items_invoiced_qty/.test(firstErr)) {
+      return c.json(
+        { success: false, error: "This GRN line's available quantity was just consumed by another invoice. Refresh and try again." },
+        409,
+      );
+    }
+
     // Pre-migration-0162 DB (currency columns absent): a plain MYR PI must
     // still save — retry with the legacy column list. A FOREIGN PI cannot
     // be stored truthfully without the columns, so that one fails loudly.
@@ -2535,7 +2565,22 @@ app.put("/:id", async (c) => {
     }
   }
 
-  await db.batch(statements);
+  try {
+    await db.batch(statements);
+  } catch (e) {
+    // T-006 R5 — same DB backstop as the create path (chk_grn_items_invoiced_qty,
+    // Postgres 23514): an edit that adds/increases GRN-sourced lines can race
+    // a concurrent create/edit against the same GRN line the same way.
+    const msg = e instanceof Error ? e.message : String(e);
+    const errCode = (e as { code?: string } | null)?.code ?? "";
+    if (errCode === "23514" || /chk_grn_items_invoiced_qty/.test(msg)) {
+      return c.json(
+        { success: false, error: "This GRN line's available quantity was just consumed by another invoice. Refresh and try again." },
+        409,
+      );
+    }
+    throw e;
+  }
 
   await emitAudit(c, {
     resource: "purchase-invoices",

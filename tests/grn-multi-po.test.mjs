@@ -59,19 +59,28 @@ test("a line's own PO is used, with the header PO only as fallback", () => {
   assert.match(body, /const explicitPo = \(\(l\.poId \?\? l\.po_id\) \?\? headerPoId \?\? ""\)\.trim\(\)/);
 });
 
-test("posting draws down each line's own PO line", () => {
-  const body = fnBody("cascadePOStatusAfterGRNPost");
-  assert.match(body, /resolveGrnLineTargets\(db, grnId, grn\?\.poId \?\? null\)/);
+// T-006 R3 folded the cascade's SQL-building into buildPOCounterStatements
+// (a pure builder, no execution) so the create path can push its statements
+// into the SAME batch as the header+lines insert instead of a separate one.
+// cascadePOStatusAfterGRNPost is now just: call the builder, batch, recompute.
+test("the counter-statement builder draws down each line's own PO line", () => {
+  const body = fnBody("buildPOCounterStatements");
+  assert.match(body, /resolveGrnLineTargets\(db, grnId, headerPoId, preloadedLines\)/);
   assert.match(body, /receivedQty = receivedQty \+ \?[\s\S]*?\.bind\(t\.qty, t\.poItemId\)/);
-  // No positional lookup survives in the cascade itself.
+  // No positional lookup survives in the builder itself.
   assert.doesNotMatch(body, /poItemIndex/);
+});
+
+test("posting calls the counter-statement builder with the header PO", () => {
+  const body = fnBody("cascadePOStatusAfterGRNPost");
+  assert.match(body, /buildPOCounterStatements\(db, grnId, grn\?\.poId \?\? null\)/);
 });
 
 test("posting recomputes EVERY purchase order the receipt touched", () => {
   const body = fnBody("cascadePOStatusAfterGRNPost");
   assert.match(
     body,
-    /for \(const poId of \[\.\.\.new Set\(targets\.map\(\(t\) => t\.poId\)\)\]\)/,
+    /for \(const poId of affectedPoIds\)/,
     "a second PO must not be left at CONFIRMED while its goods are in the building",
   );
   assert.match(body, /recomputePoStatusFromReceipts\(db, poId\)/);
@@ -104,7 +113,7 @@ test("reversal also recomputes every touched purchase order", () => {
 test("partial receipt still accumulates rather than overwrites", () => {
   // The owner confirmed a PO is received across several deliveries, so the
   // draw-down must be += / -=, never =.
-  const post = fnBody("cascadePOStatusAfterGRNPost");
+  const post = fnBody("buildPOCounterStatements");
   assert.match(post, /receivedQty = receivedQty \+ \?/);
   assert.doesNotMatch(post, /SET receivedQty = \?/);
 });
@@ -155,7 +164,9 @@ test("the resolver prefers the line id, and only then its own PO's index", () =>
 
 test("the over-receipt guard checks the line's own ordered quantity", () => {
   const guard = SRC.slice(SRC.indexOf("// Over-receipt validation"));
-  assert.match(guard.slice(0, 400), /const poItem = resolvePoItem\(item\)/);
+  // T-006 R2 lengthened the header comment (cumulative-receipt fix) —
+  // widened from 400 to still capture the marker below it.
+  assert.match(guard.slice(0, 700), /const poItem = resolvePoItem\(item\)/);
 });
 
 test("every PO the lines name is loaded, not just the header", () => {

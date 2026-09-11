@@ -1,5 +1,14 @@
 # Sales — Module Guide
 
+> **Last verified: 2026-09-11** — T-006 R1: "Transfer to Delivery Order" now
+> sends `productionOrderIds` (sourced from `/api/delivery-orders/ready-planning`),
+> not hand-built `items` — the old body bypassed the once-only-delivery guard
+> entirely (BUG-2026-05-16 class). Shifted `SalesPage` `:172`→`:195`,
+> `aggregateServiceOrderProgress` `:75`→`:98`, `soStageLabel` `:142`→`:165`.
+> Also found the identical bug in `src/pages/consignment/index.tsx`'s own
+> Transfer-to-DO flow (out of scope here, flagged separately) — NOT fixed
+> in this pass.
+>
 > **Last verified: 2026-08-19** against `src/api/routes/sales-orders.ts` (**5,733** lines),
 > `src/api/routes/sales-orders/_helpers.ts` (1,462), `src/api/routes/{consignment-orders,consignment-notes}.ts`,
 > `src/api/lib/{sofa-combo,sofa-combo-pass}.ts`, `src/pages/sales/{index,create,detail}.tsx`,
@@ -66,9 +75,9 @@ Owns the customer-facing order lifecycle: **Sales Orders** (SO) and their line i
 ## Key functions / sections (locate-to-function)
 | Symbol / section | file:line | Role |
 |---|---|---|
-| `SalesPage` | `src/pages/sales/index.tsx:172` | SO list main; service-order-mode flag, filters, tabs |
-| `aggregateServiceOrderProgress` | `src/pages/sales/index.tsx:75` | Rolls linked-PO progress into a service-order stage |
-| `soStageLabel` | `src/pages/sales/index.tsx:142` | Maps SO status → display stage label |
+| `SalesPage` | `src/pages/sales/index.tsx:195` | SO list main; service-order-mode flag, filters, tabs |
+| `aggregateServiceOrderProgress` | `src/pages/sales/index.tsx:98` | Rolls linked-PO progress into a service-order stage |
+| `soStageLabel` | `src/pages/sales/index.tsx:165` | Maps SO status → display stage label |
 | `CreateSalesOrderPageWrapper` | `src/pages/sales/create.tsx:206` | Default export; providers shell |
 | `CreateSalesOrderPage` | `src/pages/sales/create.tsx:214` | Main create form (parties, items, totals) |
 | `CopyFromSourceModal` | `src/pages/sales/create.tsx:2395` | 2-step copy-draft picker |

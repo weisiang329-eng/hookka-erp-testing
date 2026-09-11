@@ -29,7 +29,9 @@ const SRC = readFileSync(
 
 test("the first insert failure is always logged, not only for foreign PIs", () => {
   const block = SRC.slice(SRC.indexOf("  try {\n    await db.batch(statements);"));
-  const head = block.slice(0, 1400);
+  // T-006 R5 added a check-constraint-violation short-circuit between the log
+  // line and the isForeign branch — widened from 1400 to still capture both.
+  const head = block.slice(0, 2200);
   assert.match(head, /const firstErr = e instanceof Error \? e\.message : String\(e\);/);
   assert.match(head, /first insert attempt failed/);
   // The log must come BEFORE the isForeign branch, or MYR still loses it.

@@ -525,40 +525,36 @@ async function resolveRmForGRNItem(
 
 // Post committed GRN lines to stock — writes rm_batches, cost_ledger,
 // bumps raw_materials.balanceQty. Idempotent on grn.id.
-async function postGRNToStock(
+// T-006 R3 — pure builder, no execution. Split out of postGRNToStock so the
+// GRN create path can fold these statements into the SAME db.batch() as the
+// header+lines insert and the PO-counter update, instead of three separate
+// batches where a failure between them left a posted GRN with no stock or no
+// PO draw-down and no way to retry. Takes grn/items already in memory (the
+// create path has them before anything is inserted) rather than re-querying
+// a row that may not exist in the DB yet.
+async function buildGRNStockStatements(
   db: D1Database,
-  grnId: string,
+  args: {
+    grnId: string;
+    grnNumber: string;
+    receiveDate: string | null;
+    items: Array<{
+      acceptedQty: number | string;
+      materialCode: string | null;
+      materialName: string | null;
+      unitPrice: number | string;
+    }>;
+  },
 ): Promise<{
+  statements: D1PreparedStatement[];
   batchesCreated: number;
   ledgerEntries: number;
   unresolvedLines: { materialCode: string; materialName: string }[];
 }> {
-  const already = await db
-    .prepare(
-      "SELECT id FROM rm_batches WHERE source = 'GRN' AND sourceRefId = ? LIMIT 1",
-    )
-    .bind(grnId)
-    .first<{ id: string }>();
-  if (already) {
-    return { batchesCreated: 0, ledgerEntries: 0, unresolvedLines: [] };
-  }
-
-  const grn = await db
-    .prepare("SELECT * FROM grns WHERE id = ?")
-    .bind(grnId)
-    .first<GRNRow>();
-  if (!grn) {
-    return { batchesCreated: 0, ledgerEntries: 0, unresolvedLines: [] };
-  }
-  const itemsRes = await db
-    .prepare("SELECT * FROM grn_items WHERE grnId = ? ORDER BY id ASC")
-    .bind(grnId)
-    .all<GRNItemRow>();
-  const items = itemsRes.results ?? [];
-
+  const { grnId, grnNumber, receiveDate, items } = args;
   const nowIso = new Date().toISOString();
-  const receivedIso = grn.receiveDate
-    ? new Date(grn.receiveDate).toISOString()
+  const receivedIso = receiveDate
+    ? new Date(receiveDate).toISOString()
     : nowIso;
 
   const unresolved: { materialCode: string; materialName: string }[] = [];
@@ -597,7 +593,7 @@ async function postGRNToStock(
       unitCostSen,
       refType: "GRN",
       refId: grnId,
-      notes: `Received via ${grn.grnNumber}`,
+      notes: `Received via ${grnNumber}`,
     });
 
     statements.push(
@@ -616,7 +612,7 @@ async function postGRNToStock(
           qty,
           unitCostSen,
           nowIso,
-          `GRN ${grn.grnNumber} line ${lineIdx + 1}`,
+          `GRN ${grnNumber} line ${lineIdx + 1}`,
         ),
       db
         .prepare(
@@ -649,11 +645,59 @@ async function postGRNToStock(
     ledgerEntries++;
   }
 
-  if (statements.length > 0) {
-    await db.batch(statements);
+  return { statements, batchesCreated, ledgerEntries, unresolvedLines: unresolved };
+}
+
+// Thin wrapper preserving the original signature/behavior for callers that
+// post an ALREADY-EXISTING GRN (grn + grn_items already committed) — reads
+// them from the DB, builds, and executes in its own batch. The create path
+// uses buildGRNStockStatements directly instead, with in-memory data, so its
+// statements can join the header+lines batch.
+async function postGRNToStock(
+  db: D1Database,
+  grnId: string,
+): Promise<{
+  batchesCreated: number;
+  ledgerEntries: number;
+  unresolvedLines: { materialCode: string; materialName: string }[];
+}> {
+  const already = await db
+    .prepare(
+      "SELECT id FROM rm_batches WHERE source = 'GRN' AND sourceRefId = ? LIMIT 1",
+    )
+    .bind(grnId)
+    .first<{ id: string }>();
+  if (already) {
+    return { batchesCreated: 0, ledgerEntries: 0, unresolvedLines: [] };
   }
 
-  return { batchesCreated, ledgerEntries, unresolvedLines: unresolved };
+  const grn = await db
+    .prepare("SELECT * FROM grns WHERE id = ?")
+    .bind(grnId)
+    .first<GRNRow>();
+  if (!grn) {
+    return { batchesCreated: 0, ledgerEntries: 0, unresolvedLines: [] };
+  }
+  const itemsRes = await db
+    .prepare("SELECT * FROM grn_items WHERE grnId = ? ORDER BY id ASC")
+    .bind(grnId)
+    .all<GRNItemRow>();
+  const items = itemsRes.results ?? [];
+
+  const built = await buildGRNStockStatements(db, {
+    grnId,
+    grnNumber: grn.grnNumber,
+    receiveDate: grn.receiveDate,
+    items,
+  });
+  if (built.statements.length > 0) {
+    await db.batch(built.statements);
+  }
+  return {
+    batchesCreated: built.batchesCreated,
+    ledgerEntries: built.ledgerEntries,
+    unresolvedLines: built.unresolvedLines,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -815,6 +859,37 @@ async function buildPostedGRNStockAdjustment(
 // already gates on rm_batches rows, but this extra guard keeps the
 // purchase_order_items bump idempotent across retries too.
 // ---------------------------------------------------------------------------
+// T-006 R3 — pure builder, no execution, so the create path can fold these
+// UPDATE statements into the SAME db.batch() as the header+lines insert and
+// the stock statements. `preloadedLines`/`headerPoId` let the create path
+// supply what it already has in memory instead of re-querying grn_items/grns
+// rows that have not been inserted yet.
+async function buildPOCounterStatements(
+  db: D1Database,
+  grnId: string,
+  headerPoId: string | null,
+  preloadedLines?: GrnLinePoRef[],
+): Promise<{ statements: D1PreparedStatement[]; affectedPoIds: string[] }> {
+  // Targets carry their OWN PO — a receipt may span several purchase orders,
+  // so the header PO is only a fallback for legacy positional lines.
+  const targets = await resolveGrnLineTargets(db, grnId, headerPoId, preloadedLines);
+  if (targets.length === 0) return { statements: [], affectedPoIds: [] };
+
+  const statements = targets.map((t) =>
+    db
+      .prepare(
+        "UPDATE purchase_order_items SET receivedQty = receivedQty + ? WHERE id = ?",
+      )
+      .bind(t.qty, t.poItemId),
+  );
+  return { statements, affectedPoIds: [...new Set(targets.map((t) => t.poId))] };
+}
+
+// Thin wrapper preserving the original signature/behavior for callers
+// posting an ALREADY-EXISTING GRN — looks up the header PO, builds +
+// executes the counter update in its own batch, then recomputes status for
+// every PO touched. The create path uses buildPOCounterStatements directly
+// so its statements can join the header+lines+stock batch instead.
 async function cascadePOStatusAfterGRNPost(
   db: D1Database,
   grnId: string,
@@ -824,29 +899,17 @@ async function cascadePOStatusAfterGRNPost(
     .bind(grnId)
     .first<{ poId: string | null }>();
 
-  // Targets carry their OWN PO — a receipt may span several purchase orders,
-  // so the header PO is only a fallback for legacy positional lines.
-  const targets = await resolveGrnLineTargets(db, grnId, grn?.poId ?? null);
-  if (targets.length === 0) return;
-
-  const statements: D1PreparedStatement[] = [];
-  for (const t of targets) {
-    statements.push(
-      db
-        .prepare(
-          "UPDATE purchase_order_items SET receivedQty = receivedQty + ? WHERE id = ?",
-        )
-        .bind(t.qty, t.poItemId),
-    );
+  const built = await buildPOCounterStatements(db, grnId, grn?.poId ?? null);
+  if (built.statements.length > 0) {
+    await db.batch(built.statements);
   }
-  if (statements.length > 0) {
-    await db.batch(statements);
-  }
+  const affectedPoIds = built.affectedPoIds;
+  if (affectedPoIds.length === 0) return;
 
   // Refresh EVERY purchase order this receipt touched. Recomputing only the
   // header PO would leave a second PO sitting at CONFIRMED while its goods are
   // already in the building.
-  for (const poId of [...new Set(targets.map((t) => t.poId))]) {
+  for (const poId of affectedPoIds) {
     await recomputePoStatusFromReceipts(db, poId);
   }
 }
@@ -912,15 +975,25 @@ async function resolveGrnLineTargets(
   db: D1Database,
   grnId: string,
   headerPoId: string | null,
+  // T-006 R3 — the create path passes its in-memory grn_items rows here
+  // instead of letting this query them, since they have not been inserted
+  // yet when its statements need to be built (all four batches now merge
+  // into one before anything is written).
+  preloadedLines?: GrnLinePoRef[],
 ): Promise<Array<{ poId: string; poItemId: string; qty: number }>> {
   await ensureGrnItemPoRef(db);
-  const res = await db
-    .prepare(
-      "SELECT poItemIndex, acceptedQty, po_id, po_item_id FROM grn_items WHERE grnId = ? ORDER BY id ASC",
-    )
-    .bind(grnId)
-    .all<GrnLinePoRef>();
-  const lines = res.results ?? [];
+  let lines: GrnLinePoRef[];
+  if (preloadedLines) {
+    lines = preloadedLines;
+  } else {
+    const res = await db
+      .prepare(
+        "SELECT poItemIndex, acceptedQty, po_id, po_item_id FROM grn_items WHERE grnId = ? ORDER BY id ASC",
+      )
+      .bind(grnId)
+      .all<GrnLinePoRef>();
+    lines = res.results ?? [];
+  }
 
   const out: Array<{ poId: string; poItemId: string; qty: number }> = [];
   const needPositional = lines.some(
@@ -1527,7 +1600,12 @@ app.post("/", async (c) => {
         return typeof idx === "number" && idx >= 0 ? list[idx] : undefined;
       };
 
-      // Over-receipt validation (110% tolerance)
+      // Over-receipt validation (110% tolerance) — T-006 R2: CUMULATIVE
+      // against the PO line's receivedQty (every GRN already posted), not
+      // just this document. Was per-document only: two separate 100-unit
+      // GRNs against a 100-unit PO line each individually read
+      // "100 ≤ 110" and both posted, because neither looked at what the
+      // OTHER receipt already consumed.
       for (const item of items as Array<{
         poItemIndex: number;
         poId?: string | null;
@@ -1537,11 +1615,13 @@ app.post("/", async (c) => {
         const poItem = resolvePoItem(item);
         if (poItem) {
           const tolerance = poItem.quantity * 1.1;
-          if (item.receivedQty > tolerance) {
+          const alreadyReceived = Number(poItem.receivedQty) || 0;
+          const cumulative = alreadyReceived + item.receivedQty;
+          if (cumulative > tolerance) {
             return c.json(
               {
                 success: false,
-                error: `Over-receipt for ${poItem.materialName}: received ${item.receivedQty} exceeds 110% of ordered ${poItem.quantity}. Requires ADMIN approval.`,
+                error: `Over-receipt for ${poItem.materialName}: already received ${alreadyReceived} + this receipt ${item.receivedQty} = ${cumulative}, exceeds 110% of ordered ${poItem.quantity}. Requires ADMIN approval.`,
               },
               400,
             );
@@ -1713,7 +1793,58 @@ app.post("/", async (c) => {
       ),
     ];
 
+    // T-006 R3 — a born-POSTED GRN's stock postings and PO-counter updates
+    // join the SAME batch as the header+lines insert, instead of three
+    // separate db.batch() calls where a failure between them left a posted
+    // GRN with no stock or no PO draw-down and no way to retry. Built from
+    // the in-memory grnItems (not yet inserted) rather than re-querying —
+    // see buildGRNStockStatements/buildPOCounterStatements.
+    let postSummary:
+      | { batchesCreated: number; ledgerEntries: number; unresolvedLines: unknown[] }
+      | undefined;
+    let poIdsToRecompute: string[] = [];
+    if (initialStatus === "POSTED") {
+      const stockBuilt = await buildGRNStockStatements(c.var.DB, {
+        grnId,
+        grnNumber,
+        receiveDate,
+        items: grnItems.map((i) => ({
+          acceptedQty: i.acceptedQty,
+          materialCode: i.materialCode,
+          materialName: i.materialName,
+          unitPrice: i.unitPrice,
+        })),
+      });
+      statements.push(...stockBuilt.statements);
+      postSummary = {
+        batchesCreated: stockBuilt.batchesCreated,
+        ledgerEntries: stockBuilt.ledgerEntries,
+        unresolvedLines: stockBuilt.unresolvedLines,
+      };
+
+      const counterBuilt = await buildPOCounterStatements(
+        c.var.DB,
+        grnId,
+        grnPoId,
+        grnItems.map((i) => ({
+          poItemIndex: i.poItemIndex,
+          acceptedQty: i.acceptedQty,
+          poId: i.poId,
+          poItemId: i.poItemId,
+        })),
+      );
+      statements.push(...counterBuilt.statements);
+      poIdsToRecompute = counterBuilt.affectedPoIds;
+    }
+
     await c.var.DB.batch(statements);
+
+    // Status recompute reads the receivedQty the batch above just committed —
+    // it must run AFTER, not folded into the same batch (it needs the write
+    // to have landed to read a consistent total across every PO line).
+    for (const poId of poIdsToRecompute) {
+      await recomputePoStatusFromReceipts(c.var.DB, poId);
+    }
 
     // Remember what this receipt just proved: supplier wording ↔ internal code.
     // Until now that pairing was discarded, so the same supplier document was
@@ -1744,21 +1875,10 @@ app.post("/", async (c) => {
       genGrnId,
     ).catch(() => undefined);
 
-    // ── Post to stock on a born-POSTED (arrived) GRN ─────────────────────────
-    // When the create status is POSTED (local / arrived goods), commit the
-    // receipt the SAME way the PUT DRAFT→POSTED boundary does: write
-    // rm_batches/cost_ledger/balanceQty (idempotent on grn.id) then cascade the
-    // parent PO's receivedQty + status. Import-in-transit / OCR GRNs land as
-    // DRAFT and skip this — they post later via the arrival-gated PUT. The
-    // arrival gate is implicitly honoured: initialStatus is POSTED only when
-    // initialArrivalState === 'ARRIVED'.
-    let postSummary:
-      | { batchesCreated: number; ledgerEntries: number; unresolvedLines: unknown[] }
-      | undefined;
-    if (initialStatus === "POSTED") {
-      postSummary = await postGRNToStock(c.var.DB, grnId);
-      await cascadePOStatusAfterGRNPost(c.var.DB, grnId);
-    }
+    // Stock posting + PO-counter update for a born-POSTED (arrived) GRN
+    // already happened above, in the SAME batch as the header+lines insert
+    // (postSummary/poIdsToRecompute set there). Import-in-transit / OCR GRNs
+    // land as DRAFT and skip it — they post later via the arrival-gated PUT.
 
     const created = await fetchGRN(c.var.DB, grnId);
     if (!created) {

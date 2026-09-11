@@ -14,6 +14,25 @@ Status key: 🔵 in progress · 🟡 parked/needs owner · ✅ shipped to prod �
 
 ---
 
+## 2026-09-10 — ⚪ PRD T-006 · Transfer/Convert foundation (fix plan written, no code yet)
+
+Requested by Mr Lim, PRD dated 2026-09-07, priority **Low (to be raised later)**. Full PRD:
+`T-006-Hookka-transfer-convert - wei siang.pdf` (user's local Downloads). Branch
+`fix/transfer-convert-duplicate-guard`, off `origin/main`.
+
+All 10 PRD findings independently re-verified against current source (background investigation,
+HEAD `e40d5550`) — every one CONFIRMED still live. Full analysis + per-requirement fix approach,
+sequencing, and open owner-decisions written to
+[T-006-TRANSFER-CONVERT-FIX-PLAN.md](T-006-TRANSFER-CONVERT-FIX-PLAN.md). Headline: R1 (Sales page
+"Transfer to Delivery Order" never sends `productionOrderIds`, so the once-only-delivery guard from
+the May duplicate-DO incident never runs on this entry point) is the same dollar-risk class as that
+incident. R8 as literally worded in the PRD ("fix the empty material_code") is the exact fix
+BUG-2026-08-13-052 already diagnosed and explicitly rejected (risk: silently redirects stock
+postings to the wrong raw material) — fix plan uses `grn_items.po_item_id` instead, sidestepping it
+entirely; flagged as a deviation the PRD author should sign off on. Not started: no code written yet.
+
+---
+
 ## 2026-09-07 — ✅ 对账两升级：付款明细可见 + 组合配对（owner 挂图两问 →「做」）
 
 Owner：「1. 没有show payment detail 2. Bank Statement 可能是几笔，book ledger 可能一笔…没有办法

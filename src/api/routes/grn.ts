@@ -1388,6 +1388,7 @@ app.post("/", async (c) => {
 
   // Ensure arrival-pipeline columns exist before any INSERT
   await ensureGrnMigrations(c.var.DB);
+  await ensureGrnItemPoRef(c.var.DB);
 
   // T-006 R10 — a retried create (network blip on the round-trip) must not
   // post the same receipt twice. No-op when the client sends no

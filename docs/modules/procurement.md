@@ -1,5 +1,13 @@
 # Procurement — Module Guide
 
+> **Last verified: 2026-09-11 (later same day)** — QA bug found on GRN create:
+> "column po_id of relation grn_items does not exist" on a fresh database's
+> FIRST DRAFT GRN (any import-in-transit or OCR receipt). `grn_items.po_id`/
+> `po_item_id` were written unconditionally by every create but only
+> self-applied (`ensureGrnItemPoRef`) inside the POSTED-only branch. Now
+> called unconditionally in `app.post("/")`, shifting `app.put("/:id/arrival")`
+> `:2307`→`:2322`.
+>
 > **Last verified: 2026-09-11 (later same day, after R8)** — T-006 R9 added a
 > third branch to PI create: a body with neither `grnId` nor
 > `purchaseOrderId`, but a line naming its own `poId`, now also runs
@@ -128,7 +136,7 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
 | `restorePOReceivedQtyForGRN` | `src/api/routes/grn.ts:1072` | Un-post/cancel/delete: give back PO qty |
 | `resolveRmForGRNItem` | `src/api/routes/grn.ts:480` | Resolve GRN line → raw_material |
 | `app.post("/")` (GRN create) | `src/api/routes/grn.ts:1383` | GRN create; builds stock+PO-counter statements into ONE batch with header+lines (T-006 R3) |
-| `app.put("/:id/arrival")` | `src/api/routes/grn.ts:2307` | Arrival state transition (gate) |
+| `app.put("/:id/arrival")` | `src/api/routes/grn.ts:2322` | Arrival state transition (gate) |
 | `app.post("/")` (PI create) | `src/api/routes/purchase-invoices.ts:1107` | PI create + convert-chain + GL post |
 | `app.put("/:id")` (PI edit) | `src/api/routes/purchase-invoices.ts:2003` | PI edit (DRAFT/CONFIRMED/legacy APPROVED) + GL correction |
 | `checkInvoicedQtyCeilingAfterEdit` | `src/api/routes/purchase-invoices.ts:702` | Ceiling on re-synced invoiced_qty |

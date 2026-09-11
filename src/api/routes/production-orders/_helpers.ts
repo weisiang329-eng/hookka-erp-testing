@@ -5318,9 +5318,9 @@ export type OverdueBreakdownRow = {
 
 export function buildPoListCacheKey(orgId: string, version: string, url: URL): string {
   // Canonicalise query params (sorted) so semantically-identical URLs share
-  // a cache key. Drop empty values to be conservative.
+  // a cache key. EVERY param is kept, empty values included — see
+  // buildPoListBodyKey below for why dropping them corrupted the list payload.
   const pairs = Array.from(url.searchParams.entries())
-    .filter(([, v]) => v !== "")
     .sort(([a], [b]) => a.localeCompare(b));
   const qs = pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
   return `pos:${orgId}:v${version}:${qs}`;
@@ -5347,9 +5347,34 @@ export function buildPoListCacheKey(orgId: string, version: string, url: URL): s
 // ---------------------------------------------------------------------------
 export const PO_LIST_BODY_TTL_S = 300;
 
+// An empty param VALUE is a claim, not a blank — do NOT drop it from the key.
+//
+// BUG-2026-09-11 (Violet, SO-2608-202): the Production Overview showed blank
+// department cells and "0/0 cells complete" while the per-dept sheets showed
+// Fab Cut / Fab Sew completed.
+//
+// Both key builders used to run `.filter(([, v]) => v !== "")` ("drop empty
+// values to be conservative"). But this endpoint DISTINGUISHES the two cases:
+// production-orders.ts:750-761 reads `include` absent  -> includeJobCards TRUE,
+// and `include=` present-but-empty -> [""] -> includeJobCards FALSE. Sales /
+// Consignment / Warehouse send the empty form deliberately to drop the ~12MB
+// job-card tree.
+//
+// After the filter, `?fields=minimal&include=` (no job cards) and the
+// Overview-while-searching URL `?fields=minimal` (index.tsx:1028-1035 drops
+// excludeCompleted + the date window while a search is active) canonicalised
+// to the SAME key. Whichever page loaded first won, and for the 300s TTL the
+// other was served its body. The Overview then held POs with `jobCards: []`,
+// so cellFor() (src/pages/production/utils.ts:82) reported every cell empty.
+//
+// The snapshot layer was never wrong — its key (production-orders.ts:879)
+// keeps `include=`. But KV sits IN FRONT of it (production-orders.ts:946-993
+// returns before the snapshot path is reached), so a correct snapshot could
+// not save the request. A cache key must never be coarser than the handler
+// whose output it names — docs/BUG-CLASSES.md C22, and see BUG-2026-09-11-180
+// in docs/BUG-HISTORY.md. Same family as C15 ("`0` is a claim, not a blank").
 export function buildPoListBodyKey(orgId: string, url: URL): string {
   const pairs = Array.from(url.searchParams.entries())
-    .filter(([, v]) => v !== "")
     .sort(([a], [b]) => a.localeCompare(b));
   const qs = pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
   return `pos:body:${orgId}:${qs}`;

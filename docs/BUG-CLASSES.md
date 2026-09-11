@@ -1,5 +1,13 @@
 # Recurring bug classes — the index that makes P5 executable
 
+> **Last verified: 2026-09-11** — restamped on branch `fix/po-list-cache-key-collision`,
+> which **adds C22 — a cache key coarser than the handler it names** (BUG-2026-09-11-180:
+> the Production Overview served another page's job-card-less payload and rendered its
+> emptiness as fact). Row 1 closed and enforced by
+> `tests/po-list-cache-key-collision.test.mjs`; rows 2 and 3 left OPEN with the reason.
+> Reproduced on prod before the fix and measured (`X-Cache: HIT`, 128 kB for 3,460 POs),
+> not inferred. Suite at that point: 4,573 tests / 0 fail.
+
 > **Last verified: 2026-08-14** — restamped on branch `fix/dashboard-tiles`, which
 > **closes C15 row 33 and adds rows 42–44** (BUG-2026-08-13-150/-145/-146/-147: the MRP
 > shortage that ignored every open PO plus its invented MOQ / lead time, `/production`
@@ -1491,6 +1499,53 @@ runs the money invariants on every daily report:
 
 Had it existed in May, the RM 12,455 would have surfaced on day one instead of after ten weeks
 and 105 mispriced lines.
+
+---
+
+## C22 — a cache key coarser than the handler it names
+
+**Shape.** A handler's output depends on an input. The cache key that names that
+output does **not** carry the input. Two requests whose responses differ then
+share one entry, and whichever runs first decides what everybody reads until the
+entry expires.
+
+**The instance that named it.** `buildPoListBodyKey` / `buildPoListCacheKey`
+canonicalised the query string with `.filter(([, v]) => v !== "")` — *"drop empty
+values to be conservative"*. But `GET /api/production-orders` reads `include`
+**absent** as `includeJobCards = true` and `include=` **present-but-empty** as
+`false` (`production-orders.ts:750-761`), and three pages send the empty form
+deliberately to drop a ~12MB tree. So `?fields=minimal&include=` (no job cards)
+and the Overview-while-searching `?fields=minimal` (job cards) named one KV
+entry. The Production Overview rendered blank department cells for a PO whose
+work was finished (BUG-2026-09-11-180).
+
+**Why it is hard to see.** Every layer is individually correct. The handler
+branches correctly on `include`. `cellFor()` correctly reports "no cards" for a
+PO with no cards. The snapshot layer's own key **did** keep `include=`. Only the
+pairing is wrong, and it is wrong in a place nobody reads while debugging a blank
+screen. It also presents as *intermittent and user-specific* — it is neither; it
+is whoever-loaded-first, for 300 seconds.
+
+**The rule.** *An empty parameter value is a claim, not a blank.* A cache key may
+normalise (sort, case-fold, encode) but must never DROP an input the handler
+reads. If the handler can tell two requests apart, the key must too. Corollary
+for layered caches: **the front layer's key must be at least as fine as the back
+layer's** — a correct snapshot key cannot save a request that a coarser KV key
+answers first.
+
+Same family as C15 (*"`0` is a claim, not a blank"*): in both, a value that
+*means* something is mistaken for the absence of a value.
+
+**Instances**
+
+| # | surface | state |
+|---|---|---|
+| 1 | `GET /api/production-orders` — `buildPoListBodyKey` + `buildPoListCacheKey` dropped empty-valued params; `?fields=minimal` and `?fields=minimal&include=` collided | ✅ 2026-09-11 (BUG-2026-09-11-180) — filter removed from both; `tests/po-list-cache-key-collision.test.mjs` |
+| 2 | **every other cache key in the repo** | ⬜ unswept. The pattern to look for is a key builder that filters, defaults or omits any part of the request. At the time of the fix `.filter(([, v]) => v !== "")` appeared in exactly these two functions, but no test forbids a third — a new key builder can reintroduce it silently |
+| 3 | **callers that express a choice as an empty value** | ⬜ open. `src/pages/sales/index.tsx`, `src/pages/consignment/index.tsx` and `src/pages/warehouse.tsx` still send `include=` to mean "no job cards". `include=none` says the same thing without depending on how emptiness is handled anywhere downstream |
+
+Row 2 is why this is a class and not a line in the bug entry: the fix repaired
+the two builders that existed, and nothing stops the third.
 
 ---
 

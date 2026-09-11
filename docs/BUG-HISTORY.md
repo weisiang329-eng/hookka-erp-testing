@@ -34,6 +34,63 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-09-11-180 — the Production Overview was served another page's payload, and rendered its emptiness as fact `production` `infrastructure` `caching` 🟢
+
+🟢 Fixed. Violet reported that `SO-2608-202` showed **blank department cells**
+and `0/0 cells complete` in the Production Overview, while the per-dept sheets
+showed Fab Cut and Fab Sew completed. Intermittent — some operators saw it, some
+did not, at the same minute.
+
+**Root cause.** `buildPoListBodyKey` / `buildPoListCacheKey`
+(`src/api/routes/production-orders/_helpers.ts`) canonicalised the query string
+with `.filter(([, v]) => v !== "")` — *"drop empty values to be conservative"*.
+But `GET /api/production-orders` **distinguishes** the two cases
+(`production-orders.ts:750-761`): `include` absent → `includeJobCards = true`;
+`include=` present-but-empty → `[""]` → `includeJobCards = false`. Sales /
+Consignment / Warehouse send the empty form **deliberately**, to drop the ~12MB
+job-card tree they never read.
+
+The Overview, while a search is active, drops `excludeCompleted` and the date
+window (`src/pages/production/index.tsx:1028-1035`) and requests the bare
+`?fields=minimal`. After the empty-value filter both URLs canonicalised to the
+**same** KV body key. Whichever page loaded first won, and for the 300s
+`PO_LIST_BODY_TTL_S` the other was served its body. The Overview then held POs
+with `jobCards: []`, and `cellFor()` (`src/pages/production/utils.ts:82`)
+correctly reported every cell empty — it was told there was no work.
+
+The snapshot layer was never wrong: its key (`production-orders.ts:879`) keeps
+`include=`. But KV sits **in front** of it (`production-orders.ts:946-993`
+returns before the snapshot path is reached), so a correct snapshot could not be
+reached. **A cache key must never be coarser than the handler whose output it
+names** — see `docs/BUG-CLASSES.md` C22.
+
+**Fix**: keep every param in both keys, empty values included. Two lines
+removed. Every key that contained no empty-valued param is byte-identical, so
+existing entries keep hitting; only `?fields=minimal&include=` gets a new key,
+and its snapshot already existed.
+
+**Verified on prod (2026-09-11), not inferred.** Overview + search `2608-202`
+rendered Fab Cut ✓ 20 Aug / Fab Sew ✓ 21 Aug. Opening the Sales page and
+returning to the Overview turned **every** cell blank with `0/0 cells complete`;
+that request carried `X-Cache: HIT` and was **128 kB for 3,460 POs** — far too
+small to contain job cards. The rows themselves were confirmed intact by direct
+SQL: 39 job cards across the two POs, Fab Cut COMPLETED 2026-08-20, Fab Sew
+COMPLETED 2026-08-21.
+
+Regression test: `tests/po-list-cache-key-collision.test.mjs` — the three
+`fields=minimal` variants must be three distinct keys, and the KV body key must
+agree with the snapshot key's canonicalisation.
+
+**Open, deliberately not in that fix.** (1) The three callers still express
+"no job cards" as an empty value; `include=none` would stop the key depending on
+how emptiness is handled at all. (2) The Overview's search drops **all**
+server-side narrowing, making it a whole-org fetch that can hit the 30s abort —
+it needs a `q` parameter on `GET /api/production-orders`. Neither is a
+correctness bug in the key, and mixing them into one change would have made the
+2-line fix unreviewable.
+
+---
+
 ## BUG-2026-09-07-179 — the unlock audit wrote to a column that rejects its own code `production` `audit` 🟢
 
 🟢 Fixed. `scan_override_audit.override_code` carries a CHECK from migration

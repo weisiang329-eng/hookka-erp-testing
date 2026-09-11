@@ -5371,8 +5371,8 @@ export const PO_LIST_BODY_TTL_S = 300;
 // keeps `include=`. But KV sits IN FRONT of it (production-orders.ts:946-993
 // returns before the snapshot path is reached), so a correct snapshot could
 // not save the request. A cache key must never be coarser than the handler
-// whose output it names. Same family as docs/BUG-CLASSES.md C15
-// ("`0` is a claim, not a blank").
+// whose output it names — docs/BUG-CLASSES.md C22, and see BUG-2026-09-11-180
+// in docs/BUG-HISTORY.md. Same family as C15 ("`0` is a claim, not a blank").
 export function buildPoListBodyKey(orgId: string, url: URL): string {
   const pairs = Array.from(url.searchParams.entries())
     .sort(([a], [b]) => a.localeCompare(b));

@@ -10369,6 +10369,9 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const [map, setMap] = useState({ date: "1", desc: "2", out: "3", in: "4", header: true, fmt: "DD/MM/YYYY" });
   const [busy, setBusy] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
+  // Combo match selection + expandable payment detail (owner 2026-09-07).
+  const [comboSel, setComboSel] = useState<Set<string>>(new Set());
+  const [payDetail, setPayDetail] = useState<Record<string, "loading" | { supplierName: string; piNo: string | null; opening: boolean; method: string; bookedSen: number }[]>>({});
   const [preview, setPreview] = useState<{
     fileName: string; month: string;
     rows: { date: string; description: string; amountSen: number; balanceSen: number | null }[];
@@ -10589,6 +10592,38 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
     const j = asMutationResponse(await res.json());
     if (j?.success) load();
     else toast.error(j?.error || "Unmatch failed");
+  };
+
+  // Combo match (owner 2026-09-07): tick several bank lines that together paid
+  // ONE book payment, then pick the leg whose amount equals the selection.
+  const toggleCombo = (lineId: string) => {
+    setComboSel((old) => {
+      const n = new Set(old);
+      if (n.has(lineId)) n.delete(lineId); else n.add(lineId);
+      return n;
+    });
+  };
+  const handleGroupMatch = async (legId: string) => {
+    if (!legId || comboSel.size < 2) return;
+    const res = await fetch("/api/accounting/bank-reco/match-group", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ legId, lineIds: [...comboSel] }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) { setComboSel(new Set()); toast.success("Lines combined and matched"); load(); }
+    else toast.error(j?.error || "Combo match failed");
+  };
+  const togglePayDetail = async (leg: { id: string; sourceType: string; sourceId: string }) => {
+    if (payDetail[leg.id]) { setPayDetail((old) => { const n = { ...old }; delete n[leg.id]; return n; }); return; }
+    setPayDetail((old) => ({ ...old, [leg.id]: "loading" }));
+    try {
+      const res = await fetch(`/api/accounting/bank-reco/payment-detail?paymentNo=${encodeURIComponent(leg.sourceId)}`);
+      const j = await res.json() as { success?: boolean; data?: { rows: { supplierName: string; piNo: string | null; opening: boolean; method: string; bookedSen: number }[] } };
+      setPayDetail((old) => ({ ...old, [leg.id]: j?.success && j.data ? j.data.rows : [] }));
+    } catch {
+      setPayDetail((old) => ({ ...old, [leg.id]: [] }));
+    }
   };
 
   const handleDeleteLine = async (lineId: string) => {
@@ -11001,6 +11036,28 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
           {/* Bank side — open lines */}
           <Card>
             <CardContent className="p-0 overflow-x-auto">
+              {(() => {
+                // Combo bar: several bank lines that together paid ONE book
+                // payment (HPV-2607-024: 32.00 + 879.00 = 911.00).
+                const sel = unmatchedStmt.filter((s) => comboSel.has(s.id));
+                if (sel.length < 2) return null;
+                const sum = sel.reduce((t, s) => t + s.amountSen, 0);
+                const cands = unmatchedLegs.filter((l) => l.amountSen === sum);
+                return (
+                  <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-[#FBF3E4] border-b border-[#E0C989] text-xs">
+                    <span className="font-semibold text-[#7A5B12]">{sel.length} lines selected · {formatCurrency(Math.abs(sum))} {sum < 0 ? "out" : "in"}</span>
+                    {cands.length > 0 ? (
+                      <select defaultValue="" onChange={(e) => { void handleGroupMatch(e.target.value); e.currentTarget.value = ""; }} className="rounded border border-[#E0C989] bg-white px-1 py-0.5 text-[11px] max-w-72">
+                        <option value="">combine &amp; match to…</option>
+                        {cands.map((l) => <option key={l.id} value={l.id}>{l.day} {l.description.slice(0, 40)}</option>)}
+                      </select>
+                    ) : (
+                      <span className="text-[#9A3A2D]">no single book entry equals this total</span>
+                    )}
+                    <button onClick={() => setComboSel(new Set())} className="ml-auto underline decoration-dotted text-[#9CA3AF] hover:text-[#1F1D1B] cursor-pointer">clear</button>
+                  </div>
+                );
+              })()}
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
@@ -11017,6 +11074,9 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     return (
                       <tr key={s.id} className="border-b border-[#F0ECE9]">
                         <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">
+                          {!isFinalMonth(s.txnDate) && (
+                            <input type="checkbox" checked={comboSel.has(s.id)} onChange={() => toggleCombo(s.id)} className="mr-1.5 align-middle" title="Tick several lines that together paid ONE book entry, then combine & match" />
+                          )}
                           {s.txnDate}
                           {earlier && <span className="ml-1 rounded bg-[#F0ECE9] px-1 text-[10px]">earlier</span>}
                         </td>
@@ -11069,14 +11129,39 @@ function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {unmatchedLegs.map((l) => (
-                    <tr key={l.id} className="border-b border-[#F0ECE9]">
-                      <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{l.day}</td>
-                      <td className="px-3 py-1.5 text-xs w-full max-w-0"><div className="truncate" title={l.description}>{l.description}</div></td>
-                      <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdIn(l.amountSen)}</td>
-                      <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdOut(l.amountSen)}</td>
-                    </tr>
-                  ))}
+                  {unmatchedLegs.map((l) => {
+                    const canDetail = l.sourceType.startsWith("supplier_payment");
+                    const det = payDetail[l.id];
+                    return (
+                      <Fragment key={l.id}>
+                        <tr className="border-b border-[#F0ECE9]">
+                          <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{l.day}</td>
+                          <td className="px-3 py-1.5 text-xs w-full max-w-0">
+                            <div className="truncate" title={canDetail ? `${l.description} — click for the bills it settled` : l.description}>
+                              {canDetail ? (
+                                <button onClick={() => void togglePayDetail(l)} className="text-left underline decoration-dotted cursor-pointer hover:text-[#1F1D1B]">{l.description}</button>
+                              ) : l.description}
+                            </div>
+                          </td>
+                          <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdIn(l.amountSen)}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">{tdOut(l.amountSen)}</td>
+                        </tr>
+                        {canDetail && det && (
+                          <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]/60">
+                            <td className="px-3" />
+                            <td colSpan={3} className="px-3 py-1 text-[11px] text-[#6B7280]">
+                              {det === "loading" ? "Loading…" : det.length === 0 ? "No allocation rows — advance / unallocated payment." :
+                                det.map((d, i) => (
+                                  <div key={i}>
+                                    {d.supplierName} · {d.piNo ? `${d.piNo}${d.opening ? " (opening bill)" : ""}` : d.method === "TF_REPAYMENT" ? "Trade finance repayment" : "Advance / unallocated"} · {formatCurrency(d.bookedSen)}
+                                  </div>
+                                ))}
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
                   {unmatchedLegs.length === 0 && (
                     <tr><td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={4}>Every book entry is matched ✓</td></tr>
                   )}

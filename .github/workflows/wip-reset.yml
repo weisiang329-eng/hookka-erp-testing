@@ -1,0 +1,88 @@
+name: WIP quantity reset
+
+# Re-derives every `wip_items.stock_qty` from the job-card history — the repair
+# for the balances that went wrong before BUG-2026-09-06-177 was fixed.
+#
+# The stored number is a running balance that has only ever been nudged, so
+# every miss since April is still sitting in it. This runs
+# `scripts/reset-wip-quantities.mjs`, which computes what each row SHOULD be
+# using `src/api/lib/wip-expected.ts` — the same module the cascade's settle and
+# the reconcile report use, so the repair cannot disagree with the engine that
+# has to keep it true afterwards. By construction the result has no negatives.
+#
+# PLAN writes nothing. APPLY additionally requires typing the confirm phrase,
+# and uploads the pre-write snapshot of every row as an artifact — that snapshot
+# is the way back.
+#
+# Run the fix FIRST. Repairing balances while the cause is still live just
+# rebuilds the damage.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'plan (read-only) or apply (writes)'
+        required: true
+        default: plan
+        type: choice
+        options: [plan, apply]
+      confirm:
+        description: 'For apply only — type: RESET WIP QUANTITIES'
+        required: false
+        default: ''
+        type: string
+      limit:
+        description: 'How many changed rows to print'
+        required: false
+        default: '40'
+        type: string
+
+concurrency:
+  group: wip-reset
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse an unconfirmed apply
+        if: inputs.mode == 'apply' && inputs.confirm != 'RESET WIP QUANTITIES'
+        run: |
+          echo "::error::apply needs the confirm phrase (RESET WIP QUANTITIES)."
+          exit 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Plan
+        if: inputs.mode == 'plan'
+        env:
+          HOOKKA_PROD_DB_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: node --import tsx/esm scripts/reset-wip-quantities.mjs --limit "${{ inputs.limit }}"
+
+      - name: Apply
+        if: inputs.mode == 'apply'
+        env:
+          HOOKKA_PROD_DB_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          node --import tsx/esm scripts/reset-wip-quantities.mjs \
+            --limit "${{ inputs.limit }}" --apply --i-have-read-the-report
+
+      # The script writes every prior value to scripts/_wip-reset-backup-*.json
+      # BEFORE its first UPDATE. On a runner that file dies with the job unless
+      # it is carried out — and without it the reset is not reversible.
+      - name: Keep the pre-write snapshot
+        if: inputs.mode == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wip-reset-backup
+          path: scripts/_wip-reset-backup-*.json
+          retention-days: 90
+          if-no-files-found: error

@@ -1,0 +1,71 @@
+name: Backfill skipped completions
+
+# Completes the earlier steps that were never ticked on orders where a LATER
+# step is already finished — the state the sequence lock now refuses, left
+# behind by the old workflow. See scripts/backfill-skipped-completions.mjs for
+# what it will and will not touch (in short: only a step a FINISHED downstream
+# card is waiting on, dated by borrowing that card's own completion date, never
+# today's).
+#
+# Order matters: run this, then run "WIP quantity reset" — this changes what the
+# balances derive to, and the reset is what makes wip_items agree again.
+#
+# PLAN writes nothing. APPLY needs the confirm phrase typed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'plan (read-only) or apply (writes)'
+        required: true
+        default: plan
+        type: choice
+        options: [plan, apply]
+      confirm:
+        description: 'For apply only — type: BACKFILL SKIPPED COMPLETIONS'
+        required: false
+        default: ''
+        type: string
+      limit:
+        description: 'How many rows to print'
+        required: false
+        default: '40'
+        type: string
+
+concurrency:
+  group: backfill-skipped-completions
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse an unconfirmed apply
+        if: inputs.mode == 'apply' && inputs.confirm != 'BACKFILL SKIPPED COMPLETIONS'
+        run: |
+          echo "::error::apply needs the confirm phrase (BACKFILL SKIPPED COMPLETIONS)."
+          exit 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Plan
+        if: inputs.mode == 'plan'
+        env:
+          HOOKKA_PROD_DB_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: node --import tsx/esm scripts/backfill-skipped-completions.mjs --limit "${{ inputs.limit }}"
+
+      - name: Apply
+        if: inputs.mode == 'apply'
+        env:
+          HOOKKA_PROD_DB_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          node --import tsx/esm scripts/backfill-skipped-completions.mjs \
+            --limit "${{ inputs.limit }}" --apply --i-have-read-the-report

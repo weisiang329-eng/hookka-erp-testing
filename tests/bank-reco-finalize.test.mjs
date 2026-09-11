@@ -45,6 +45,7 @@ test("the live report carries the saved snapshot for the UI", () => {
 
 for (const [route, name] of [
   ['app.post("/bank-reco/match", async (c) => {', "manual match"],
+  ['app.post("/bank-reco/match-group", async (c) => {', "combo match"],
   ['app.post("/bank-reco/unmatch", async (c) => {', "unmatch"],
   ['app.post("/bank-reco/ignore", async (c) => {', "ignore"],
   ['app.delete("/bank-reco/line/:id", async (c) => {', "line delete"],

@@ -254,8 +254,94 @@ test("the stale note that contradicted the lock is gone", () => {
 test("every unlock is recorded, and the audit never blocks the work", () => {
   const helpers = readFileSync("src/api/routes/production-orders/_helpers.ts", "utf8");
   assert.match(helpers, /INSERT INTO scan_override_audit/);
-  assert.match(helpers, /'UPSTREAM_INCOMPLETE'/);
   // Non-fatal: refusing a completion because a log line failed would stop the
   // factory for the sake of the record.
   assert.match(helpers, /audit write failed \(work still applied\)/);
+});
+
+test("the audit writes a code the audit table accepts (BUG-2026-09-07-179)", () => {
+  // `scan_override_audit.override_code` carries a CHECK from migration 0022
+  // allowing exactly PREREQUISITE_NOT_MET / UPSTREAM_LOCKED. Inserting the
+  // client-facing refusal code throws — and because the write above is
+  // non-fatal BY DESIGN, it threw silently on every unlock, which would have
+  // left the weekly review permanently empty and looking like nobody ever
+  // unlocked anything. Measured on production by an insert that actually ran.
+  const helpers = readFileSync("src/api/routes/production-orders/_helpers.ts", "utf8");
+  const insert = helpers.slice(
+    helpers.indexOf("INSERT INTO scan_override_audit"),
+    helpers.indexOf("INSERT INTO scan_override_audit") + 400,
+  );
+  assert.match(insert, /'UPSTREAM_LOCKED'/);
+  assert.equal(/'UPSTREAM_INCOMPLETE'/.test(insert), false);
+  // The refusal the CLIENT sees keeps its own, more precise code — the two are
+  // different vocabularies and only one of them is constrained by a table.
+  assert.match(helpers, /code: "UPSTREAM_INCOMPLETE"/);
+});
+
+// ---------------------------------------------------------------------------
+// The schedule grid (src/pages/production/index.tsx) — the screen the office
+// actually plans on. Owner 2026-09-07: 「整个加」.
+//
+// Two things had to be added, and the second is the one that matters: a
+// padlock BEFORE the click so the planner can see which cell is not ready, and
+// the same three-choice dialog the folder view has so a refusal comes with a
+// way out instead of a toast that only says no.
+// ---------------------------------------------------------------------------
+const GRID = readFileSync("src/pages/production/index.tsx", "utf8");
+
+test("the grid derives the padlock from the SAME rule the server refuses with", () => {
+  // Not a copy, not a department table — the shared pure function. A padlock
+  // computed from a second implementation would eventually point at a cell the
+  // server lets through, or miss one it does not.
+  assert.match(GRID, /import \{ sequenceBlockers[^}]*\} from "@\/api\/lib\/sequence-lock";/);
+  assert.match(GRID, /const blockers = sequenceBlockers\(jc, cards\);/);
+  // Compared against its own PO's cards, and only for the dept on screen.
+  assert.match(GRID, /const cards = o\.jobCards as unknown as SequenceCard\[\];/);
+  assert.match(GRID, /if \(jc\.departmentCode !== activeTab\) continue;/);
+});
+
+test("a finished card never wears the padlock", () => {
+  // The lock is about what may move next. A COMPLETED card that once had an
+  // open upstream is history, not a warning.
+  assert.match(GRID, /const isDoneRow = s === "COMPLETED" \|\| s === "TRANSFERRED";/);
+  assert.match(GRID, /const blockers = isDoneRow \? undefined : blockersByJc\.get\(row\.jobCardId\);/);
+  assert.match(GRID, /title=\{`Waiting for \$\{waitingFor\.join\(", "\)\} to finish first\.`\}/);
+});
+
+test("a refusal opens the three-choice dialog, once for the whole save", () => {
+  assert.match(GRID, /<SequenceUnlockDialog/);
+  assert.match(GRID, /x\.r\?\.code === "UPSTREAM_INCOMPLETE"/);
+  // Merged by blocker id: two cards waiting on the same FRAMING must not ask
+  // the operator about FRAMING twice.
+  assert.match(GRID, /const byId = new Map\(parsed\.flatMap\(\(p\) => p\.blockedBy\)\.map\(\(b\) => \[b\.id, b\]\)\);/);
+  // Only offer the release the server said it would honour, for every card.
+  assert.match(GRID, /canSelfUnlock: parsed\.every\(\(p\) => p\.canSelfUnlock\)/);
+});
+
+test("'complete the earlier step too' sends upstream FIRST", () => {
+  // Order is the whole point: upstream completes before this card consumes, so
+  // the produce lands before the consume and no negative row is created. A
+  // dialog that fixed the paperwork by creating the exact damage the lock
+  // exists to prevent would be worse than no dialog.
+  const patches = GRID.slice(GRID.indexOf("<SequenceUnlockDialog"));
+  assert.match(patches, /patches: \[\.\.\.upstream, \.\.\.targets\]/);
+  assert.match(patches, /status: "COMPLETED",\s*\n\s*completedDate: todayYmdMY\(\),/);
+  // The blocking card is usually in ANOTHER department, so its PO is looked up
+  // across the loaded orders, not in the dept grid on screen.
+  assert.match(patches, /for \(const jc of o\.jobCards\) poIdOfJc\.set\(jc\.id, o\.id\);/);
+});
+
+test("the retry re-sends what the operator typed, not a guess", () => {
+  // The drafts are kept verbatim and replayed with the release attached. A
+  // dialog that re-sent "COMPLETED" would quietly change a PIC edit into a
+  // completion.
+  assert.match(GRID, /patch: x\.draft\.patch as unknown as Record<string, unknown>,/);
+  assert.match(GRID, /\.\.\.d\.patch,\s*\n\s*unlock: \{ reason: choice\.reason \},/);
+});
+
+test("after an unlock the grid refetches instead of guessing", () => {
+  // The upstream cards belong to other departments and other rows; an
+  // optimistic patch would leave half the grid stale.
+  const patches = GRID.slice(GRID.indexOf("<SequenceUnlockDialog"));
+  assert.match(patches, /fetchOrders\(\);/);
 });

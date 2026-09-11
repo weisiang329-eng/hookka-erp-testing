@@ -70,8 +70,12 @@ test("report month-scopes clearing on both sides of the walk", () => {
   assert.match(body, /const clearedDay = clearedOn\.get\(l\.id\);/);
   assert.match(body, /clearedDay > monthEnd/);
   // Statement side: a matched line stays unbooked when its leg is dated
-  // after month end (missing leg keeps the old treated-as-booked semantics).
-  assert.match(body, /if \(legDay === undefined \|\| legDay <= monthEnd\) continue;/);
+  // after month end (missing leg keeps the old treated-as-booked semantics),
+  // and — since combo match — also while its group is incomplete or its
+  // last piece lands after month end.
+  assert.match(body, /if \(legDay === undefined\) continue;/);
+  assert.match(body, /clearedOn\.get\(r\.matchedLegId\)/);
+  assert.match(body, /clearedDay !== undefined && clearedDay <= monthEnd/);
   // The unbooked query no longer pre-filters matches away in SQL.
   assert.doesNotMatch(body, /matchedLegId IS NULL AND ignored_at IS NULL/);
 });
@@ -104,7 +108,10 @@ test("shared loader voids pre-opening matches; report floors unbooked at the ope
   const start = src.indexOf("async function loadBankRecoState(");
   assert.notEqual(start, -1, "loadBankRecoState not found");
   const loader = src.slice(start, src.indexOf("async function computeBankRecoReport("));
-  assert.match(loader, /if \(!openingDate \|\| r\.txnDate >= openingDate\) clearedOn\.set/);
+  // Group-aware clearing (2026-09-07 combo match): void pre-opening claims
+  // are skipped, and a leg clears only when its lines sum EXACTLY to it.
+  assert.match(loader, /if \(openingDate && r\.txnDate < openingDate\) continue;/);
+  assert.match(loader, /if \(legAmt !== undefined && g\.sumSen === legAmt\) clearedOn\.set\(legId, g\.lastDate\);/);
   assert.match(loader, /legBeforeOpening\(l\.sourceType, l\.day, openingDate\)/);
   assert.match(walkBody(), /if \(obDateRp && r\.txnDate < obDateRp\) continue;/);
 });
@@ -152,4 +159,21 @@ test("automatch sweeps void pre-opening claims before reading state", () => {
   const body = handler('app.post("/bank-reco/automatch", async (c) => {');
   assert.match(body, SWEEP);
   assert.ok(body.search(SWEEP) < body.indexOf("Promise.all"));
+});
+
+// 2026-09-07 combo match — several statement lines pay ONE book leg
+// (HPV-2607-024: RM 911 executed by the bank as 32.00 + 879.00). The write
+// is exact-sum and all-or-nothing; unmatching any piece dissolves the group.
+test("combo match validates the exact sum and sweeps before the taken check", () => {
+  const body = handler('app.post("/bank-reco/match-group", async (c) => {');
+  assert.match(body, /sumSen !== legAmt/);
+  assert.match(body, /isOpeningSource\(leg\.sourceType\)/);
+  assert.match(body, /l\.txnDate < obDateG/);
+  assert.match(body, SWEEP);
+  assert.ok(body.search(SWEEP) < body.indexOf("already matched to another statement line"));
+});
+
+test("unmatch dissolves the whole combo group, never leaves a partial", () => {
+  const body = handler('app.post("/bank-reco/unmatch", async (c) => {');
+  assert.match(body, /WHERE accountCode = \? AND matchedLegId = \?/);
 });

@@ -65,6 +65,13 @@ function ensurePiMigrations(db: D1Database): Promise<void> {
       // for lines invoiced straight off a PO with no receipt in between.
       "ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS po_id TEXT",
       "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS invoiced_qty NUMERIC DEFAULT 0",
+      // T-006 R8 — checkPoRemaining below matches a GRN-sourced line to its PO
+      // line via grn_items.po_item_id instead of material_code (which is
+      // ALWAYS blank on a PO-sourced GRN line, BUG-2026-08-13-052 — filling it
+      // was investigated and explicitly rejected). grn.ts self-applies this
+      // column too, but this module writes/reads it without assuming that has
+      // already run in this isolate.
+      "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS po_item_id TEXT",
       // T-006 R5 — DB backstop mirroring the sales-side chk_doi_invoiced_qty:
       // two concurrent PI creates against the same GRN line can no longer
       // both commit even if the app-level checkPoRemaining/checkConvertAvailability
@@ -979,7 +986,7 @@ function futureInvoiceDate(date: string | undefined | null): string | null {
 async function checkPoRemaining(
   db: D1Database,
   poId: string,
-  rows: Array<{ materialCode: string | null; qty: number }>,
+  rows: Array<{ materialCode: string | null; qty: number; poItemId?: string | null }>,
   /**
    * A PI whose OWN lines must not count toward already-invoiced. Set by the
    * re-line path (PUT): those lines are about to be replaced by `rows`, so
@@ -990,10 +997,11 @@ async function checkPoRemaining(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const poItemsRes = await db
     .prepare(
-      "SELECT material_code, materialName, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
+      "SELECT id, material_code, materialName, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
     )
     .bind(poId)
     .all<{
+      id: string;
       material_code?: string | null;
       materialCode?: string | null;
       materialName: string | null;
@@ -1001,65 +1009,83 @@ async function checkPoRemaining(
       receivedQty?: number | null;
       received_qty?: number | null;
     }>();
-  // Already-invoiced per material_code against THIS PO. Counts lines by
-  // their own po_id as well as PIs whose header points here, so a
-  // multi-PO invoice still contributes to the right ceiling.
+  // T-006 R8 — match by po_item_id, not material_code. A PO-sourced GRN
+  // line's material_code is ALWAYS blank (BUG-2026-08-13-052, deliberately
+  // not fixed — filling it risks posting stock to the wrong raw material).
+  // Matching by material_code meant the ceiling silently skipped every such
+  // line. po_item_id is an explicit FK, already how cascadePOStatusAfterGRNPost
+  // draws down purchase_order_items.receivedQty correctly — same match, reused
+  // here. material_code stays as the fallback for manual/legacy rows that
+  // never carried a po_item_id.
+  const orderedByItemId = new Map<string, { name: string; qty: number }>();
+  const itemIdByMaterialCode = new Map<string, string>();
+  for (const po of poItemsRes.results ?? []) {
+    const itemId = String(po.id);
+    const code = String(po.material_code ?? po.materialCode ?? "");
+    orderedByItemId.set(itemId, {
+      name: po.materialName ?? code ?? itemId,
+      // Ceiling = ordered, or what was actually received when the receipt ran
+      // over the order (accepted goods must stay invoiceable).
+      qty: poInvoiceCeiling(
+        Number(po.quantity) || 0,
+        Number(po.receivedQty ?? po.received_qty ?? 0) || 0,
+      ),
+    });
+    if (code) itemIdByMaterialCode.set(code, itemId);
+  }
+  // Already-invoiced, resolved to po_item_id via the GRN line it drew from
+  // (pii.grn_item_id → grn_items.po_item_id) where resolvable; falls back to
+  // material_code for a PI line invoiced straight off the PO with no GRN in
+  // between. Counts lines by their own po_id as well as PIs whose header
+  // points here, so a multi-PO invoice still contributes to the right ceiling.
   const invRes = await db
     .prepare(
-      `SELECT pii.material_code AS mc, COALESCE(SUM(pii.qty), 0) AS qty
+      `SELECT gi.po_item_id AS "poItemId", pii.material_code AS mc, COALESCE(SUM(pii.qty), 0) AS qty
          FROM purchase_invoice_items pii
          JOIN purchase_invoices pi ON pi.id = pii.pi_id
+         LEFT JOIN grn_items gi ON gi.id = pii.grn_item_id
         WHERE COALESCE(pii.po_id, pi.purchaseOrderId) = ? AND pi.status != 'CANCELLED'${
           excludePiId ? " AND pii.pi_id != ?" : ""
         }
-        GROUP BY pii.material_code`,
+        GROUP BY gi.po_item_id, pii.material_code`,
     )
     .bind(...(excludePiId ? [poId, excludePiId] : [poId]))
-    .all<{ mc?: string | null; material_code?: string | null; qty: number }>();
-  const invByCode = new Map<string, number>();
+    .all<{ poItemId?: string | null; mc?: string | null; material_code?: string | null; qty: number }>();
+  const invByItemId = new Map<string, number>();
   for (const row of invRes.results ?? []) {
-    const code = String(row.mc ?? row.material_code ?? "");
-    if (code) invByCode.set(code, Number(row.qty) || 0);
+    const qty = Number(row.qty) || 0;
+    const itemId = row.poItemId
+      ? String(row.poItemId)
+      : itemIdByMaterialCode.get(String(row.mc ?? row.material_code ?? ""));
+    if (!itemId) continue; // unmatched legacy row — not guarded here, same as before
+    invByItemId.set(itemId, (invByItemId.get(itemId) ?? 0) + qty);
   }
-  const orderedByCode = new Map<string, { name: string; qty: number }>();
-  for (const po of poItemsRes.results ?? []) {
-    const code = String(po.material_code ?? po.materialCode ?? "");
-    if (!code) continue;
-    const prev = orderedByCode.get(code);
-    orderedByCode.set(code, {
-      name: po.materialName ?? code,
-      // Ceiling = ordered, or what was actually received when the receipt ran
-      // over the order (accepted goods must stay invoiceable).
-      qty:
-        (prev?.qty ?? 0) +
-        poInvoiceCeiling(
-          Number(po.quantity) || 0,
-          Number(po.receivedQty ?? po.received_qty ?? 0) || 0,
-        ),
-    });
-  }
-  // Aggregate the REQUESTED quantity per material code before measuring.
-  const reqByCode = new Map<string, number>();
+  // Aggregate the REQUESTED quantity per po_item_id before measuring.
+  const reqByItemId = new Map<string, number>();
   for (const r of rows) {
-    const code = r.materialCode ?? "";
-    if (!code) continue; // fee / tax / unmatched lines don't draw a PO line down
-    reqByCode.set(code, (reqByCode.get(code) ?? 0) + (Number(r.qty) || 0));
+    const itemId = r.poItemId
+      ? String(r.poItemId)
+      : itemIdByMaterialCode.get(r.materialCode ?? "");
+    if (!itemId) continue; // fee / tax / unmatched lines don't draw a PO line down
+    reqByItemId.set(itemId, (reqByItemId.get(itemId) ?? 0) + (Number(r.qty) || 0));
   }
   const lines: ConvertLineRequest[] = [];
-  for (const [code, requestedQty] of reqByCode) {
-    const ordered = orderedByCode.get(code);
+  for (const [itemId, requestedQty] of reqByItemId) {
+    const ordered = orderedByItemId.get(itemId);
     if (!ordered) continue; // line not matched to a PO line → not guarded here
     lines.push({
-      ref: code,
+      ref: itemId,
       orderedQty: ordered.qty,
-      consumedQty: invByCode.get(code) ?? 0,
+      consumedQty: invByItemId.get(itemId) ?? 0,
       requestedQty,
     });
   }
   const guard = checkConvertAvailability(lines);
   if (guard.ok) return { ok: true };
   // Only on a block: name the purchase order the operator has to act on.
-  const ordered = orderedByCode.get(guard.ref);
+  // guard.ref is the po_item_id (a stable key, not a display label) — look
+  // its name back up for the message.
+  const ordered = orderedByItemId.get(guard.ref);
   const po = await db
     .prepare("SELECT poNo FROM purchase_orders WHERE id = ?")
     .bind(poId)
@@ -1067,13 +1093,13 @@ async function checkPoRemaining(
   return {
     ok: false,
     error: poCeilingError({
-      materialCode: guard.ref,
-      materialName: ordered?.name ?? null,
+      materialCode: ordered?.name ?? guard.ref,
+      materialName: null,
       poNo: po?.poNo ?? null,
       requested: guard.requested,
       remaining: guard.available,
       ceiling: ordered?.qty ?? 0,
-      invoiced: invByCode.get(guard.ref) ?? 0,
+      invoiced: invByItemId.get(guard.ref) ?? 0,
     }),
   };
 }
@@ -1289,7 +1315,7 @@ app.post("/", async (c) => {
       // Load this GRN's lines (accepted + already-invoiced) keyed by id.
       const giRes = await db
         .prepare(
-          "SELECT id, materialCode, materialName, acceptedQty, invoiced_qty, po_id FROM grn_items WHERE grnId = ?",
+          "SELECT id, materialCode, materialName, acceptedQty, invoiced_qty, po_id, po_item_id FROM grn_items WHERE grnId = ?",
         )
         .bind(sourceGrnId)
         .all<{
@@ -1302,6 +1328,8 @@ app.post("/", async (c) => {
           invoicedQty?: number | null;
           po_id?: string | null;
           poId?: string | null;
+          po_item_id?: string | null;
+          poItemId?: string | null;
         }>();
       const giById = new Map<string, (typeof giRes.results)[number]>();
       for (const gi of giRes.results ?? []) {
@@ -1343,7 +1371,7 @@ app.post("/", async (c) => {
       // line to its purchase order and measure it against the SAME ceiling
       // the PO-source branch below uses. A GRN line with no purchase order (a
       // direct receipt) resolves to nothing and stays invoiceable.
-      const byPo = new Map<string, Array<{ materialCode: string | null; qty: number }>>();
+      const byPo = new Map<string, Array<{ materialCode: string | null; qty: number; poItemId: string | null }>>();
       for (const r of normalizedItems.rows) {
         const gi = r.grnItemId ? giById.get(String(r.grnItemId)) : undefined;
         // Same resolution the INSERT uses for purchase_invoice_items.po_id, so
@@ -1359,6 +1387,10 @@ app.post("/", async (c) => {
         bucket.push({
           materialCode: r.materialCode ?? gi?.materialCode ?? gi?.material_code ?? null,
           qty: r.qty,
+          // T-006 R8 — the GRN line's own po_item_id, an exact FK match. Blank
+          // material_code (BUG-2026-08-13-052) would otherwise skip this line's
+          // ceiling entirely.
+          poItemId: gi?.po_item_id ?? gi?.poItemId ?? null,
         });
         byPo.set(String(linePoId), bucket);
       }
@@ -2067,12 +2099,33 @@ app.put("/:id", async (c) => {
     const editPoId =
       (existing as unknown as { purchaseOrderId?: string | null })
         .purchaseOrderId ?? null;
-    const byPo = new Map<string, Array<{ materialCode: string | null; qty: number }>>();
+    // T-006 R8 — same resolution as the create path: a GRN-sourced line's
+    // material_code is always blank (BUG-2026-08-13-052), so checkPoRemaining
+    // needs the line's own po_item_id to measure it at all.
+    const editGrnItemIds = [
+      ...new Set(normalizedItems.rows.map((r) => r.grnItemId).filter((v): v is string => !!v)),
+    ];
+    const poItemIdByGrnItemId = new Map<string, string | null>();
+    if (editGrnItemIds.length) {
+      const ph = editGrnItemIds.map(() => "?").join(",");
+      const giRes = await db
+        .prepare(`SELECT id, po_item_id FROM grn_items WHERE id IN (${ph})`)
+        .bind(...editGrnItemIds)
+        .all<{ id: string; po_item_id?: string | null; poItemId?: string | null }>();
+      for (const gi of giRes.results ?? []) {
+        poItemIdByGrnItemId.set(String(gi.id), gi.po_item_id ?? gi.poItemId ?? null);
+      }
+    }
+    const byPo = new Map<string, Array<{ materialCode: string | null; qty: number; poItemId: string | null }>>();
     for (const r of normalizedItems.rows) {
       const linePoId = r.poId ?? editPoId;
       if (!linePoId) continue; // no purchase order behind this line
       const bucket = byPo.get(String(linePoId)) ?? [];
-      bucket.push({ materialCode: r.materialCode, qty: r.qty });
+      bucket.push({
+        materialCode: r.materialCode,
+        qty: r.qty,
+        poItemId: r.grnItemId ? poItemIdByGrnItemId.get(String(r.grnItemId)) ?? null : null,
+      });
       byPo.set(String(linePoId), bucket);
     }
     for (const [poId, rows] of byPo) {

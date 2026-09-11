@@ -90,6 +90,22 @@ export async function ensurePurchaseReturnTables(db: D1Database): Promise<void> 
         /* column already exists */
       }
     }
+    // T-006 R6 — a return draws down the same counters a GRN/PI receipt built
+    // up (grn_items.invoiced_qty, grn_items.po_id/po_item_id). Those columns
+    // are self-applied by grn.ts/purchase-invoices.ts when THOSE routes run,
+    // but this module writes to them too and cannot assume that has already
+    // happened in this isolate — migrations don't auto-apply on deploy.
+    for (const stmt of [
+      "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS invoiced_qty NUMERIC DEFAULT 0",
+      "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS po_id TEXT",
+      "ALTER TABLE grn_items ADD COLUMN IF NOT EXISTS po_item_id TEXT",
+    ]) {
+      try {
+        await db.prepare(stmt).run();
+      } catch {
+        /* column already exists */
+      }
+    }
     tablesEnsured = true;
   } catch (err) {
     console.warn(
@@ -444,69 +460,139 @@ export async function issuePurchaseReturnDebitNote(
   return { ok: true, noteNumber, amountSen };
 }
 
-// Write a Purchase Return header + its item snapshot. Returns the new id +
-// return_no. No ledger movement (slice 1).
+export type CreatePurchaseReturnResult =
+  | { ok: true; id: string; returnNo: string }
+  | { ok: false; error: string };
+
+// Write a Purchase Return header + its item snapshot, and (T-006 R6) give
+// back the counters the original receipt/invoice drew down. No ledger
+// movement here — that's slices 2/3 (applyPurchaseReturnStockOut /
+// issuePurchaseReturnDebitNote).
 export async function createPurchaseReturn(
   db: D1Database,
   input: PRCreateInput,
-): Promise<{ id: string; returnNo: string }> {
+): Promise<CreatePurchaseReturnResult> {
   await ensurePurchaseReturnTables(db);
   const id = genPurchaseReturnId();
   const returnNo = await nextPurchaseReturnNo(db);
   const now = new Date().toISOString();
-  await db
-    .prepare(
-      `INSERT INTO purchase_returns
-         (id, return_no, purchase_invoice_id, pi_no, grn_id, grn_no,
-          supplier_id, supplier_name, status, resolution, reason, notes,
-          returned_at, created_by, created_at, updated_at, org_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      id,
-      returnNo,
-      input.purchaseInvoiceId ?? "",
-      input.piNo ?? "",
-      input.grnId ?? "",
-      input.grnNo ?? "",
-      input.supplierId ?? "",
-      input.supplierName ?? "",
-      input.resolution ?? "REFUND",
-      input.reason ?? "",
-      input.notes ?? "",
-      now,
-      input.createdBy ?? null,
-      now,
-      now,
-      input.orgId ?? null,
-    )
-    .run();
-  for (const it of input.items) {
+
+  const validItems = input.items.filter((it) => {
     const qty = Number(it.quantity ?? 0);
-    if (!Number.isFinite(qty) || qty <= 0) continue; // skip zero/blank lines
-    const unit = roundUnitPriceSen(Number(it.unitCostSen ?? 0));
-    await db
+    return Number.isFinite(qty) && qty > 0;
+  });
+
+  // T-006 R6 — cap cumulative returns per GRN line at what was actually
+  // accepted (the physical ceiling on what can ever come back), and reject
+  // a duplicate/over-return BEFORE writing anything. Lines with no
+  // grnItemId (a PI line never linked to a GRN) have no receipt counter to
+  // check against, so they skip this cap — same as they always did.
+  const grnItemIds = [
+    ...new Set(validItems.map((it) => it.grnItemId).filter((v): v is string => !!v)),
+  ];
+  const poItemIdByGrnItemId = new Map<string, string | null>();
+  for (const giId of grnItemIds) {
+    const grnLine = await db
+      .prepare("SELECT accepted_qty, po_item_id FROM grn_items WHERE id = ?")
+      .bind(giId)
+      .first<{ accepted_qty: number | null; po_item_id: string | null }>();
+    if (!grnLine) continue; // unresolvable line — nothing to cap or draw down
+    poItemIdByGrnItemId.set(giId, grnLine.po_item_id ?? null);
+    const alreadyReturned = await db
       .prepare(
-        `INSERT INTO purchase_return_items
-           (id, purchase_return_id, purchase_invoice_item_id, material_code,
-            material_name, supplier_sku, grn_item_id, quantity, unit_cost_sen,
-            line_total_sen, problem)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        "SELECT COALESCE(SUM(quantity),0) AS qty FROM purchase_return_items WHERE grn_item_id = ?",
+      )
+      .bind(giId)
+      .first<{ qty: number }>();
+    const already = Number(alreadyReturned?.qty ?? 0) || 0;
+    const accepted = Number(grnLine.accepted_qty ?? 0) || 0;
+    const thisReturn = validItems
+      .filter((it) => it.grnItemId === giId)
+      .reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+    if (already + thisReturn > accepted) {
+      return {
+        ok: false,
+        error: `Return exceeds what was received on this line: already returned ${already} + this return ${thisReturn} > accepted ${accepted}.`,
+      };
+    }
+  }
+
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT INTO purchase_returns
+           (id, return_no, purchase_invoice_id, pi_no, grn_id, grn_no,
+            supplier_id, supplier_name, status, resolution, reason, notes,
+            returned_at, created_by, created_at, updated_at, org_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
-        genItemId(),
         id,
-        it.purchaseInvoiceItemId ?? null,
-        it.materialCode ?? null,
-        it.materialName ?? "",
-        it.supplierSku ?? null,
-        it.grnItemId ?? null,
-        qty,
-        unit,
-        Math.round(qty * unit),
-        it.problem ?? "",
-      )
-      .run();
+        returnNo,
+        input.purchaseInvoiceId ?? "",
+        input.piNo ?? "",
+        input.grnId ?? "",
+        input.grnNo ?? "",
+        input.supplierId ?? "",
+        input.supplierName ?? "",
+        input.resolution ?? "REFUND",
+        input.reason ?? "",
+        input.notes ?? "",
+        now,
+        input.createdBy ?? null,
+        now,
+        now,
+        input.orgId ?? null,
+      ),
+  ];
+  for (const it of validItems) {
+    const qty = Number(it.quantity) || 0;
+    const unit = roundUnitPriceSen(Number(it.unitCostSen ?? 0));
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO purchase_return_items
+             (id, purchase_return_id, purchase_invoice_item_id, material_code,
+              material_name, supplier_sku, grn_item_id, quantity, unit_cost_sen,
+              line_total_sen, problem)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          genItemId(),
+          id,
+          it.purchaseInvoiceItemId ?? null,
+          it.materialCode ?? null,
+          it.materialName ?? "",
+          it.supplierSku ?? null,
+          it.grnItemId ?? null,
+          qty,
+          unit,
+          Math.round(qty * unit),
+          it.problem ?? "",
+        ),
+    );
+    // R6 — give back what the receipt/invoice drew down. Clamped at 0 so a
+    // rounding/race edge never drives a counter negative.
+    if (it.grnItemId) {
+      stmts.push(
+        db
+          .prepare(
+            "UPDATE grn_items SET invoiced_qty = GREATEST(0, invoiced_qty - ?) WHERE id = ?",
+          )
+          .bind(qty, it.grnItemId),
+      );
+      const poItemId = poItemIdByGrnItemId.get(it.grnItemId);
+      if (poItemId) {
+        stmts.push(
+          db
+            .prepare(
+              "UPDATE purchase_order_items SET receivedQty = GREATEST(0, receivedQty - ?) WHERE id = ?",
+            )
+            .bind(qty, poItemId),
+        );
+      }
+    }
   }
-  return { id, returnNo };
+  await db.batch(stmts);
+  return { ok: true, id, returnNo };
 }

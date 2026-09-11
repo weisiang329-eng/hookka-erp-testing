@@ -1442,34 +1442,33 @@ export async function computeDoInvoiceLines(
   ]);
   const doItems = doItemsRes.results ?? [];
 
-  // Partial-delivery: a line that went into a Delivery Return is NOT delivered,
-  // so it's excluded from the invoice (the good lines are billed; the returned
-  // ones drop out). Best-effort — if the delivery_return tables don't exist yet
-  // (no returns raised on this deployment), the query throws and we bill all.
-  let returnedPoIds = new Set<string>();
+  // Partial-delivery (T-006 R7): a line with a Delivery Return against it is
+  // invoiceable only for what WASN'T returned — return 1 of 3 still leaves 2
+  // billable, it doesn't drop the whole line. Was a Set<productionOrderId>
+  // membership filter that excluded the entire line on ANY return against it,
+  // so a 1-of-3 return zeroed out the other 2 that were still good. Best-effort
+  // — if the delivery_return tables don't exist yet (no returns raised on this
+  // deployment), the query throws and nothing is excluded.
+  let returnedQtyByPoId = new Map<string, number>();
   try {
     const retRes = await db
       .prepare(
-        `SELECT dri.production_order_id AS "poId"
+        `SELECT dri.production_order_id AS "poId", COALESCE(SUM(dri.quantity),0) AS "qty"
            FROM delivery_return_items dri
            JOIN delivery_returns dr ON dr.id = dri.delivery_return_id
-          WHERE dr.delivery_order_id = ? AND dr.status <> 'CANCELLED'`,
+          WHERE dr.delivery_order_id = ? AND dr.status <> 'CANCELLED'
+          GROUP BY dri.production_order_id`,
       )
       .bind(doId)
-      .all<{ poId: string | null }>();
-    returnedPoIds = new Set(
+      .all<{ poId: string | null; qty: number }>();
+    returnedQtyByPoId = new Map(
       (retRes.results ?? [])
-        .map((r) => r.poId)
-        .filter((x): x is string => !!x),
+        .filter((r): r is { poId: string; qty: number } => !!r.poId)
+        .map((r) => [r.poId, Number(r.qty) || 0]),
     );
   } catch {
     /* delivery_return tables not present — nothing to exclude */
   }
-  const activeDoItems = returnedPoIds.size
-    ? doItems.filter(
-        (di) => !di.productionOrderId || !returnedPoIds.has(di.productionOrderId),
-      )
-    : doItems;
 
   // How much of each line this invoice is allowed to take. Default: everything
   // still un-invoiced. With a `select`, only what was ticked — clamped to the
@@ -1490,10 +1489,14 @@ export async function computeDoInvoiceLines(
 
   const draws: DoLineSelection[] = [];
   let invItems: InvItem[] = [];
-  for (const di of activeDoItems) {
+  for (const di of doItems) {
     const delivered = Number(di.quantity) || 0;
+    const returned = di.productionOrderId
+      ? returnedQtyByPoId.get(di.productionOrderId) ?? 0
+      : 0;
+    const effectiveDelivered = Math.max(0, delivered - returned);
     const already = Number(di.invoicedQty ?? di.invoiced_qty ?? 0) || 0;
-    const remaining = availableQty(delivered, already);
+    const remaining = availableQty(effectiveDelivered, already);
     const billQty = select
       ? Math.min(wanted.get(di.id) ?? 0, remaining)
       : remaining;
@@ -1538,7 +1541,7 @@ export async function computeDoInvoiceLines(
   // invoice already charged. Restrict them to what they were always for — the
   // FIRST, whole-document bill of a delivery nothing has drawn on yet.
   const freshWholeDo =
-    !select && activeDoItems.every((di) => (Number(di.invoicedQty ?? di.invoiced_qty ?? 0) || 0) === 0);
+    !select && doItems.every((di) => (Number(di.invoicedQty ?? di.invoiced_qty ?? 0) || 0) === 0);
 
   // Fallback 1: nothing priced at all → bill the linked SO lines directly.
   if (computedTotal === 0 && freshWholeDo) {

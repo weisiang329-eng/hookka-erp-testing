@@ -411,6 +411,60 @@ const STATUS_RANK: Record<string, number> = {
 // allowed so a no-status-change PATCH (e.g. items replace, carrier edit)
 // passes through.
 // ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// T-006 R4 — voiding a CN-sourced invoice must release the CN back to its
+// pre-conversion status, not leave it stuck at FULLY_SOLD forever.
+//
+// convert-to-invoice has no status gate (a CN can convert from ACTIVE,
+// PARTIALLY_SOLD, or IN_TRANSIT), so there is no single fixed prior value to
+// restore — it has to be recorded at conversion time.
+// ---------------------------------------------------------------------------
+let cnStatusBeforeConversionColumnReady = false;
+export async function ensureCnStatusBeforeConversionColumn(
+  db: D1Database,
+): Promise<void> {
+  if (cnStatusBeforeConversionColumnReady) return;
+  try {
+    await db
+      .prepare(
+        "ALTER TABLE consignment_notes ADD COLUMN IF NOT EXISTS status_before_conversion TEXT",
+      )
+      .run();
+  } catch {
+    // ignore — column may already exist or DDL transiently rejected
+  }
+  cnStatusBeforeConversionColumnReady = true;
+}
+
+// Called from the invoice void handler (invoices.ts). The CN link is
+// one-way — consignment_notes.convertedInvoiceId points at the invoice, the
+// invoice carries nothing back — so this looks the CN up by that column.
+// Returns [] when the invoice did not come from a CN (the common case).
+export async function buildInvoiceDeathCnReleaseStatements(
+  db: D1Database,
+  args: { invoiceId: string },
+): Promise<D1PreparedStatement[]> {
+  await ensureCnStatusBeforeConversionColumn(db);
+  const cn = await db
+    .prepare(
+      "SELECT id, status_before_conversion FROM consignment_notes WHERE convertedInvoiceId = ?",
+    )
+    .bind(args.invoiceId)
+    .first<{ id: string; status_before_conversion: string | null }>();
+  if (!cn) return [];
+  return [
+    db
+      .prepare(
+        `UPDATE consignment_notes
+            SET status = ?,
+                status_before_conversion = NULL,
+                convertedInvoiceId = NULL
+          WHERE id = ?`,
+      )
+      .bind(cn.status_before_conversion ?? "PARTIALLY_SOLD", cn.id),
+  ];
+}
+
 export const CN_VALID_TRANSITIONS: Record<string, string[]> = {
   ACTIVE: ["ACTIVE", "PARTIALLY_SOLD"],
   PARTIALLY_SOLD: [

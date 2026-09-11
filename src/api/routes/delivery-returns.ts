@@ -249,8 +249,8 @@ app.post("/", async (c) => {
       reason: String(body.reason ?? ""),
       notes: String(body.notes ?? ""),
     });
-    if (!created) {
-      return c.json({ success: false, error: "Failed to create delivery return" }, 400);
+    if (!created.ok) {
+      return c.json({ success: false, error: created.error }, 409);
     }
 
     const header = await c.var.DB
@@ -467,7 +467,19 @@ app.post("/:id/cancel", async (c) => {
     .bind(id)
     .first<{ status: string }>();
   if (!h) return c.json({ success: false, error: "Not found" }, 404);
-  if (h.status === "CLOSED" || h.status === "REDELIVERED" || h.status === "CN_ISSUED") {
+  // T-006 R7 — RETURNED_TO_STOCK belongs in this refused list too: that
+  // status means buildReturnToStockStatements already credited stock back
+  // (fg_batches + cost_ledger + fg_units RETURNED). Cancelling from there
+  // used to succeed silently with no reversal, leaving stock overstated by
+  // whatever this return put back. No reversal is implemented (a wrong
+  // double-reversal would be worse than a refused cancel) — refuse instead,
+  // per the PRD's own "or is refused" wording.
+  if (
+    h.status === "CLOSED" ||
+    h.status === "REDELIVERED" ||
+    h.status === "CN_ISSUED" ||
+    h.status === "RETURNED_TO_STOCK"
+  ) {
     return c.json(
       { success: false, error: `Cannot cancel a ${h.status} return` },
       409,

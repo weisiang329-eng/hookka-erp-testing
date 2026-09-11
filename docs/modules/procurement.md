@@ -1,5 +1,15 @@
 # Procurement — Module Guide
 
+> **Last verified: 2026-09-11 (later same day, after R6/R7)** — T-006 R8 changed
+> `checkPoRemaining` to match a GRN-sourced line to its PO line by `po_item_id`
+> instead of `material_code` (always blank on a PO-sourced GRN line,
+> BUG-2026-08-13-052 — deliberately not fixed at the source), and added a
+> `grn_items.po_item_id` self-apply to `purchase-invoices.ts`. Shifted:
+> `app.post("/")` (PI create) `:1081`→`:1107`, `app.put("/:id")` (PI edit)
+> `:1945`→`:1984`, `checkInvoicedQtyCeilingAfterEdit` `:688`→`:702`,
+> `mapPurchaseLinesToAccounts` `:192`→`:199`, the GL-correction `sourceId`
+> (now `correctionSourceId`) `:2539`→`:2572`.
+>
 > **Last verified: 2026-09-11 (later same day, after R2)** — T-006 R3 merged the GRN
 > create path's three separate `db.batch()` calls (header+lines, stock post, PO-counter
 > update) into one atomic batch. Split `postGRNToStock` into a pure builder
@@ -88,8 +98,8 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
 1. **Create PO** — `app.post("/")` `purchase-orders.ts:430`. Takes `body.status` verbatim (MANUAL create sends `CONFIRMED`; defaults DRAFT only when omitted). Fills blank supplier SKUs from bindings (`fillBlankSupplierSku` `:185`); column self-apply in `ensurePendingMigrations` (`:1063`). The status literal is read at `:519` (`body.status ?? "DRAFT"`).
 2. **Receive → Post-to-Stock cascade** — GRN status derives from ARRIVAL on create (`grn.ts:1306`): local-in-hand (arrival ARRIVED) is born POSTED and posts immediately; OCR/import → DRAFT. Crossing to POSTED calls `postGRNToStock` (`:521`, resolves RM via `resolveRmForGRNItem` `:473`, bumps `raw_materials.balanceQty`, writes `cost_ledger`) then `cascadePOStatusAfterGRNPost` (`:811`, flips PO → RECEIVED/PARTIAL_RECEIVED). `COMMITTED_STATUSES = {CONFIRMED,POSTED}` (`:305`).
 3. **Edit a POSTED GRN line** — `app.put("/:id")` `grn.ts:1798`; when prev+new both committed, `buildPostedGRNStockAdjustment` (`:670`) posts only the DELTA via the same helpers, and `cascadePOReceivedQtyDelta` (`:1085`) moves the parent PO line. Blocked when `newAccepted < invoiced_qty` or lines added/removed (`checkGrnLineQtyEdit` in `purchase-edit-rules.ts:135`).
-4. **PI create → convert-chain + GL post** — `app.post("/")` `purchase-invoices.ts:1068`; `ensurePiMigrations` is defined at `:49` and awaited inside. **Status on create is DRAFT** (`const status = body.status || "DRAFT"`, `:1127`) regardless of OCR vs manual — `ocrUsed` is still accepted in the body but is a **legacy no-op flag** (`:1090-1092`). `checkConvertAvailability` (`convert-chain.ts:81`) line-level 409 guard; increments `grn_items.invoiced_qty`. A PI **born CONFIRMED** (bulk import sending `status` directly) posts its AP legs right here (`:1558-1573`, guarded by `ledgerHasSource` so it is idempotent) via `mapPurchaseLinesToAccounts` (`:170`) → `buildPiApprovalLegs` (`pi-posting.ts:35`).
-5. **Edit PI (DRAFT, CONFIRMED or legacy APPROVED)** — `app.put("/:id")` `purchase-invoices.ts:1945`, gated by `isPiEditable` (`purchase-edit-rules.ts:34`; `PI_EDITABLE_STATUSES = ["DRAFT","CONFIRMED","APPROVED"]` at `:32`) and by `VALID_TRANSITIONS` (`:319-325`: DRAFT→CONFIRMED, CONFIRMED→PAID, PAID terminal; the two legacy states map to CONFIRMED/PAID). Re-syncs `grn_items.invoiced_qty` (floored by `clampDecrement`, ceilinged by `checkInvoicedQtyCeilingAfterEdit` `:688`); a CONFIRMED edit posts a GL CORRECTION for the amount delta against a fresh sourceId (`:2539`).
+4. **PI create → convert-chain + GL post** — `app.post("/")` `purchase-invoices.ts:1107`; `ensurePiMigrations` is defined at `:49` and awaited inside. **Status on create is DRAFT** regardless of OCR vs manual — `ocrUsed` is still accepted in the body but is a **legacy no-op flag**. `checkConvertAvailability` (`convert-chain.ts:81`) line-level 409 guard; `checkPoRemaining` (`:986`) the PO-level guard, matched by `po_item_id` not `material_code` (T-006 R8 — a PO-sourced GRN line's material_code is always blank); increments `grn_items.invoiced_qty`. A PI **born CONFIRMED** (bulk import sending `status` directly) posts its AP legs right here via `mapPurchaseLinesToAccounts` (`:199`) → `buildPiApprovalLegs` (`pi-posting.ts:35`).
+5. **Edit PI (DRAFT, CONFIRMED or legacy APPROVED)** — `app.put("/:id")` `purchase-invoices.ts:1984`, gated by `isPiEditable` (`purchase-edit-rules.ts:34`; `PI_EDITABLE_STATUSES = ["DRAFT","CONFIRMED","APPROVED"]` at `:32`) and by `VALID_TRANSITIONS` (`:319-325`: DRAFT→CONFIRMED, CONFIRMED→PAID, PAID terminal; the two legacy states map to CONFIRMED/PAID). Re-syncs `grn_items.invoiced_qty` (floored by `clampDecrement`, ceilinged by `checkInvoicedQtyCeilingAfterEdit` `:702`); a CONFIRMED edit posts a GL CORRECTION for the amount delta against a fresh `correctionSourceId` (`:2572`).
 6. **Supplier payment allocation** — `app.post("/")` `supplier-payments.ts:124` (multi-allocation MYR/FX; unallocated = advance); `/knock-off` (`:572`) / `/un-knock` (`:733`) reattribute an advance with NO GL move; void/unvoid via `buildSupplierPaymentLifecycle` (`:827`).
 
 ## Key functions / sections (locate-to-function)
@@ -112,10 +122,11 @@ Owns the buy-side document chain: **Purchase Orders** (PO) → **Goods Receipt N
 | `resolveRmForGRNItem` | `src/api/routes/grn.ts:480` | Resolve GRN line → raw_material |
 | `app.post("/")` (GRN create) | `src/api/routes/grn.ts:1383` | GRN create; builds stock+PO-counter statements into ONE batch with header+lines (T-006 R3) |
 | `app.put("/:id/arrival")` | `src/api/routes/grn.ts:2307` | Arrival state transition (gate) |
-| `app.post("/")` (PI create) | `src/api/routes/purchase-invoices.ts:1081` | PI create + convert-chain + GL post |
-| `app.put("/:id")` (PI edit) | `src/api/routes/purchase-invoices.ts:1945` | PI edit (DRAFT/CONFIRMED/legacy APPROVED) + GL correction |
-| `checkInvoicedQtyCeilingAfterEdit` | `src/api/routes/purchase-invoices.ts:695` | Ceiling on re-synced invoiced_qty |
-| `mapPurchaseLinesToAccounts` | `src/api/routes/purchase-invoices.ts:192` | PI lines → GL account buckets |
+| `app.post("/")` (PI create) | `src/api/routes/purchase-invoices.ts:1107` | PI create + convert-chain + GL post |
+| `app.put("/:id")` (PI edit) | `src/api/routes/purchase-invoices.ts:1984` | PI edit (DRAFT/CONFIRMED/legacy APPROVED) + GL correction |
+| `checkInvoicedQtyCeilingAfterEdit` | `src/api/routes/purchase-invoices.ts:702` | Ceiling on re-synced invoiced_qty |
+| `checkPoRemaining` | `src/api/routes/purchase-invoices.ts:986` | PO ceiling, matched by po_item_id (T-006 R8), material_code as legacy fallback |
+| `mapPurchaseLinesToAccounts` | `src/api/routes/purchase-invoices.ts:199` | PI lines → GL account buckets |
 | `buildPiApprovalLegs` | `src/lib/pi-posting.ts:35` | PI AP GL legs on CONFIRMED (DR mapped buckets · CR 400-0000) |
 | `isPiEditable` / `checkGrnLineQtyEdit` | `src/lib/purchase-edit-rules.ts:34 / 135` | Shared FE+BE edit gates |
 | `checkConvertAvailability` / `clampDecrement` | `src/lib/convert-chain.ts:81 / 138` | Line-level 409 guard + floor |

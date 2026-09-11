@@ -1,0 +1,12 @@
+-- 0234_consignment_notes_status_before_conversion.sql
+--
+-- T-006 R4 — voiding a CN-sourced invoice needs to know what the CN's status
+-- was BEFORE convert-to-invoice flipped it to FULLY_SOLD, so the void can put
+-- it back. convert-to-invoice has no status gate (a CN can convert from
+-- ACTIVE, PARTIALLY_SOLD, or IN_TRANSIT), so there is no single fixed prior
+-- value to hardcode — it has to be recorded per-conversion.
+--
+-- THIS FILE IS A RECORD, NOT THE MECHANISM: migrations do not auto-apply on
+-- deploy in this repo. The real application is the runtime self-apply in
+-- ensureCnStatusBeforeConversionColumn (src/api/lib/consignment-note-shared.ts).
+ALTER TABLE consignment_notes ADD COLUMN IF NOT EXISTS status_before_conversion TEXT;

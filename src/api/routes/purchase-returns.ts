@@ -187,7 +187,10 @@ app.post("/", async (c) => {
     orgId: getOrgId(c),
     items,
   });
-  return c.json({ success: true, data: created });
+  if (!created.ok) {
+    return c.json({ success: false, error: created.error }, 409);
+  }
+  return c.json({ success: true, data: { id: created.id, returnNo: created.returnNo } });
 });
 
 // POST /api/purchase-returns/:id/confirm — slice 2: reverse the stock (the

@@ -302,11 +302,14 @@ function makeDb() {
         .filter((r) => String(getCol(r, "purchaseOrderId")) === String(binds[0]))
         .map((r) => ({ quantity: getCol(r, "quantity"), receivedQty: Number(getCol(r, "receivedQty")) || 0 }));
     }
-    // SELECT material_code, materialName, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?
+    // T-006 R8 — SELECT id, material_code, materialName, quantity, receivedQty
+    // FROM purchase_order_items WHERE purchaseOrderId = ? (checkPoRemaining
+    // now keys the ceiling by the PO line's own id, not material_code).
     if (/FROM purchase_order_items WHERE purchaseOrderId = \?/i.test(sql)) {
       return tables.purchase_order_items
         .filter((r) => String(getCol(r, "purchaseOrderId")) === String(binds[0]))
         .map((r) => ({
+          id: r.id,
           material_code: getCol(r, "material_code"),
           materialName: getCol(r, "materialName"),
           quantity: getCol(r, "quantity"),
@@ -336,9 +339,13 @@ function makeDb() {
     if (/FROM purchase_invoice_items WHERE pi_id = \?/i.test(sql)) {
       return tables.purchase_invoice_items.filter((r) => String(getCol(r, "pi_id")) === String(binds[0]));
     }
-    // Already-invoiced against a PO, per material code:
-    //   SELECT pii.material_code AS mc, COALESCE(SUM(pii.qty),0) AS qty
+    // T-006 R8 — already-invoiced against a PO, resolved to po_item_id (via
+    // pii.grn_item_id → grn_items.po_item_id) where resolvable, else
+    // material_code for a legacy/manual line with no GRN behind it:
+    //   SELECT gi.po_item_id AS "poItemId", pii.material_code AS mc,
+    //          COALESCE(SUM(pii.qty),0) AS qty
     //     FROM purchase_invoice_items pii JOIN purchase_invoices pi ...
+    //     LEFT JOIN grn_items gi ON gi.id = pii.grn_item_id
     //    WHERE COALESCE(pii.po_id, pi.purchaseOrderId) = ? AND pi.status != 'CANCELLED'
     // A GRN-sourced line counts here through its own po_id — which is exactly
     // why the GRN-then-PO order was already blocked while PO-then-GRN was not.
@@ -347,7 +354,7 @@ function makeDb() {
       // The re-line path excludes the invoice being edited (AND pii.pi_id != ?)
       // — its current lines are about to be replaced.
       const excluded = /pii\.pi_id != \?/.test(sql) ? String(binds[1]) : null;
-      const byCode = new Map();
+      const byKey = new Map();
       for (const it of tables.purchase_invoice_items) {
         if (excluded && String(getCol(it, "pi_id")) === excluded) continue;
         const pi = tables.purchase_invoices.find(
@@ -357,11 +364,19 @@ function makeDb() {
         const effectivePo =
           getCol(it, "po_id") ?? getCol(pi, "purchaseOrderId") ?? null;
         if (effectivePo == null || String(effectivePo) !== wanted) continue;
+        const grnItemId = getCol(it, "grn_item_id");
+        const gi = grnItemId
+          ? tables.grn_items.find((g) => String(g.id) === String(grnItemId))
+          : null;
+        const poItemId = gi ? getCol(gi, "po_item_id") ?? null : null;
         const code = getCol(it, "material_code");
-        if (!code) continue;
-        byCode.set(code, (byCode.get(code) ?? 0) + (Number(getCol(it, "qty")) || 0));
+        if (!poItemId && !code) continue; // wholly unresolvable — not guarded here
+        const key = poItemId ?? `code:${code}`;
+        const prev = byKey.get(key) ?? { poItemId, mc: code ?? null, qty: 0 };
+        prev.qty += Number(getCol(it, "qty")) || 0;
+        byKey.set(key, prev);
       }
-      return [...byCode].map(([mc, qty]) => ({ mc, qty }));
+      return [...byKey.values()];
     }
     // suppliers / poNo lookups not used here
     if (/FROM purchase_orders WHERE id = \?/i.test(sql)) {
@@ -820,6 +835,36 @@ test("a legitimate split still passes: 60 off the PO, then 40 off the GRN", asyn
   // The 101st unit is refused.
   const over = await post(piRoot, grnSourcedPI(1, { purchaseOrderId: "po-2" }));
   assert.equal(over.status, 409);
+});
+
+// T-006 R8 / BUG-2026-08-13-052 — every PO-sourced GRN line stores
+// material_code = "" in production (root cause diagnosed, deliberately NOT
+// fixed at the source — see BUG-HISTORY.md). checkPoRemaining used to match
+// PO lines to invoice lines by material_code alone, so a blank code meant the
+// ceiling could never find its PO line and silently let ANY quantity through.
+// po_item_id is an explicit FK that survives the blank code entirely.
+test("the PO ceiling rejects even when the GRN line's material_code is blank", async () => {
+  const db = makeDb();
+  seedPoAndReceipt(db);
+  // Simulate the real-world state directly rather than relying on
+  // seedPoAndReceipt's normally-populated fixture.
+  const gi = db.tables.grn_items.find((r) => r.id === 201);
+  gi.materialCode = "";
+  const piRoot = mount(piApp, db);
+
+  assert.equal((await post(piRoot, poDirectPI(100))).status, 200);
+
+  const res = await post(piRoot, {
+    grnId: "grn-2",
+    supplierId: "sup-2",
+    supplierName: "ADD WOOD",
+    purchaseOrderId: "po-2",
+    items: [
+      { materialCode: "", materialName: "WOOD-2 - Pine plank", qty: 100, unitPriceSen: 10000, grnItemId: 201 },
+    ],
+  });
+  assert.equal(res.status, 409, "a blank material_code must not let the ceiling silently pass");
+  assert.match((await res.json()).error, /remaining 0/);
 });
 
 test("two GRN-sourced invoices split 60/40 without double-counting the PO", async () => {

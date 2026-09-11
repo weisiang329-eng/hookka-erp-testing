@@ -24,6 +24,7 @@ import { requirePermission } from "../lib/rbac";
 import { customerScopeSql } from "../lib/customer-scope";
 import { computeInvoicePrintExtras } from "../lib/invoice-print-extras";
 import { invoiceLineUnitSen } from "../../lib/invoice-line-price";
+import { buildInvoiceDeathCnReleaseStatements } from "../lib/consignment-note-shared";
 // Rollup: S3 won the audit/journal-hash signature change (batched into the
 // invoice txn via buildAuditStatement + buildJournalEntryStatements). S4's
 // pre-S3 emitAudit/appendJournalEntries variants are superseded. S4's
@@ -3251,6 +3252,18 @@ app.put("/:id", async (c) => {
           })),
         );
       }
+
+      // T-006 R4 — a CN-sourced invoice (deliveryOrderId null, linked the
+      // other way via consignment_notes.convertedInvoiceId) got no release at
+      // all above: buildInvoiceDeathReleaseStatements bails out when
+      // deliveryOrderId is falsy. Without this the CN stayed at FULLY_SOLD
+      // forever, unable to convert again. No-ops (returns []) for a
+      // non-CN invoice.
+      statements.push(
+        ...(await buildInvoiceDeathCnReleaseStatements(c.var.DB, {
+          invoiceId: id,
+        })),
+      );
 
       // Hide the cancelled invoice's GL legs (original + reversal) so the void
       // doesn't show in the GL — the same effect applyLifecycle gives the

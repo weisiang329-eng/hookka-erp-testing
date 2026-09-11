@@ -389,6 +389,7 @@
     "org_id",
     "sent_date",
     "status",
+    "status_before_conversion",
     "total_value",
     "type",
     "vehicle_id",

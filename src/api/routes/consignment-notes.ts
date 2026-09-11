@@ -45,6 +45,7 @@ import { getOrgId, withOrgScope } from "../lib/tenant";
 import { loadCnValueMap, loadCnCustomerRefMap } from "../lib/cn-value";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { customerScopeSql } from "../lib/customer-scope";
 import { enqueueEmail } from "../lib/email-outbox";
 import {
@@ -1420,6 +1421,11 @@ app.post("/:id/return", async (c) => {
 app.post("/:id/convert-to-invoice", async (c) => {
   const denied = await requirePermission(c, "consignment-notes", "create");
   if (denied) return denied;
+  // T-006 R10 — a retried convert (network blip on the round-trip) must not
+  // mint a second invoice off the same CN. No-op when the client sends no
+  // Idempotency-Key.
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "consignment-notes", idemKey, async () => {
   try {
     const id = c.req.param("id");
     const body = (await c.req.json().catch(() => ({}))) as {
@@ -1724,6 +1730,7 @@ app.post("/:id/convert-to-invoice", async (c) => {
     console.error("[POST /api/consignment-notes/:id/convert-to-invoice] failed:", msg);
     return c.json({ success: false, error: msg || "Invalid request body" }, 400);
   }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -867,6 +867,29 @@ test("the PO ceiling rejects even when the GRN line's material_code is blank", a
   assert.match((await res.json()).error, /remaining 0/);
 });
 
+// T-006 R9 — a PI with no header grnId AND no header purchaseOrderId fell
+// through both branches that call checkPoRemaining. A line still naming its
+// own poId got INSERTed with that poId (so it counted against the PO on the
+// NEXT invoice), but this invoice itself was never checked against the
+// ceiling at all.
+test("a header with neither grnId nor purchaseOrderId still honours a line's own poId", async () => {
+  const db = makeDb();
+  seedPoAndReceipt(db);
+  const piRoot = mount(piApp, db);
+
+  assert.equal((await post(piRoot, poDirectPI(100))).status, 200);
+
+  const res = await post(piRoot, {
+    supplierId: "sup-2",
+    supplierName: "ADD WOOD",
+    items: [
+      { materialCode: "WOOD-2", materialName: "WOOD-2 - Pine plank", qty: 1, unitPriceSen: 10000, poId: "po-2" },
+    ],
+  });
+  assert.equal(res.status, 409, "a line-level-only poId must still hit the PO ceiling");
+  assert.match((await res.json()).error, /remaining 0/);
+});
+
 test("two GRN-sourced invoices split 60/40 without double-counting the PO", async () => {
   const db = makeDb();
   seedPoAndReceipt(db);

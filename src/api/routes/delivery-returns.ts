@@ -14,6 +14,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { customerScopeSql } from "../lib/customer-scope";
 import { getOrgId } from "../lib/tenant";
 import { reverseFGForDeliveryReturn } from "../lib/do-cost-cascade";
@@ -229,6 +230,10 @@ app.post("/", async (c) => {
   if (denied) return denied;
   await ensureDeliveryReturnTables(c.var.DB);
   const orgId = getOrgId(c);
+  // T-006 R10 — a retried create (network blip on the round-trip) must not
+  // raise a second return. No-op when the client sends no Idempotency-Key.
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "delivery-returns", idemKey, async () => {
   try {
     const body = await c.req.json();
     const doId = String(body.deliveryOrderId ?? "").trim();
@@ -266,6 +271,7 @@ app.post("/", async (c) => {
     console.error("[delivery-returns] POST failed:", err);
     return c.json({ success: false, error: "Failed to create delivery return" }, 400);
   }
+  });
 });
 
 // -- POST /:id/return-to-stock ----------------------------------------------

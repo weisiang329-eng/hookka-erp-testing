@@ -80,8 +80,8 @@ test("ONE ceiling serves both invoice paths (BUG-2026-08-07-003)", () => {
   const calls = SRC.match(/await checkPoRemaining\(db, poId, rows/g) ?? [];
   assert.equal(
     calls.length,
-    3,
-    "the GRN branch, the PO branch and the re-line path must share one ceiling",
+    4,
+    "the GRN branch, the PO branch, the line-only-poId branch (T-006 R9), and the re-line path must share one ceiling",
   );
   // The re-line path must EXCLUDE the invoice it is replacing, or an edit that
   // even lowers the quantity is measured against its own lines and rejected.

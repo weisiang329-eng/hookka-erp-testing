@@ -16,6 +16,7 @@ import { runSelfApply } from "../lib/self-apply";
 import { ensureUnitPricePrecision } from "../lib/unit-price-precision";
 import type { Env } from "../worker";
 import { requirePermission, requireFinance } from "../lib/rbac";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { emitAudit } from "../lib/audit";
 import { learnSupplierBindings } from "../lib/supplier-binding-learn";
 import { getOrgId } from "../lib/tenant";
@@ -1128,6 +1129,11 @@ app.post("/", async (c) => {
       400,
     );
   }
+  // T-006 R10 — a retried create (network blip on the round-trip) must not
+  // raise the same invoice twice. No-op when the client sends no
+  // Idempotency-Key.
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "purchase-invoices", idemKey, async () => {
   const body = await c.req.json().catch(() => ({})) as {
     purchaseOrderId?: string;
     grnId?: string;
@@ -1422,6 +1428,25 @@ app.post("/", async (c) => {
       // Same ceiling the GRN-sourced branch above applies — deliberately ONE
       // implementation. Two ceilings that can disagree is how a PO came to be
       // invoiceable twice for the same goods (BUG-2026-08-07-003).
+      const guard = await checkPoRemaining(db, poId, rows);
+      if (!guard.ok) {
+        return c.json({ success: false, error: guard.error }, 409);
+      }
+    }
+  } else if (normalizedItems && normalizedItems.ok && normalizedItems.rows.some((r) => r.poId)) {
+    // T-006 R9 — no body.grnId, no body.purchaseOrderId, but individual lines
+    // still name their own poId (e.g. a hand-built multi-PO invoice). The two
+    // branches above never fired for this shape, so the PO ceiling was never
+    // checked at all — the INSERT still stores r.poId regardless, so it was
+    // silently counted against the PO on the NEXT invoice's ceiling instead.
+    const byPo = new Map<string, typeof normalizedItems.rows>();
+    for (const r of normalizedItems.rows) {
+      if (!r.poId) continue; // no PO named on this line — nothing to check
+      const bucket = byPo.get(r.poId) ?? [];
+      bucket.push(r);
+      byPo.set(r.poId, bucket);
+    }
+    for (const [poId, rows] of byPo) {
       const guard = await checkPoRemaining(db, poId, rows);
       if (!guard.ok) {
         return c.json({ success: false, error: guard.error }, 409);
@@ -1799,6 +1824,7 @@ app.post("/", async (c) => {
   return c.json({
     success: true,
     data: created ? { ...rowToPI(created), items } : null,
+  });
   });
 });
 

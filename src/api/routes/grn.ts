@@ -25,6 +25,7 @@ import { runSelfApply } from "../lib/self-apply";
 import { ensureUnitPricePrecision } from "../lib/unit-price-precision";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { makeLedgerEntry } from "../../lib/costing";
 import { emitAudit } from "../lib/audit";
 import { learnSupplierBindings } from "../lib/supplier-binding-learn";
@@ -1388,6 +1389,11 @@ app.post("/", async (c) => {
   // Ensure arrival-pipeline columns exist before any INSERT
   await ensureGrnMigrations(c.var.DB);
 
+  // T-006 R10 — a retried create (network blip on the round-trip) must not
+  // post the same receipt twice. No-op when the client sends no
+  // Idempotency-Key.
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "grn", idemKey, async () => {
   try {
     const body = await c.req.json();
     const {
@@ -1900,6 +1906,7 @@ app.post("/", async (c) => {
     }
     return c.json({ success: false, error: msg || "Internal error creating GRN" }, 500);
   }
+  });
 });
 
 // GET /api/grn/:id — single GRN + items

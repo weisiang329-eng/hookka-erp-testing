@@ -24,6 +24,7 @@ import {
   loadPoValueMap,
 } from "../lib/do-value";
 import { requirePermission } from "../lib/rbac";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { customerScopeSql, salesOrderScopeSql, isCustomerScoped } from "../lib/customer-scope";
 import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
@@ -2022,6 +2023,10 @@ app.post("/", async (c) => {
   const denied = await requirePermission(c, "delivery-orders", "create");
   if (denied) return denied;
 
+  // T-006 R10 — a retried create (network blip on the round-trip) must not
+  // mint a second DO. No-op when the client sends no Idempotency-Key.
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "delivery-orders", idemKey, async () => {
   try {
     const body = await c.req.json();
     // The whole former inline body lives in createDeliveryOrderForPOs —
@@ -2038,6 +2043,7 @@ app.post("/", async (c) => {
     }
     return c.json({ success: false, error: msg || "Internal error creating delivery order" }, 500);
   }
+  });
 });
 
 // ---------------------------------------------------------------------------

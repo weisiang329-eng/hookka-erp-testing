@@ -29,6 +29,9 @@ import { useToast } from "@/components/ui/toast";
 import { getCurrentUser } from "@/lib/auth";
 import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
 import { workerCoversDept } from "@/lib/worker";
+import { sequenceBlockers, type SequenceCard, type SequenceBlocker } from "@/api/lib/sequence-lock";
+import { asSequenceLockRefusal, type SequenceLockRefusal } from "@/lib/sequence-unlock";
+import { SequenceUnlockDialog } from "@/components/sequence-unlock-dialog";
 import { fetchVariantsConfig } from "@/lib/kv-config";
 import { legPacksSeparately, type LegHeightOption } from "@/lib/leg-packing";
 import { jcMinutesTotal } from "@/lib/job-card-minutes";
@@ -2133,6 +2136,15 @@ export default function ProductionPage({
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [unsavedCount, setUnsavedCount] = useState(0);
   const [savingNow, setSavingNow] = useState(false);
+  // A save the sequence lock refused. Held so the operator gets the three
+  // choices instead of a toast that only says no — cancel, release this one,
+  // or complete the earlier step too. The drafts are kept verbatim so the
+  // retry re-sends exactly what was typed.
+  const [lockPrompt, setLockPrompt] = useState<{
+    refusal: SequenceLockRefusal;
+    drafts: Array<{ poId: string; jcId: string; patch: Record<string, unknown> }>;
+  } | null>(null);
+  const [lockBusy, setLockBusy] = useState(false);
   // True while network/5xx failures are kept + auto-retrying (BUG-2026-06-09).
   // Drives the red "retrying" banner so the operator sees it's working, not stuck.
   const [retryPending, setRetryPending] = useState(false);
@@ -2367,19 +2379,72 @@ export default function ProductionPage({
       });
       if (res.ok) {
         const body = (await res.json()) as {
-          results?: Array<{ poId: string; jobCardId: string; success: boolean; error?: string }>;
+          results?: Array<{
+            poId: string;
+            jobCardId: string;
+            success: boolean;
+            error?: string;
+            // Upstream sequence lock. Carried so the reverted cell can say
+            // WHICH department it is waiting for instead of a bare failure —
+            // the operator needs to know where to go, not that something broke.
+            code?: string;
+            blockedBy?: unknown;
+            canSelfUnlock?: boolean;
+          }>;
         };
-        const perJc = new Map<string, { success: boolean; error?: string }>();
+        const perJc = new Map<
+          string,
+          { success: boolean; error?: string; code?: string; blockedBy?: unknown; canSelfUnlock?: boolean }
+        >();
         for (const r of body.results ?? []) perJc.set(r.jobCardId, r);
         results = drafts.map((d) => {
           const r = perJc.get(d.jcId);
           return {
             draft: d,
             result: r
-              ? { success: r.success, error: r.error, attemptsUsed: 1 }
+              ? {
+                  success: r.success,
+                  // A locked cell is not a fault to retry — it is a step whose
+                  // turn has not come. Marking it permanent stops the retry
+                  // loop from hammering a gate that will not open until someone
+                  // finishes the upstream work.
+                  error:
+                    r.code === "UPSTREAM_INCOMPLETE"
+                      ? `Locked — ${r.error ?? "an earlier step is not finished"}`
+                      : r.error,
+                  attemptsUsed: 1,
+                }
               : { success: false, error: "no result in bulk response", attemptsUsed: 1 },
           };
         });
+        // Offer the way out, not just the refusal. Everything the lock stopped
+        // in THIS save is gathered into one dialog: the departments to finish
+        // are merged (two cards waiting on the same FRAMING must not ask
+        // twice), and `canSelfUnlock` is only true when the server said so for
+        // every one of them — a dialog offering a release the server will
+        // refuse is worse than no dialog.
+        const locked = drafts
+          .map((d) => ({ draft: d, r: perJc.get(d.jcId) }))
+          .filter((x) => x.r?.code === "UPSTREAM_INCOMPLETE");
+        if (locked.length > 0) {
+          const parsed = locked.map((x) => asSequenceLockRefusal(x.r)).filter(Boolean) as SequenceLockRefusal[];
+          const byId = new Map(parsed.flatMap((p) => p.blockedBy).map((b) => [b.id, b]));
+          if (byId.size > 0) {
+            setLockPrompt({
+              refusal: {
+                blockedBy: [...byId.values()],
+                blockedCards: locked.map((x) => x.draft.jcId),
+                canSelfUnlock: parsed.every((p) => p.canSelfUnlock),
+                message: parsed[0]?.message ?? "An earlier step must be completed first.",
+              },
+              drafts: locked.map((x) => ({
+                poId: x.draft.poId,
+                jcId: x.draft.jcId,
+                patch: x.draft.patch as unknown as Record<string, unknown>,
+              })),
+            });
+          }
+        }
         bulkOK = true;
       }
     } catch {
@@ -3319,6 +3384,30 @@ export default function ProductionPage({
   }, [filteredOrders, activeTab]);
 
 
+  // Which cards of the ACTIVE dept are still waiting on an earlier step.
+  //
+  // The same `sequenceBlockers` the server refuses with — imported, not
+  // re-implemented, so the padlock on screen and the 409 from the API can
+  // never disagree. It reads the BOM's own shape off the job cards (wipKey +
+  // branchKey + sequence); there is no table of departments to maintain, which
+  // is what the owner asked for: 「不可以写死的，应该是根据我的 BOM 的变化的」.
+  //
+  // Only the active dept's cards are evaluated — that is what the grid draws —
+  // and each is compared against its own PO's cards only.
+  const blockersByJc = useMemo<Map<string, SequenceBlocker[]>>(() => {
+    const out = new Map<string, SequenceBlocker[]>();
+    if (!activeTab || activeTab === "ALL") return out;
+    for (const o of filteredOrders) {
+      const cards = o.jobCards as unknown as SequenceCard[];
+      for (const jc of cards) {
+        if (jc.departmentCode !== activeTab) continue;
+        const blockers = sequenceBlockers(jc, cards);
+        if (blockers.length > 0) out.set(jc.id, blockers);
+      }
+    }
+    return out;
+  }, [filteredOrders, activeTab]);
+
   // Dept-view rows: one row per JobCard in the selected dept, flattened
   // across all production orders. Matches the "Production Sheet" columns
   // the user showed. Each row also carries the upstream (previous) dept's
@@ -3655,6 +3744,15 @@ export default function ProductionPage({
   const renderStatusCell = (row: DeptRow) => {
     const s = row.status;
     const cls = statusStyle[s] || "bg-[#F5F2EE] text-[#8A7F73]";
+    // A padlock BEFORE the click, not only a refusal after it. The operator
+    // who can see which cell is not ready never starts the edit, and the ones
+    // who do get the dialog. Finished cards never show it — the lock is about
+    // what may move next, not a permanent label.
+    const isDoneRow = s === "COMPLETED" || s === "TRANSFERRED";
+    const blockers = isDoneRow ? undefined : blockersByJc.get(row.jobCardId);
+    const waitingFor = blockers
+      ? [...new Set(blockers.map((b) => b.departmentCode))]
+      : [];
     return (
       <div className="relative w-full h-full min-h-[28px] group">
         <div
@@ -3662,6 +3760,14 @@ export default function ProductionPage({
         >
           {s || "—"}
         </div>
+        {waitingFor.length > 0 && (
+          <div
+            className="absolute top-0.5 right-0.5 rounded bg-[#FAEFCB] p-[1px] pointer-events-none"
+            title={`Waiting for ${waitingFor.join(", ")} to finish first.`}
+          >
+            <Lock className="h-2.5 w-2.5 text-[#9C6F1E]" />
+          </div>
+        )}
         <select
           value={s || ""}
           onChange={(e) => {
@@ -9711,7 +9817,87 @@ export default function ProductionPage({
 
       {/* PatchFailureModal removed 2026-05-12 — failures now surface as
           toast.error from flushDrafts. Cell auto-reverts on failure, so the
-          operator sees the value disappear + the toast at the same time. */}
+          operator sees the value disappear + the toast at the same time.
+
+          The sequence lock is the one refusal that gets a dialog instead: it is
+          not a fault, it is a step whose turn has not come, and there is
+          something the operator can do about it. */}
+      <SequenceUnlockDialog
+        refusal={lockPrompt?.refusal ?? null}
+        subject={
+          lockPrompt
+            ? `${lockPrompt.drafts.length} ${activeTab.replace(/_/g, " ")} card${lockPrompt.drafts.length === 1 ? "" : "s"}`
+            : undefined
+        }
+        busy={lockBusy}
+        onCancel={() => setLockPrompt(null)}
+        onChoose={async (choice) => {
+          if (!lockPrompt) return;
+          setLockBusy(true);
+          try {
+            // The blocking card can be in any department, so its PO is looked
+            // up across the loaded orders rather than in the current dept grid.
+            const poIdOfJc = new Map<string, string>();
+            for (const o of orders) {
+              for (const jc of o.jobCards) poIdOfJc.set(jc.id, o.id);
+            }
+            // "Complete the earlier step too" sends the BLOCKING cards FIRST.
+            // The order is the whole point: upstream completes before this one
+            // consumes, so the WIP produce lands before the consume and no
+            // negative row is created — the thing the lock exists to prevent,
+            // not one it should cause.
+            const upstream =
+              choice.action === "completeUpstream"
+                ? lockPrompt.refusal.blockedBy
+                    .filter((b) => poIdOfJc.has(b.id))
+                    .map((b) => ({
+                      poId: poIdOfJc.get(b.id) as string,
+                      jobCardId: b.id,
+                      status: "COMPLETED",
+                      completedDate: todayYmdMY(),
+                      unlock: { reason: choice.reason },
+                    }))
+                : [];
+            const targets = lockPrompt.drafts.map((d) => ({
+              poId: d.poId,
+              jobCardId: d.jcId,
+              ...d.patch,
+              unlock: { reason: choice.reason },
+            }));
+            const res = await fetch("/api/production-orders/bulk-patch", {
+              method: "POST",
+              headers: csrfHeaders(),
+              body: JSON.stringify({ patches: [...upstream, ...targets] }),
+              credentials: "include",
+            });
+            const j = (await res.json()) as {
+              results?: Array<{ success: boolean; error?: string }>;
+              error?: string;
+            };
+            const bad = (j.results || []).filter((x) => !x.success);
+            if (!res.ok) {
+              toast.error(`Unlock failed — ${j.error ?? `error ${res.status}`}.`);
+            } else if (bad.length > 0) {
+              toast.error(`${bad.length} still failed: ${bad[0].error ?? "unknown"}`);
+            } else {
+              toast.success(
+                choice.action === "completeUpstream"
+                  ? `Completed ${upstream.length} earlier step${upstream.length === 1 ? "" : "s"} and ${targets.length} card${targets.length === 1 ? "" : "s"}.`
+                  : `Unlocked and saved ${targets.length} card${targets.length === 1 ? "" : "s"}.`,
+              );
+            }
+            setLockPrompt(null);
+            // The upstream cards belong to other departments and other rows,
+            // so an optimistic patch here would leave half the grid stale.
+            // Refetch — it is one request and it is the only honest picture.
+            fetchOrders();
+          } catch (err) {
+            toast.error(`Unlock failed: ${err instanceof Error ? err.message : String(err)}`);
+          } finally {
+            setLockBusy(false);
+          }
+        }}
+      />
     </div>
   );
 }
